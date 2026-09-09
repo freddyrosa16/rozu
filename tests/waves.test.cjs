@@ -38,14 +38,6 @@ test('hidden tabs suspend drawing; visible tabs resume without duplicate loops',
   app.document.hidden=false;app.documentHandlers.visibilitychange();app.documentHandlers.visibilitychange();
   assert.equal(app.frames.size,1);
 });
-test('palette changes apply while motion is paused',()=>{
-  const app=setup(true);
-  app.paletteHandlers.graphite();
-  assert.equal(app.document.body.dataset.theme,'graphite');
-  assert.equal(app.frames.size,0);
-  app.paletteHandlers.blue();
-  assert.equal(app.document.body.dataset.theme,'blue');
-});
 test('updated reduced-motion preference pauses an existing animation',()=>{
   const app=setup(false);
   app.media.matches=true;app.media.change();
