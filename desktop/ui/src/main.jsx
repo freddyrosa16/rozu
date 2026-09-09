@@ -24,7 +24,7 @@ function IconButton({ label, children, ...props }) {
 }
 
 function Mark({ className = '' }) {
-  return <svg className={`rozu-mark ${className}`} viewBox="0 0 40 40" aria-hidden="true"><path d="M11 34V15C11 6 16 3 25 3h5v8h-5c-4 0-6 2-6 6v17z" fill="currentColor" /></svg>;
+  return <svg className={`rozu-mark ${className}`} viewBox="1097 221 365 365" fill="currentColor" stroke="none" aria-hidden="true"><path d="M1230 246C1301 228 1374 272 1380 327C1384 364 1369 404 1346 425C1337 433 1328 427 1329 417C1331 393 1318 366 1294 353C1270 340 1239 339 1203 337C1184 337 1189 319 1198 301C1206 280 1214 260 1230 246Z" /><path d="M1215 359C1245 348 1280 349 1300 367C1310 377 1295 385 1279 396C1240 426 1246 475 1267 510C1273 523 1277 536 1260 538C1191 543 1120 512 1117 459C1114 415 1152 374 1215 359Z" /><path d="M1390 380C1425 404 1446 446 1435 485C1423 534 1381 562 1337 548C1295 534 1266 493 1260 464C1255 447 1261 438 1270 441C1308 461 1329 453 1350 428C1367 410 1376 376 1390 380Z" /></svg>;
 }
 
 function DitherBackground() {
@@ -135,7 +135,7 @@ function App() {
   return <div className={`app ${theme} ${sidebar ? '' : 'sidebar-hidden'} ${resizingSidebar ? 'resizing-sidebar' : ''}`} style={{ '--sidebar-width': `${sidebarWidth}px` }}>
     <div className="sidebar-shell" inert={modal ? true : undefined}>
     <aside id="sidebar-content" className="sidebar" aria-label="Sidebar">
-      <div className="sidebar-brand"><span className="wordmark">rozu</span><IconButton label="Hide sidebar" onClick={() => setSidebar(false)}><PanelLeft /></IconButton></div>
+      <div className="sidebar-brand"><span className="brand-symbol" role="img" aria-label="Rozu"><Mark /></span><IconButton label="Hide sidebar" onClick={() => setSidebar(false)}><PanelLeft /></IconButton></div>
       <nav aria-label="Main navigation">
         {pages.map(({ id, label, icon: Icon, shortcut }) => <button key={id} className={`nav-row ${page === id ? 'selected' : ''}`} onClick={() => navigate(id)} aria-current={page === id ? 'page' : undefined}><Icon /><span>{label}</span>{shortcut && <kbd>{shortcut}</kbd>}</button>)}
       </nav>
@@ -145,7 +145,7 @@ function App() {
         <IconButton label={`Remove project ${item.name}`} onClick={() => removeProject(item.id)}><X /></IconButton>
       </div>)}
       <p className="no-tasks">{projects.length ? 'No tasks yet' : 'No projects yet'}</p>
-      <div className="sidebar-bottom"><button className={`nav-row ${page === 'settings' ? 'selected' : ''}`} onClick={() => setPage('settings')}><Settings /><span>Settings</span></button><span className="version">v0.1.2 · UI preview</span></div>
+      <div className="sidebar-bottom"><button className={`nav-row ${page === 'settings' ? 'selected' : ''}`} onClick={() => setPage('settings')}><Settings /><span>Settings</span></button><span className="version">v0.1.3 · UI preview</span></div>
     </aside>
     <div className="sidebar-resizer" role="separator" tabIndex={0} aria-label="Resize sidebar" aria-orientation="vertical" aria-controls="sidebar-content" aria-valuemin={180} aria-valuemax={sidebarLimit} aria-valuenow={Math.round(sidebarWidth)} title="Drag to resize sidebar. Double-click to reset. Move the window using its top bar."
       onPointerDown={event => {
@@ -197,7 +197,7 @@ function App() {
             {settingTab === 'General' && <><h2>General</h2><div className="setting-row"><div><h3>Appearance</h3><p>Choose how Rozu looks on this screen.</p></div><div className="segmented" aria-label="Appearance"><button aria-pressed={theme === 'dark'} onClick={() => setTheme('dark')}><Moon />Dark</button><button aria-pressed={theme === 'light'} onClick={() => setTheme('light')}><Sun />Light</button></div></div><div className="setting-row"><div><h3>Workspace</h3><p>No folder is connected.</p></div><span className="subtle-label">Preview</span></div><p className="settings-footnote">Appearance changes last until you close the app.</p></>}
             {settingTab === 'Models' && <><h2>Models</h2><p className="section-description">No model providers are connected.</p><div className="empty-inline"><SlidersHorizontal /><div><h3>Your models will live here</h3><p>Provider connections and credentials are not part of this preview.</p></div></div><button className="secondary-button" disabled>Connect a provider</button></>}
             {settingTab === 'Shortcuts' && <><h2>Keyboard shortcuts</h2>{[['Search', '⌘ K'], ['New task', '⌘ N'], ['Settings', '⌘ ,'], ['Close dialog', 'Esc']].map(([label, key]) => <div className="setting-row" key={label}><span>{label}</span><kbd>{key}</kbd></div>)}</>}
-            {settingTab === 'About' && <><Mark className="about-mark" /><h2>rozu</h2><p className="section-description">A little curiosity. A lot of possibility.</p><div className="setting-row"><span>Version</span><span>0.1.2</span></div><div className="setting-row"><span>Build</span><span>Interface preview</span></div><div className="setting-row"><span>License</span><span>MIT</span></div><p className="settings-footnote">Frontend only. No AI calls, command execution, connected projects, or background jobs.</p></>}
+            {settingTab === 'About' && <><Mark className="about-mark" /><h2>rozu</h2><p className="section-description">A little curiosity. A lot of possibility.</p><div className="setting-row"><span>Version</span><span>0.1.3</span></div><div className="setting-row"><span>Build</span><span>Interface preview</span></div><div className="setting-row"><span>License</span><span>MIT</span></div><p className="settings-footnote">Frontend only. No AI calls, command execution, connected projects, or background jobs.</p></>}
           </div></div></div>}
         </main>
 
