@@ -27,3 +27,5 @@ This is the project's landing page. Agent functionality and the backend are stil
 ## License
 
 [MIT](LICENSE)
+
+The background uses a full-field WebGL shader at the display refresh rate, with a 30fps Canvas 2D fallback when WebGL is unavailable. Fluid waves travel through every part of the canvas; there are no fixed left-side or text-area masks. The gray pixels stay subdued so the text remains readable.
