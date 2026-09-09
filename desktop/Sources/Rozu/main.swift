@@ -4,7 +4,7 @@ import OSLog
 
 /// A local presentation shell. No agent, server, native bridge, or remote content.
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNavigationDelegate, WKUIDelegate {
     private var window: NSWindow!
     private var webView: WKWebView!
     private var uiDirectory: URL?
@@ -34,12 +34,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
         window.titlebarSeparatorStyle = .none
+        window.delegate = self
         window.backgroundColor = NSColor(calibratedWhite: 0.067, alpha: 1)
         window.minSize = NSSize(width: 900, height: 620)
         window.contentView = webView
         window.isReleasedWhenClosed = false
         window.center()
         window.makeKeyAndOrderFront(nil)
+        alignWindowControls()
         NSApp.activate(ignoringOtherApps: true)
 
         guard let resources = Bundle.main.resourceURL else { return }
@@ -56,6 +58,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         webView.loadFileURL(index, allowingReadAccessTo: directory)
         logger.notice("Loading bundled interface")
     }
+
+    // Keep the system buttons in their native title-bar container, centered in
+    // the same 56-point header as the frontend controls.
+    private func alignWindowControls() {
+        guard !window.styleMask.contains(.fullScreen),
+              let close = window.standardWindowButton(.closeButton),
+              let titlebar = close.superview else { return }
+        var frame = titlebar.frame
+        frame.origin.y += frame.height - 56
+        frame.size.height = 56
+        titlebar.frame = frame
+        for (index, kind) in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton].enumerated() {
+            guard let button = window.standardWindowButton(kind) else { continue }
+            button.setFrameOrigin(NSPoint(x: 16 + CGFloat(index) * 20,
+                                          y: (56 - button.frame.height) / 2))
+        }
+    }
+
+    func windowDidResize(_ notification: Notification) { alignWindowControls() }
+    func windowDidExitFullScreen(_ notification: Notification) { alignWindowControls() }
 
     private func showMissingUI() {
         let alert = NSAlert()
