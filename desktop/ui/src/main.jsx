@@ -137,9 +137,9 @@ function App() {
     <div ref={handleRef} className="sidebar-resizer" inert={modal ? true : undefined} role="separator" tabIndex={0} aria-label="Resize sidebar" aria-orientation="vertical" aria-controls="sidebar-content" aria-valuemin={0} aria-valuemax={sidebarLimit} aria-valuenow={sidebar ? Math.round(sidebarWidth) : 0} title={sidebar ? 'Drag to resize. Keep dragging left to hide the sidebar.' : 'Drag right to show the sidebar.'} {...dividerEvents} />
 
     <section className="workspace" inert={modal ? true : undefined}>
-      {page === 'task' && <DitherBackground />}
       <header className="toolbar"><div>{!sidebar && <IconButton label="Show sidebar" onClick={() => toggleSidebar(true)}><PanelLeft /></IconButton>}<span className="task-tab"><MessageSquare />{pageTitle}</span><IconButton label="New task tab" onClick={() => { setPage('task'); promptRef.current?.focus(); }}><Plus /></IconButton></div><IconButton label={panel ? 'Hide workspace panel' : 'Show workspace panel'} aria-pressed={panel} onClick={() => setPanel(!panel)}><PanelRight /></IconButton></header>
       <div className="workspace-body">
+        {page === 'task' && <DitherBackground />}
         <main className={`main ${page === 'task' ? 'task-main' : ''}`}>
           {page === 'task' && <div className="new-task">
             <Mark />
