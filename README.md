@@ -6,9 +6,9 @@ An open-source AI agent project. Working name: **Rozu**.
 
 ## Website
 
-A lightweight, single-screen introduction to Rozu. The original blue/graphite, ordered-dither animation is inspired by the visual texture on the right of Capy's signup page. No Capy artwork, branding, or source code is included.
+A lightweight, single-screen introduction to Rozu. The original graphite, ordered-dither animation is inspired by the visual texture on the right of Capy's signup page. No Capy artwork, branding, or source code is included.
 
-The page uses plain HTML, CSS, and JavaScript, with no build step, dependencies, analytics, or external font requests. The footer palette selector switches between blue and graphite. Motion can be paused and starts paused for visitors who prefer reduced motion. It also pauses when the page is hidden.
+The page uses plain HTML, CSS, and JavaScript, with no build step, dependencies, analytics, or external font requests. Motion can be paused and starts paused for visitors who prefer reduced motion. It also pauses when the page is hidden.
 
 Run locally:
 
