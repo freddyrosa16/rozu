@@ -20,7 +20,7 @@ To build the native shell against an already-built `desktop/ui/dist` without rei
 ./script/package_macos.sh
 ```
 
-An Apple Silicon build produces `dist/Rozu-0.1.0-macos-arm64.zip` and a matching `.sha256` file. The script labels the archive using the actual compiled architecture. This preview is **not Apple-notarized** and has no Developer ID signature. macOS may block a downloaded copy; a normal public distribution needs a Developer ID certificate and Apple notarization. No script changes Gatekeeper settings or removes quarantine. Build from source for local development.
+An Apple Silicon build produces `dist/Rozu-0.1.1-macos-arm64.zip` and a matching `.sha256` file. The script labels the archive using the actual compiled architecture. This preview is **not Apple-notarized** and has no Developer ID signature. macOS may block a downloaded copy; a normal public distribution needs a Developer ID certificate and Apple notarization. No script changes Gatekeeper settings or removes quarantine. Build from source for local development.
 
 ## Boundaries
 
