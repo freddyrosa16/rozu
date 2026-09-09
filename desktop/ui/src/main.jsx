@@ -8,11 +8,7 @@ import {
 } from './icons';
 import { startWaves } from './waves';
 import './styles.css';
-
-const SIDEBAR_MIN = 240;
-const SIDEBAR_SNAP = 48;
-const sidebarDefault = () => Math.min(306, Math.max(SIDEBAR_MIN, window.innerWidth * .2));
-const sidebarMaximum = () => Math.max(SIDEBAR_MIN, Math.min(520, window.innerWidth - 440));
+import { useSidebar } from './use-sidebar';
 
 const PREVIEW = 'Interface preview — no tasks will run.';
 const pages = [
@@ -40,36 +36,7 @@ function DitherBackground() {
 
 function App() {
   const [page, setPage] = useState('task');
-  const [sidebar, setSidebar] = useState(true);
-  const [sidebarWidth, setSidebarWidth] = useState(sidebarDefault);
-  const [sidebarLimit, setSidebarLimit] = useState(sidebarMaximum);
-  const [resizingSidebar, setResizingSidebar] = useState(false);
-  const sidebarDrag = useRef(null);
-  const resizeSidebar = width => setSidebarWidth(Math.max(SIDEBAR_MIN, Math.min(sidebarLimit, width)));
-  const moveSidebar = event => {
-    const drag = sidebarDrag.current;
-    if (drag?.pointer !== event.pointerId) return;
-    const distance = event.clientX - drag.x;
-    const raw = drag.width + distance;
-    // Hold a readable width before snapping shut. Separate thresholds prevent
-    // flicker around the snap point, including when reversing the same gesture.
-    const closeAt = drag.startedOpen ? SIDEBAR_MIN - SIDEBAR_SNAP : SIDEBAR_SNAP / 2;
-    const openAt = drag.startedOpen ? SIDEBAR_MIN - SIDEBAR_SNAP / 2 : SIDEBAR_SNAP;
-    if (drag.open && raw < closeAt) drag.open = false;
-    else if (!drag.open && raw >= openAt) drag.open = true;
-    setSidebar(drag.open);
-    if (drag.open) resizeSidebar(drag.startedOpen ? raw : SIDEBAR_MIN + raw - SIDEBAR_SNAP);
-  };
-  const finishSidebarResize = () => { sidebarDrag.current = null; setResizingSidebar(false); };
-  useEffect(() => {
-    const fit = () => {
-      const limit = sidebarMaximum();
-      setSidebarLimit(limit);
-      setSidebarWidth(width => Math.max(SIDEBAR_MIN, Math.min(width, limit)));
-    };
-    window.addEventListener('resize', fit);
-    return () => window.removeEventListener('resize', fit);
-  }, []);
+  const { rootRef, handleRef, sidebar, sidebarWidth, sidebarLimit, resizingSidebar, toggleSidebar, dividerEvents } = useSidebar();
   const [panel, setPanel] = useState(false);
   const [panelTab, setPanelTab] = useState('Files');
   const [modal, setModal] = useState(null);
@@ -151,10 +118,10 @@ function App() {
 
   const pageTitle = page === 'task' ? 'New task' : page === 'pullrequests' ? 'Pull requests' : page.charAt(0).toUpperCase() + page.slice(1);
 
-  return <div className={`app ${theme} ${sidebar ? '' : 'sidebar-hidden'} ${resizingSidebar ? 'resizing-sidebar' : ''}`} style={{ '--sidebar-width': `${sidebarWidth}px` }}>
-    <div className="sidebar-shell" inert={modal ? true : undefined}>
+  return <div ref={rootRef} className={`app ${theme} ${sidebar ? '' : 'sidebar-hidden'} ${resizingSidebar ? 'resizing-sidebar' : ''}`}>
+    <div className="sidebar-shell" inert={modal || !sidebar ? true : undefined} aria-hidden={!sidebar}>
     <aside id="sidebar-content" className="sidebar" aria-label="Sidebar">
-      <div className="sidebar-brand"><span className="brand-symbol" role="img" aria-label="Rozu"><Mark /></span><IconButton label="Hide sidebar" onClick={() => setSidebar(false)}><PanelLeft /></IconButton></div>
+      <div className="sidebar-brand"><span className="brand-symbol" role="img" aria-label="Rozu"><Mark /></span><IconButton label="Hide sidebar" onClick={() => toggleSidebar(false)}><PanelLeft /></IconButton></div>
       <nav aria-label="Main navigation">
         {pages.map(({ id, label, icon: Icon, shortcut }) => <button key={id} className={`nav-row ${page === id ? 'selected' : ''}`} onClick={() => navigate(id)} aria-current={page === id ? 'page' : undefined}><Icon /><span>{label}</span>{shortcut && <kbd>{shortcut}</kbd>}</button>)}
       </nav>
@@ -167,32 +134,11 @@ function App() {
       <div className="sidebar-bottom"><button className={`nav-row ${page === 'settings' ? 'selected' : ''}`} onClick={() => setPage('settings')}><Settings /><span>Settings</span></button><span className="version">v0.1.3 · UI preview</span></div>
     </aside>
     </div>
-    <div className="sidebar-resizer" inert={modal ? true : undefined} role="separator" tabIndex={0} aria-label="Resize sidebar" aria-orientation="vertical" aria-controls="sidebar-content" aria-valuemin={0} aria-valuemax={sidebarLimit} aria-valuenow={sidebar ? Math.round(sidebarWidth) : 0} aria-valuetext={sidebar ? `${Math.round(sidebarWidth)} pixels. Drag farther left to hide.` : 'Sidebar hidden. Drag right to show.'} title={sidebar ? 'Drag to resize. Keep dragging left to hide the sidebar.' : 'Drag right to show the sidebar.'}
-      onPointerDown={event => {
-        if (event.button !== 0) return;
-        event.preventDefault(); event.currentTarget.focus();
-        event.currentTarget.setPointerCapture(event.pointerId);
-        sidebarDrag.current = { pointer: event.pointerId, x: event.clientX, width: sidebar ? sidebarWidth : 0, startedOpen: sidebar, open: sidebar };
-        setResizingSidebar(true);
-      }}
-      onPointerMove={moveSidebar}
-      onPointerUp={event => { if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId); finishSidebarResize(); }}
-      onPointerCancel={finishSidebarResize} onLostPointerCapture={finishSidebarResize}
-      onDoubleClick={() => { setSidebar(true); resizeSidebar(sidebarDefault()); }}
-      onKeyDown={event => {
-        if (!['ArrowLeft', 'ArrowRight', 'Home', 'End', 'Enter'].includes(event.key)) return;
-        event.preventDefault();
-        if (event.key === 'Enter') { setSidebar(!sidebar); return; }
-        if (event.key === 'ArrowLeft' && sidebarWidth <= SIDEBAR_MIN) { setSidebar(false); return; }
-        if (event.key === 'ArrowLeft' && !sidebar) return;
-        if (event.key === 'ArrowRight' && !sidebar) { setSidebar(true); resizeSidebar(SIDEBAR_MIN); return; }
-        setSidebar(true);
-        resizeSidebar(({ ArrowLeft: sidebarWidth - 10, ArrowRight: sidebarWidth + 10, Home: SIDEBAR_MIN, End: sidebarLimit })[event.key]);
-      }} />
+    <div ref={handleRef} className="sidebar-resizer" inert={modal ? true : undefined} role="separator" tabIndex={0} aria-label="Resize sidebar" aria-orientation="vertical" aria-controls="sidebar-content" aria-valuemin={0} aria-valuemax={sidebarLimit} aria-valuenow={sidebar ? Math.round(sidebarWidth) : 0} title={sidebar ? 'Drag to resize. Keep dragging left to hide the sidebar.' : 'Drag right to show the sidebar.'} {...dividerEvents} />
 
     <section className="workspace" inert={modal ? true : undefined}>
       {page === 'task' && <DitherBackground />}
-      <header className="toolbar"><div>{!sidebar && <IconButton label="Show sidebar" onClick={() => setSidebar(true)}><PanelLeft /></IconButton>}<span className="task-tab"><MessageSquare />{pageTitle}</span><IconButton label="New task tab" onClick={() => { setPage('task'); promptRef.current?.focus(); }}><Plus /></IconButton></div><IconButton label={panel ? 'Hide workspace panel' : 'Show workspace panel'} aria-pressed={panel} onClick={() => setPanel(!panel)}><PanelRight /></IconButton></header>
+      <header className="toolbar"><div>{!sidebar && <IconButton label="Show sidebar" onClick={() => toggleSidebar(true)}><PanelLeft /></IconButton>}<span className="task-tab"><MessageSquare />{pageTitle}</span><IconButton label="New task tab" onClick={() => { setPage('task'); promptRef.current?.focus(); }}><Plus /></IconButton></div><IconButton label={panel ? 'Hide workspace panel' : 'Show workspace panel'} aria-pressed={panel} onClick={() => setPanel(!panel)}><PanelRight /></IconButton></header>
       <div className="workspace-body">
         <main className={`main ${page === 'task' ? 'task-main' : ''}`}>
           {page === 'task' && <div className="new-task">
