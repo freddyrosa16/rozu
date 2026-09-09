@@ -28,7 +28,7 @@ Open `http://localhost:8080`. GitHub Pages publishes the repository root on `mai
 - `index.html`: text, links, and accessible structure
 - `styles.css`: layout, typography, colors, and responsive styles
 - `waves.js`: decorative canvas and motion preferences
-- `assets/brand/dried-rose/`: selected logo, light/dark SVGs, and identity reference
+- `assets/brand/dried-rose/`: SVG rose and lettering used by the website and this README
 
 The website does not run an agent or connect to a backend.
 
