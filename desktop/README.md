@@ -36,6 +36,6 @@ The frontend lives in `desktop/ui`; the Swift shell lives in `desktop/Sources/Ro
 
 For frontend development in a browser, run `pnpm install --frozen-lockfile` and `pnpm dev` inside `desktop/ui`. Only Vite development mode permits its local hot-reload connection; packaged builds retain `connect-src 'none'`.
 
-Drag the vertical line beside the sidebar to resize the sidebar and main area; arrow keys also adjust it, and double-click resets its width. Drag the native top bar to move the Mac window. Use its normal edges to resize the entire window. Selected icons use [Lucide Animated](https://lucide-animated.com/) components, animated on button hover or keyboard focus; Reduce Motion uses static icons.
+Drag the vertical line beside the sidebar to resize the sidebar and main area. It stops at a readable 240px width; dragging farther left snaps it closed. Drag right from the left edge to reopen it. Arrow keys adjust the divider (Left at minimum hides it, Right while hidden restores it), Enter toggles it, and double-click resets its width. Drag the native top bar to move the Mac window. Use its normal edges to resize the entire window. Selected icons use [Lucide Animated](https://lucide-animated.com/) components, animated on button hover or keyboard focus; Reduce Motion uses static icons.
 
 Projects can be added by name and removed from the session-only preview list. File entries can be added by name in Add context, then removed from the composer or Files panel. These are UI labels only; no file contents or folders are read, changed, or deleted.

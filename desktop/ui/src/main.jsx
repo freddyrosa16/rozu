@@ -9,6 +9,11 @@ import {
 import { startWaves } from './waves';
 import './styles.css';
 
+const SIDEBAR_MIN = 240;
+const SIDEBAR_SNAP = 48;
+const sidebarDefault = () => Math.min(306, Math.max(SIDEBAR_MIN, window.innerWidth * .2));
+const sidebarMaximum = () => Math.max(SIDEBAR_MIN, Math.min(520, window.innerWidth - 440));
+
 const PREVIEW = 'Interface preview — no tasks will run.';
 const pages = [
   { id: 'task', label: 'New task', icon: Plus },
@@ -36,17 +41,31 @@ function DitherBackground() {
 function App() {
   const [page, setPage] = useState('task');
   const [sidebar, setSidebar] = useState(true);
-  const [sidebarWidth, setSidebarWidth] = useState(() => Math.min(306, Math.max(232, window.innerWidth * .2)));
-  const [sidebarLimit, setSidebarLimit] = useState(() => Math.max(180, Math.min(520, window.innerWidth - 440)));
+  const [sidebarWidth, setSidebarWidth] = useState(sidebarDefault);
+  const [sidebarLimit, setSidebarLimit] = useState(sidebarMaximum);
   const [resizingSidebar, setResizingSidebar] = useState(false);
   const sidebarDrag = useRef(null);
-  const resizeSidebar = width => setSidebarWidth(Math.max(180, Math.min(sidebarLimit, width)));
+  const resizeSidebar = width => setSidebarWidth(Math.max(SIDEBAR_MIN, Math.min(sidebarLimit, width)));
+  const moveSidebar = event => {
+    const drag = sidebarDrag.current;
+    if (drag?.pointer !== event.pointerId) return;
+    const distance = event.clientX - drag.x;
+    const raw = drag.width + distance;
+    // Hold a readable width before snapping shut. Separate thresholds prevent
+    // flicker around the snap point, including when reversing the same gesture.
+    const closeAt = drag.startedOpen ? SIDEBAR_MIN - SIDEBAR_SNAP : SIDEBAR_SNAP / 2;
+    const openAt = drag.startedOpen ? SIDEBAR_MIN - SIDEBAR_SNAP / 2 : SIDEBAR_SNAP;
+    if (drag.open && raw < closeAt) drag.open = false;
+    else if (!drag.open && raw >= openAt) drag.open = true;
+    setSidebar(drag.open);
+    if (drag.open) resizeSidebar(drag.startedOpen ? raw : SIDEBAR_MIN + raw - SIDEBAR_SNAP);
+  };
   const finishSidebarResize = () => { sidebarDrag.current = null; setResizingSidebar(false); };
   useEffect(() => {
     const fit = () => {
-      const limit = Math.max(180, Math.min(520, window.innerWidth - 440));
+      const limit = sidebarMaximum();
       setSidebarLimit(limit);
-      setSidebarWidth(width => Math.min(width, limit));
+      setSidebarWidth(width => Math.max(SIDEBAR_MIN, Math.min(width, limit)));
     };
     window.addEventListener('resize', fit);
     return () => window.removeEventListener('resize', fit);
@@ -147,20 +166,29 @@ function App() {
       <p className="no-tasks">{projects.length ? 'No tasks yet' : 'No projects yet'}</p>
       <div className="sidebar-bottom"><button className={`nav-row ${page === 'settings' ? 'selected' : ''}`} onClick={() => setPage('settings')}><Settings /><span>Settings</span></button><span className="version">v0.1.3 · UI preview</span></div>
     </aside>
-    <div className="sidebar-resizer" role="separator" tabIndex={0} aria-label="Resize sidebar" aria-orientation="vertical" aria-controls="sidebar-content" aria-valuemin={180} aria-valuemax={sidebarLimit} aria-valuenow={Math.round(sidebarWidth)} title="Drag to resize sidebar. Double-click to reset. Move the window using its top bar."
+    </div>
+    <div className="sidebar-resizer" inert={modal ? true : undefined} role="separator" tabIndex={0} aria-label="Resize sidebar" aria-orientation="vertical" aria-controls="sidebar-content" aria-valuemin={0} aria-valuemax={sidebarLimit} aria-valuenow={sidebar ? Math.round(sidebarWidth) : 0} aria-valuetext={sidebar ? `${Math.round(sidebarWidth)} pixels. Drag farther left to hide.` : 'Sidebar hidden. Drag right to show.'} title={sidebar ? 'Drag to resize. Keep dragging left to hide the sidebar.' : 'Drag right to show the sidebar.'}
       onPointerDown={event => {
         if (event.button !== 0) return;
         event.preventDefault(); event.currentTarget.focus();
         event.currentTarget.setPointerCapture(event.pointerId);
-        sidebarDrag.current = { pointer: event.pointerId, x: event.clientX, width: sidebarWidth };
+        sidebarDrag.current = { pointer: event.pointerId, x: event.clientX, width: sidebar ? sidebarWidth : 0, startedOpen: sidebar, open: sidebar };
         setResizingSidebar(true);
       }}
-      onPointerMove={event => { const drag = sidebarDrag.current; if (drag?.pointer === event.pointerId) resizeSidebar(drag.width + event.clientX - drag.x); }}
+      onPointerMove={moveSidebar}
       onPointerUp={event => { if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId); finishSidebarResize(); }}
       onPointerCancel={finishSidebarResize} onLostPointerCapture={finishSidebarResize}
-      onDoubleClick={() => resizeSidebar(Math.min(306, Math.max(232, window.innerWidth * .2)))}
-      onKeyDown={event => { const widths = { ArrowLeft: sidebarWidth - 10, ArrowRight: sidebarWidth + 10, Home: 180, End: sidebarLimit }; if (event.key in widths) { event.preventDefault(); resizeSidebar(widths[event.key]); } }} />
-    </div>
+      onDoubleClick={() => { setSidebar(true); resizeSidebar(sidebarDefault()); }}
+      onKeyDown={event => {
+        if (!['ArrowLeft', 'ArrowRight', 'Home', 'End', 'Enter'].includes(event.key)) return;
+        event.preventDefault();
+        if (event.key === 'Enter') { setSidebar(!sidebar); return; }
+        if (event.key === 'ArrowLeft' && sidebarWidth <= SIDEBAR_MIN) { setSidebar(false); return; }
+        if (event.key === 'ArrowLeft' && !sidebar) return;
+        if (event.key === 'ArrowRight' && !sidebar) { setSidebar(true); resizeSidebar(SIDEBAR_MIN); return; }
+        setSidebar(true);
+        resizeSidebar(({ ArrowLeft: sidebarWidth - 10, ArrowRight: sidebarWidth + 10, Home: SIDEBAR_MIN, End: sidebarLimit })[event.key]);
+      }} />
 
     <section className="workspace" inert={modal ? true : undefined}>
       {page === 'task' && <DitherBackground />}
