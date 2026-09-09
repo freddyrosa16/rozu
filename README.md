@@ -1,8 +1,8 @@
 # Rozu
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="assets/brand/dried-rose/logo-light.svg">
-  <img src="assets/brand/dried-rose/logo-graphite.svg" alt="Rozu dried rose and custom wordmark" width="280" height="78">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/freddyrosa16/rozu/main/assets/brand/dried-rose/logo-light.svg">
+  <img src="https://raw.githubusercontent.com/freddyrosa16/rozu/main/assets/brand/dried-rose/logo-graphite.svg" alt="Rozu dried rose and custom wordmark" width="280" height="78">
 </picture>
 
 An open-source AI agent project. Working name: **Rozu**.
