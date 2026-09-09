@@ -97,8 +97,10 @@ export function startWaves(canvas) {
       resize(width, height) {
         // One backing pixel per ~2 CSS pixels keeps the fine dither grid and GPU load predictable.
         const scale = Math.max(2, width / 1200, height / 900);
-        canvas.width = Math.max(1, Math.round(width / scale));
-        canvas.height = Math.max(1, Math.round(height / scale));
+        const nextWidth = Math.max(1, Math.round(width / scale));
+        const nextHeight = Math.max(1, Math.round(height / scale));
+        if (canvas.width !== nextWidth) canvas.width = nextWidth;
+        if (canvas.height !== nextHeight) canvas.height = nextHeight;
         gl.viewport(0, 0, canvas.width, canvas.height);
         gl.uniform2f(size, canvas.width, canvas.height);
       },
@@ -115,9 +117,13 @@ export function startWaves(canvas) {
       minFrameMs: 1000 / 30,
       resize(width, height) {
         const scale = Math.max(3, width / 320, height / 450);
-        canvas.width = Math.max(1, Math.round(width / scale));
-        canvas.height = Math.max(1, Math.round(height / scale));
-        pixels = ctx.createImageData(canvas.width, canvas.height);
+        const nextWidth = Math.max(1, Math.round(width / scale));
+        const nextHeight = Math.max(1, Math.round(height / scale));
+        if (!pixels || canvas.width !== nextWidth || canvas.height !== nextHeight) {
+          canvas.width = nextWidth;
+          canvas.height = nextHeight;
+          pixels = ctx.createImageData(canvas.width, canvas.height);
+        }
       },
       draw(seconds) {
         const {width, height} = canvas;

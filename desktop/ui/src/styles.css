@@ -42,7 +42,11 @@
 .sidebar-resizer:focus-visible::after{background:var(--muted)}
 
 /* Only completed snaps ease; active resizing stays directly under the pointer. */
-.app[data-sidebar-motion=settle]>.sidebar-shell{transition:width 180ms cubic-bezier(.2,.8,.2,1)}
-.app[data-sidebar-motion=settle]>.sidebar-resizer{transition:left 180ms cubic-bezier(.2,.8,.2,1)}
+.app[data-sidebar-motion=settle]>.sidebar-shell{transition:width 240ms cubic-bezier(.22,1,.36,1)}
+.app[data-sidebar-motion=settle]>.sidebar-resizer{transition:left 240ms cubic-bezier(.22,1,.36,1)}
 .app[data-sidebar-motion=direct]>.sidebar-shell,.app[data-sidebar-motion=direct]>.sidebar-resizer{transition:none}
 .sidebar-hidden>.sidebar-shell{pointer-events:none}
+
+/* A fixed drawing surface avoids reallocating the WebGL canvas every drag frame.
+   The workspace clips it, so the waves keep moving without stretching. */
+.dither-background{left:auto;right:0;width:100vw;max-width:none}
