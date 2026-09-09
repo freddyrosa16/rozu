@@ -1,14 +1,122 @@
 import AppKit
 import WebKit
 import OSLog
+import CoreFoundation
 
-/// A local presentation shell. No agent, server, native bridge, or remote content.
+/// A native hit region that moves the whole window without resizing the sidebar.
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate {
+private final class WindowDragStrip: NSView {
+    private let logger = Logger(subsystem: "com.rozu.desktop", category: "WindowChrome")
+    private var dragStart: (windowOrigin: NSPoint, screenPoint: NSPoint)?
+    private var hasPushedCursor = false
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        if !isHidden { addCursorRect(bounds, cursor: dragStart == nil ? .openHand : .closedHand) }
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        guard let window, !isHidden, event.type == .leftMouseDown else { return }
+        cancelDrag()
+        let origin = window.frame.origin
+        dragStart = (origin, window.convertPoint(toScreen: event.locationInWindow))
+        logger.notice("Window drag began at x=\(origin.x, privacy: .public), y=\(origin.y, privacy: .public)")
+        NSCursor.closedHand.push()
+        hasPushedCursor = true
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard let window, let dragStart, !isHidden else { return }
+        // Convert each delivered event through the current window position.
+        // This preserves screen-space deltas as the window moves under the pointer.
+        let point = window.convertPoint(toScreen: event.locationInWindow)
+        window.setFrameOrigin(NSPoint(
+            x: dragStart.windowOrigin.x + point.x - dragStart.screenPoint.x,
+            y: dragStart.windowOrigin.y + point.y - dragStart.screenPoint.y
+        ))
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        if dragStart != nil, let origin = window?.frame.origin {
+            logger.notice("Window drag ended at x=\(origin.x, privacy: .public), y=\(origin.y, privacy: .public)")
+        }
+        cancelDrag()
+    }
+
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        if newWindow == nil { cancelDrag() }
+        super.viewWillMove(toWindow: newWindow)
+    }
+
+    func cancelDrag() {
+        dragStart = nil
+        if hasPushedCursor {
+            NSCursor.pop()
+            hasPushedCursor = false
+        }
+        window?.invalidateCursorRects(for: self)
+    }
+}
+
+@MainActor
+private final class WindowContentView: NSView {
+    private let webView: WKWebView
+    private let dragStrip = WindowDragStrip(frame: .zero)
+
+    init(webView: WKWebView, frame: NSRect) {
+        self.webView = webView
+        super.init(frame: frame)
+        addSubview(webView)
+        addSubview(dragStrip, positioned: .above, relativeTo: webView)
+        needsLayout = true
+    }
+
+    required init?(coder: NSCoder) { return nil }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        needsLayout = true
+    }
+
+    override func layout() {
+        super.layout()
+        webView.frame = bounds
+        let divider = min(max(bounds.width * 0.20, 232), 306)
+        dragStrip.frame = NSRect(x: divider - 4, y: bounds.minY, width: 8, height: bounds.height)
+        window?.invalidateCursorRects(for: dragStrip)
+    }
+
+    func setDragStripVisible(_ visible: Bool) {
+        if !visible { dragStrip.cancelDrag() }
+        dragStrip.isHidden = !visible
+        window?.invalidateCursorRects(for: dragStrip)
+    }
+}
+
+/// The controller retains this proxy, which holds the application delegate weakly.
+@MainActor
+private final class WindowChromeMessageHandler: NSObject, WKScriptMessageHandler {
+    weak var owner: AppDelegate?
+
+    init(owner: AppDelegate) { self.owner = owner }
+
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        owner?.receiveWindowChromeState(message)
+    }
+}
+
+/// A local presentation shell. Its sole UI bridge controls drag-strip visibility.
+/// No agent, server, native execution, or remote content is implemented.
+@MainActor
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNavigationDelegate, WKUIDelegate {
     private var window: NSWindow!
     private var webView: WKWebView!
+    private var contentView: WindowContentView!
     private var uiDirectory: URL?
     private let logger = Logger(subsystem: "com.rozu.desktop", category: "WebView")
+    private let windowLogger = Logger(subsystem: "com.rozu.desktop", category: "WindowChrome")
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
@@ -19,6 +127,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         configuration.websiteDataStore = .nonPersistent()
         configuration.preferences.javaScriptCanOpenWindowsAutomatically = false
         configuration.mediaTypesRequiringUserActionForPlayback = .all
+        configuration.userContentController.add(WindowChromeMessageHandler(owner: self), name: "windowChrome")
         webView = WKWebView(frame: .zero, configuration: configuration)
         webView.navigationDelegate = self
         webView.uiDelegate = self
@@ -31,10 +140,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             backing: .buffered, defer: false
         )
         window.title = "Rozu"
+        window.delegate = self
         window.titleVisibility = .hidden
         window.backgroundColor = NSColor(calibratedWhite: 0.067, alpha: 1)
         window.minSize = NSSize(width: 900, height: 620)
-        window.contentView = webView
+        contentView = WindowContentView(webView: webView, frame: NSRect(x: 0, y: 0, width: 1240, height: 820))
+        window.contentView = contentView
         window.isReleasedWhenClosed = false
         window.center()
         window.makeKeyAndOrderFront(nil)
@@ -53,6 +164,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         // Loading local resources must not depend on a persistent WebKit rule store.
         webView.loadFileURL(index, allowingReadAccessTo: directory)
         logger.notice("Loading bundled interface")
+    }
+
+    fileprivate func receiveWindowChromeState(_ message: WKScriptMessage) {
+        guard message.name == "windowChrome",
+              message.webView === webView,
+              message.frameInfo.isMainFrame,
+              let url = message.frameInfo.request.url,
+              url.isFileURL,
+              let uiDirectory,
+              url.resolvingSymlinksInPath().standardizedFileURL.path.hasPrefix(uiDirectory.path + "/"),
+              let body = message.body as? [String: Any],
+              Set(body.keys) == Set(["sidebarVisible", "modalOpen"]),
+              let sidebarVisible = body["sidebarVisible"] as? NSNumber,
+              let modalOpen = body["modalOpen"] as? NSNumber,
+              CFGetTypeID(sidebarVisible) == CFBooleanGetTypeID(),
+              CFGetTypeID(modalOpen) == CFBooleanGetTypeID() else {
+            logger.error("Rejected invalid window chrome state")
+            return
+        }
+        contentView.setDragStripVisible(sidebarVisible.boolValue && !modalOpen.boolValue)
     }
 
     private func showMissingUI() {
@@ -108,6 +239,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+
+    func windowDidMove(_ notification: Notification) {
+        guard let movedWindow = notification.object as? NSWindow, movedWindow === window else { return }
+        let origin = movedWindow.frame.origin
+        windowLogger.notice("Window moved to x=\(origin.x, privacy: .public), y=\(origin.y, privacy: .public)")
+    }
+
+    func windowDidEndLiveResize(_ notification: Notification) {
+        guard let resizedWindow = notification.object as? NSWindow, resizedWindow === window else { return }
+        let frame = resizedWindow.frame
+        windowLogger.notice("Window resize ended at x=\(frame.origin.x, privacy: .public), y=\(frame.origin.y, privacy: .public), width=\(frame.width, privacy: .public), height=\(frame.height, privacy: .public)")
+    }
 
     func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool { true }
 

@@ -6,13 +6,13 @@ An open-source AI agent project. Working name: **Rozu**.
 
 ## Desktop preview
 
-[Download for Mac](https://github.com/freddyrosa16/rozu/releases/download/v0.1.1-preview/Rozu-0.1.1-macos-arm64.zip) · macOS 13+ · Apple silicon
+[Download for Mac](https://github.com/freddyrosa16/rozu/releases/download/v0.1.2-preview/Rozu-0.1.2-macos-arm64.zip) · macOS 13+ · Apple silicon
 
 A frontend-only desktop interface with Rozu's gray dithered background, a Codex-style workspace, and layout details from the supplied Capy desktop reference. It includes a composer, sidebar navigation, empty task/review panels, and settings. It makes no AI calls, executes no commands, and connects to no database. Backend-dependent actions are disabled.
 
 The React frontend is separate from the Mac window shell. Freddy can build the backend in Python or another language. See [backend handoff](desktop/BACKEND-HANDOFF.md) and [desktop build instructions](desktop/README.md).
 
-Run the Mac app from source with `./script/build_and_run.sh`. This preview is ad-hoc signed, not Apple-notarized; see the [release notes](https://github.com/freddyrosa16/rozu/releases/tag/v0.1.1-preview) for installation details.
+Run the Mac app from source with `./script/build_and_run.sh`. This preview is ad-hoc signed, not Apple-notarized; see the [release notes](https://github.com/freddyrosa16/rozu/releases/tag/v0.1.2-preview) for installation details.
 
 ## Website
 
