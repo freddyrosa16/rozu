@@ -2,8 +2,6 @@
 (() => {
   'use strict';
   const canvas = document.getElementById('waves');
-  const button = document.getElementById('motion-toggle');
-  const label = document.getElementById('motion-label');
   const media = matchMedia('(prefers-reduced-motion: reduce)');
   const bayer = [0,48,12,60,3,51,15,63,32,16,44,28,35,19,47,31,8,56,4,52,11,59,7,55,40,24,36,20,43,27,39,23,2,50,14,62,1,49,13,61,34,18,46,30,33,17,45,29,10,58,6,54,9,57,5,53,42,26,38,22,41,25,37,21];
 
@@ -157,7 +155,6 @@
       // The page and navigation remain usable if a graphics driver cannot initialize.
       renderer = null;
     }
-    button.hidden = !renderer;
   }
   let paused = media.matches;
   let visible = true;
@@ -182,9 +179,6 @@
     frame = 0;
     last = null;
     lastDraw = -Infinity;
-    button.classList.toggle('is-paused', paused);
-    label.textContent = paused ? 'Play animation' : 'Pause animation';
-    button.setAttribute('aria-label', label.textContent);
     if (!paused && !document.hidden && visible && !contextLost && renderer) frame = requestAnimationFrame(tick);
   }
   function resize() {
@@ -193,7 +187,6 @@
     renderer.resize(bounds.width, bounds.height);
     renderer.draw(elapsed / 1000);
   }
-  button.addEventListener('click', () => {paused = !paused; sync();});
   media.addEventListener('change', () => {paused = media.matches; sync();});
   document.addEventListener('visibilitychange', sync);
   canvas.addEventListener('webglcontextlost', event => {event.preventDefault(); contextLost = true; sync();});
