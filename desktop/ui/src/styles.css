@@ -65,14 +65,11 @@
 .sidebar-brand{height:56px;flex-shrink:0;justify-content:flex-start;gap:14px;padding:0 16px 0 82px;align-items:center}
 .sidebar-brand>.icon-button{order:-1;width:32px;height:32px}
 .sidebar-brand .brand-symbol .rozu-mark{width:28px;height:28px}
-/* The tab and composer share a centered column, including with the inspector open. */
-.toolbar{height:56px;margin-right:8px;padding:0;border-inline:1px solid transparent}
+/* Anchor the task tab to the animated panel's edge, independent of its contents. */
+.toolbar{height:56px;margin-right:8px;padding:0;border:0}
 .task-tab{height:32px;padding:0 12px;min-width:170px;border-radius:8px}
-.toolbar>div{width:calc(100% - 104px);max-width:780px;margin-inline:auto}
+.toolbar>div{flex:1;min-width:0;width:auto;max-width:none;margin:0}
 .toolbar>.icon-button{position:absolute;right:8px}
-.workspace:has(.inspector) .toolbar{padding-right:clamp(260px,35%,300px)}
-.sidebar-hidden .toolbar{margin-left:8px}
+/* Leave room for native controls when the sidebar is completely hidden. */
+.sidebar-hidden .toolbar{margin-left:8px;padding-left:132px}
 .sidebar-hidden .toolbar>div>.icon-button:first-child{position:fixed;left:92px;top:12px;width:32px;height:32px}
-@media(max-width:1100px){.toolbar>div{width:calc(100% - 65px)}.workspace:has(.inspector) .toolbar{padding-right:260px}.workspace:has(.inspector) .toolbar>div{width:calc(100% - 36px)}}
-@media(max-width:700px){.toolbar>div{width:calc(100% - 34px)}.workspace:has(.inspector) .toolbar{padding-right:0}}
-@media(max-width:480px){.toolbar>div{width:calc(100% - 40px)}}

@@ -24,7 +24,7 @@ An Apple Silicon build produces `dist/Rozu-0.1.3-macos-arm64.zip` and a matching
 
 ## Boundaries
 
-- The window uses standard macOS traffic lights and Edit/Window menus. A transparent title bar lets the frontend extend to the top edge, with the sidebar toggle beside the traffic lights and no separate title strip. The task tab follows the prompt column when the sidebar or workspace panel changes.
+- The window uses standard macOS traffic lights and Edit/Window menus. A transparent title bar lets the frontend extend to the top edge, with the sidebar toggle beside the traffic lights and no separate title strip. The task tab aligns with the animated panel’s left edge as the sidebar resizes. When the sidebar is hidden, the tab leaves room for the native window controls.
 - The app loads its bundled `Contents/Resources/UI` interface into the web view. Navigation outside that directory is denied. The bundled content security policy permits local resources only and sets `connect-src 'none'`.
 - App Sandbox is enabled. WebKit needs the network-client entitlement for its renderer subprocesses to start, even with bundled files; the UI's CSP still denies connections, and navigation is limited to the bundle. There are no backend calls or remote UI resources. No user-selected file access entitlement is granted. File selection and media capture are denied.
 - Website data is nonpersistent. There are no JavaScript message handlers, native execution bridges, remote services, or backend dependencies.
