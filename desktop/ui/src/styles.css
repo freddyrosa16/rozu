@@ -50,3 +50,13 @@
 /* A fixed drawing surface avoids reallocating the WebGL canvas every drag frame.
    The workspace clips it, so the waves keep moving without stretching. */
 .dither-background{left:auto;right:0;width:100vw;max-width:none}
+
+/* An inset workspace provides the divider's edge without a full-height rule. */
+.workspace{background:var(--sidebar)}
+.sidebar{border-right:0}
+.toolbar{border-bottom:0;padding-left:8px}
+.task-tab{border-radius:10px}
+.workspace-body{isolation:isolate;overflow:hidden;margin:0 8px 8px 0;border:1px solid var(--border);border-radius:18px;background:var(--bg)}
+.workspace-body>.dither-background{inset:0 0 auto auto;height:100%;z-index:-1}
+.sidebar-resizer::after{top:calc(50% - 28px);bottom:auto;height:56px;width:2px;left:3px;border-radius:2px}
+.sidebar-hidden .workspace-body{margin-left:8px}
