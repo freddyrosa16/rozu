@@ -20,14 +20,14 @@ To build the native shell against an already-built `desktop/ui/dist` without rei
 ./script/package_macos.sh
 ```
 
-An Apple Silicon build produces `dist/Rozu-0.1.1-macos-arm64.zip` and a matching `.sha256` file. The script labels the archive using the actual compiled architecture. This preview is **not Apple-notarized** and has no Developer ID signature. macOS may block a downloaded copy; a normal public distribution needs a Developer ID certificate and Apple notarization. No script changes Gatekeeper settings or removes quarantine. Build from source for local development.
+An Apple Silicon build produces `dist/Rozu-0.1.2-macos-arm64.zip` and a matching `.sha256` file. The script labels the archive using the actual compiled architecture. This preview is **not Apple-notarized** and has no Developer ID signature. macOS may block a downloaded copy; a normal public distribution needs a Developer ID certificate and Apple notarization. No script changes Gatekeeper settings or removes quarantine. Build from source for local development.
 
 ## Boundaries
 
 - The window uses standard macOS traffic lights and Edit/Window menus.
 - The app loads its bundled `Contents/Resources/UI` interface into the web view. Navigation outside that directory is denied. The bundled content security policy permits local resources only and sets `connect-src 'none'`.
 - App Sandbox is enabled. WebKit needs the network-client entitlement for its renderer subprocesses to start, even with bundled files; the UI's CSP still denies connections, and navigation is limited to the bundle. There are no backend calls or remote UI resources. No user-selected file access entitlement is granted. File selection and media capture are denied.
-- Website data is nonpersistent. There are no JavaScript message handlers, native execution bridges, remote services, or backend dependencies.
+- Website data is nonpersistent. One restricted `windowChrome` message reports sidebar/dialog visibility so the native divider can move the app window. It accepts only two booleans from the bundled main frame. There are no native execution bridges, remote services, or backend dependencies.
 - The repository's MIT license applies to the desktop source.
 
 Future Python or other backend services, model integrations, and databases are separate work. This wrapper does not implement them or choose their architecture; the current UI keeps its preview state in memory.
@@ -35,3 +35,5 @@ Future Python or other backend services, model integrations, and databases are s
 The frontend lives in `desktop/ui`; the Swift shell lives in `desktop/Sources/Rozu/main.swift`. The frontend's production build must use relative asset URLs so it loads from the bundled file URL.
 
 For frontend development in a browser, run `pnpm install --frozen-lockfile` and `pnpm dev` inside `desktop/ui`. Only Vite development mode permits its local hot-reload connection; packaged builds retain `connect-src 'none'`.
+
+Drag the vertical line beside the sidebar to move the entire Mac window. Use the normal window edges to resize it. Selected icons use [Lucide Animated](https://lucide-animated.com/) components, animated on button hover or keyboard focus; Reduce Motion uses static icons.

@@ -8,7 +8,7 @@ case "$ARCHITECTURE" in
   arm64|x86_64) ;;
   *) echo "Unexpected app architecture: $ARCHITECTURE" >&2; exit 1 ;;
 esac
-ARCHIVE="$ROOT_DIR/dist/Rozu-0.1.1-macos-$ARCHITECTURE.zip"
+ARCHIVE="$ROOT_DIR/dist/Rozu-0.1.2-macos-$ARCHITECTURE.zip"
 /usr/bin/codesign --verify --deep --strict "$APP_BUNDLE"
 /usr/bin/ditto -c -k --sequesterRsrc --keepParent "$APP_BUNDLE" "$ARCHIVE"
 /usr/bin/unzip -t -q "$ARCHIVE"

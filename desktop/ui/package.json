@@ -1,6 +1,6 @@
 {
   "name": "rozu-desktop-ui",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "type": "module",
   "scripts": {
@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "lucide-react": "^1.43.0",
+    "motion": "^13.2.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8"
   },
