@@ -43,7 +43,7 @@ cp -R "$ROOT_DIR/desktop/ui/dist/." "$CONTENTS/Resources/UI/"
 cp "$ROOT_DIR/LICENSE" "$CONTENTS/Resources/LICENSE"
 cp "$ROOT_DIR/desktop/THIRD-PARTY-NOTICES.md" "$CONTENTS/Resources/THIRD-PARTY-NOTICES.md"
 swift "$ROOT_DIR/script/generate_icon.swift" "$STAGING/Rozu.iconset"
-/usr/bin/iconutil -c icns "$STAGING/Rozu.iconset" -o "$CONTENTS/Resources/Rozu.icns"
+/usr/bin/iconutil -c icns "$STAGING/Rozu.iconset" -o "$CONTENTS/Resources/RozuBloom.icns"
 cat > "$CONTENTS/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -53,9 +53,9 @@ cat > "$CONTENTS/Info.plist" <<'PLIST'
   <key>CFBundleName</key><string>Rozu</string>
   <key>CFBundleDisplayName</key><string>Rozu</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>0.1.2</string>
-  <key>CFBundleVersion</key><string>3</string>
-  <key>CFBundleIconFile</key><string>Rozu</string>
+  <key>CFBundleShortVersionString</key><string>0.1.3</string>
+  <key>CFBundleVersion</key><string>4</string>
+  <key>CFBundleIconFile</key><string>RozuBloom</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>NSPrincipalClass</key><string>NSApplication</string>
   <key>NSHighResolutionCapable</key><true/>

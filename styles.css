@@ -26,3 +26,5 @@ h1 span{display:block}
 @media(max-width:600px){.page{padding:24px}.header{gap:12px}.repo-link{font-size:14px;gap:6px}.repo-link svg{width:20px;height:20px}.wordmark{font-size:28px}main{min-height:510px;padding:80px 0}h1{font-size:clamp(40px,10.3vw,60px);letter-spacing:-.045em;line-height:1.08;margin-bottom:25px}h1 span+span{margin-top:5px}.intro p{font-size:17px;line-height:1.55;max-width:300px}.intro p br{display:none}.intro p br::after{content:' '}.cta{font-size:16px;min-height:54px;padding:13px 20px;margin-top:28px}}
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{scroll-behavior:auto!important;transition:none!important}}
 .intro .download-meta{font-size:13px;line-height:1.5;letter-spacing:0;margin-top:14px;color:var(--muted)}.download-meta a{text-decoration:underline;text-underline-offset:3px}.download-meta a:hover{color:var(--text)}
+
+.wordmark{display:inline-flex;align-items:center}.brand-mark{display:block;width:44px;height:44px}@media(max-width:600px){.brand-mark{width:36px;height:36px}}
