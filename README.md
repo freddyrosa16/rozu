@@ -1,5 +1,10 @@
 # Rozu
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/brand/dried-rose/rose-light.svg">
+  <img src="assets/brand/dried-rose/rose-graphite.svg" alt="Rozu dried rose logo" width="96" height="96">
+</picture>
+
 An open-source AI agent project. Working name: **Rozu**.
 
 [Visit the landing page](https://freddyrosa16.github.io/rozu/)
@@ -23,6 +28,7 @@ Open `http://localhost:8080`. GitHub Pages publishes the repository root on `mai
 - `index.html`: text, links, and accessible structure
 - `styles.css`: layout, typography, colors, and responsive styles
 - `waves.js`: decorative canvas and motion preferences
+- `assets/brand/dried-rose/`: selected logo, light/dark SVGs, and identity reference
 
 The website does not run an agent or connect to a backend.
 
