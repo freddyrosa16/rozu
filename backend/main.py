@@ -14,6 +14,7 @@ def main():
     # Handles command line argument
     parser = argparse.ArgumentParser(description="Rozu AI Agent Bot")
     parser.add_argument("user_prompt", type=str, help="User prompt")
+    parser.add_argument("--verbose", action="store_true", help="Enable verbose output")
     args = parser.parse_args()
 
     # Creating a client
@@ -23,14 +24,13 @@ def main():
     )
 
     # Get a response from the model
+    messages = [
+        {"role": "user", "content": args.user_prompt},
+    ]
+
     response = client.chat.completions.create(
         model="openrouter/free",
-        messages=[
-            {
-                "role": "user",
-                "content": args.user_prompt,
-            }
-        ],
+        messages=messages,
     )
     print(f'Prompt tokens: {response.usage.prompt_tokens}')
     print(f'Response tokens: {response.usage.completion_tokens}')
