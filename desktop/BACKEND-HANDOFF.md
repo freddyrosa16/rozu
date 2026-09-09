@@ -30,4 +30,4 @@ The preview's content security policy sets `connect-src 'none'`, and the Mac she
 
 The one-line website download points to the packaged Mac UI preview on GitHub Releases. The website itself remains a static GitHub Pages site; it is not an API server.
 
-The existing `windowChrome` message is only a presentation detail: two booleans tell the Mac shell whether its window-drag strip should be visible. It does not run commands, read files, connect providers, or supply a backend transport.
+Sidebar resizing and project/file-entry management use session-only React state. File entries contain names only. Removing projects or entries never deletes filesystem data. The native top bar handles moving the window; there is no native message bridge.

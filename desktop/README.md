@@ -27,7 +27,7 @@ An Apple Silicon build produces `dist/Rozu-0.1.2-macos-arm64.zip` and a matching
 - The window uses standard macOS traffic lights and Edit/Window menus.
 - The app loads its bundled `Contents/Resources/UI` interface into the web view. Navigation outside that directory is denied. The bundled content security policy permits local resources only and sets `connect-src 'none'`.
 - App Sandbox is enabled. WebKit needs the network-client entitlement for its renderer subprocesses to start, even with bundled files; the UI's CSP still denies connections, and navigation is limited to the bundle. There are no backend calls or remote UI resources. No user-selected file access entitlement is granted. File selection and media capture are denied.
-- Website data is nonpersistent. One restricted `windowChrome` message reports sidebar/dialog visibility so the native divider can move the app window. It accepts only two booleans from the bundled main frame. There are no native execution bridges, remote services, or backend dependencies.
+- Website data is nonpersistent. There are no JavaScript message handlers, native execution bridges, remote services, or backend dependencies.
 - The repository's MIT license applies to the desktop source.
 
 Future Python or other backend services, model integrations, and databases are separate work. This wrapper does not implement them or choose their architecture; the current UI keeps its preview state in memory.
@@ -36,4 +36,6 @@ The frontend lives in `desktop/ui`; the Swift shell lives in `desktop/Sources/Ro
 
 For frontend development in a browser, run `pnpm install --frozen-lockfile` and `pnpm dev` inside `desktop/ui`. Only Vite development mode permits its local hot-reload connection; packaged builds retain `connect-src 'none'`.
 
-Drag the vertical line beside the sidebar to move the entire Mac window. Use the normal window edges to resize it. Selected icons use [Lucide Animated](https://lucide-animated.com/) components, animated on button hover or keyboard focus; Reduce Motion uses static icons.
+Drag the vertical line beside the sidebar to resize the sidebar and main area; arrow keys also adjust it, and double-click resets its width. Drag the native top bar to move the Mac window. Use its normal edges to resize the entire window. Selected icons use [Lucide Animated](https://lucide-animated.com/) components, animated on button hover or keyboard focus; Reduce Motion uses static icons.
+
+Projects can be added by name and removed from the session-only preview list. File entries can be added by name in Add context, then removed from the composer or Files panel. These are UI labels only; no file contents or folders are read, changed, or deleted.
