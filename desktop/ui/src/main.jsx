@@ -36,6 +36,9 @@ function DitherBackground() {
 function App() {
   const [page, setPage] = useState('task');
   const [sidebar, setSidebar] = useState(true);
+  const [sidebarWidth, setSidebarWidth] = useState(() => Math.min(306, Math.max(232, window.innerWidth * .2)));
+  const [sidebarLimit, setSidebarLimit] = useState(() => Math.max(180, Math.min(420, window.innerWidth - 480)));
+  const [resizingSidebar, setResizingSidebar] = useState(false);
   const [panel, setPanel] = useState(false);
   const [panelTab, setPanelTab] = useState('Files');
   const [modal, setModal] = useState(null);
@@ -46,6 +49,19 @@ function App() {
   const promptRef = useRef(null);
   const openerRef = useRef(null);
   const dialogRef = useRef(null);
+  const sidebarDrag = useRef(null);
+
+  const resizeSidebar = (width) => setSidebarWidth(Math.max(180, Math.min(sidebarLimit, width)));
+  const finishSidebarResize = () => { sidebarDrag.current = null; setResizingSidebar(false); };
+  useEffect(() => {
+    function fitSidebar() {
+      const limit = Math.max(180, Math.min(420, window.innerWidth - 480));
+      setSidebarLimit(limit);
+      setSidebarWidth(width => Math.min(width, limit));
+    }
+    window.addEventListener('resize', fitSidebar);
+    return () => window.removeEventListener('resize', fitSidebar);
+  }, []);
 
   // All state is deliberately in memory. There is no API, storage, or native bridge.
   const openModal = (name) => { openerRef.current = document.activeElement; setModal(name); };
@@ -84,8 +100,9 @@ function App() {
 
   const pageTitle = page === 'task' ? 'New task' : page === 'pullrequests' ? 'Pull requests' : page.charAt(0).toUpperCase() + page.slice(1);
 
-  return <div className={`app ${theme} ${sidebar ? '' : 'sidebar-hidden'}`}>
-    <aside className="sidebar" aria-label="Sidebar" inert={modal ? true : undefined}>
+  return <div className={`app ${theme} ${sidebar ? '' : 'sidebar-hidden'} ${resizingSidebar ? 'resizing-sidebar' : ''}`} style={{ '--sidebar-width': `${sidebarWidth}px` }}>
+    <div className="sidebar-shell" inert={modal ? true : undefined}>
+    <aside id="sidebar-content" className="sidebar" aria-label="Sidebar">
       <div className="sidebar-brand"><span className="wordmark">rozu</span><IconButton label="Hide sidebar" onClick={() => setSidebar(false)}><PanelLeft /></IconButton></div>
       <nav aria-label="Main navigation">
         {pages.map(({ id, label, icon: Icon, shortcut }) => <button key={id} className={`nav-row ${page === id ? 'selected' : ''}`} onClick={() => navigate(id)} aria-current={page === id ? 'page' : undefined}><Icon /><span>{label}</span>{shortcut && <kbd>{shortcut}</kbd>}</button>)}
@@ -93,8 +110,35 @@ function App() {
       <div className="project-heading"><span>Projects</span><IconButton label="Add project — preview" onClick={() => openModal('projects')}><Plus /></IconButton></div>
       <button className={`nav-row project ${page === 'task' ? 'selected' : ''}`} onClick={() => setPage('task')}><Folder /><span>rozu</span></button>
       <p className="no-tasks">No tasks yet</p>
-      <div className="sidebar-bottom"><button className={`nav-row ${page === 'settings' ? 'selected' : ''}`} onClick={() => setPage('settings')}><Settings /><span>Settings</span></button><span className="version">v0.1.0 · UI preview</span></div>
+      <div className="sidebar-bottom"><button className={`nav-row ${page === 'settings' ? 'selected' : ''}`} onClick={() => setPage('settings')}><Settings /><span>Settings</span></button><span className="version">v0.1.1 · UI preview</span></div>
     </aside>
+    <div className="sidebar-resizer" role="separator" tabIndex={0}
+      aria-label="Resize sidebar" aria-orientation="vertical" aria-controls="sidebar-content"
+      aria-valuemin={180} aria-valuemax={sidebarLimit} aria-valuenow={Math.round(sidebarWidth)}
+      title="Drag to resize sidebar. Double-click to reset."
+      onPointerDown={event => {
+        if (event.button !== 0) return;
+        event.preventDefault();
+        event.currentTarget.focus();
+        event.currentTarget.setPointerCapture(event.pointerId);
+        sidebarDrag.current = { pointer: event.pointerId, x: event.clientX, width: sidebarWidth };
+        setResizingSidebar(true);
+      }}
+      onPointerMove={event => {
+        const drag = sidebarDrag.current;
+        if (drag?.pointer === event.pointerId) resizeSidebar(drag.width + event.clientX - drag.x);
+      }}
+      onPointerUp={event => {
+        if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+        finishSidebarResize();
+      }}
+      onPointerCancel={finishSidebarResize} onLostPointerCapture={finishSidebarResize}
+      onDoubleClick={() => resizeSidebar(Math.min(306, Math.max(232, window.innerWidth * .2)))}
+      onKeyDown={event => {
+        const widths = { ArrowLeft: sidebarWidth - 10, ArrowRight: sidebarWidth + 10, Home: 180, End: sidebarLimit };
+        if (event.key in widths) { event.preventDefault(); resizeSidebar(widths[event.key]); }
+      }} />
+    </div>
 
     <section className="workspace" inert={modal ? true : undefined}>
       {page === 'task' && <DitherBackground />}
@@ -104,12 +148,20 @@ function App() {
           {page === 'task' && <div className="new-task">
             <Mark />
             <h1>What should we build?</h1>
-            <button className="project-picker" onClick={() => openModal('projects')}><Folder /><span>rozu</span><ChevronDown /></button>
             <div className="composer">
               <textarea ref={promptRef} aria-label="Task prompt" placeholder="Ask Rozu to build something…" value={draft} onChange={event => setDraft(event.target.value)} spellCheck={false} />
-              <div className="composer-tools"><IconButton label="Attachments — preview" onClick={() => openModal('attachments')}><Plus /></IconButton><span className="separator" /><button className="model-picker" onClick={() => openModal('models')}>No model connected<ChevronDown /></button><button className="send" disabled aria-label="Send unavailable in interface preview" title="No tasks will run in this interface preview"><ArrowUp /></button></div>
+              <div className="composer-tools">
+                <div className="composer-options">
+                  <IconButton label="Attachments — preview" onClick={() => openModal('attachments')}><Plus /></IconButton>
+                  <span className="separator" />
+                  <button className="model-picker" onClick={() => openModal('models')}>No model connected<ChevronDown /></button>
+                  <button className="context-picker" aria-label="Project: rozu" onClick={() => openModal('projects')}><Folder /><span>rozu</span><ChevronDown /></button>
+                  <button className="context-picker" onClick={() => openModal('environment')}><Monitor />Local<ChevronDown /></button>
+                  <span className="branch-context" aria-label="Branch: main"><GitBranch />main</span>
+                </div>
+                <button className="send" disabled aria-label="Send unavailable in interface preview" title="No tasks will run in this interface preview"><ArrowUp /></button>
+              </div>
             </div>
-            <div className="composer-meta"><button onClick={() => openModal('environment')}><Monitor />Local<ChevronDown /></button><span><GitBranch />main</span></div>
             <p className="preview-note">{PREVIEW}</p>
           </div>}
 
@@ -122,7 +174,7 @@ function App() {
             {settingTab === 'General' && <><h2>General</h2><div className="setting-row"><div><h3>Appearance</h3><p>Choose how Rozu looks on this screen.</p></div><div className="segmented" aria-label="Appearance"><button aria-pressed={theme === 'dark'} onClick={() => setTheme('dark')}><Moon />Dark</button><button aria-pressed={theme === 'light'} onClick={() => setTheme('light')}><Sun />Light</button></div></div><div className="setting-row"><div><h3>Workspace</h3><p>No folder is connected.</p></div><span className="subtle-label">Preview</span></div><p className="settings-footnote">Appearance changes last until you close the app.</p></>}
             {settingTab === 'Models' && <><h2>Models</h2><p className="section-description">No model providers are connected.</p><div className="empty-inline"><SlidersHorizontal /><div><h3>Your models will live here</h3><p>Provider connections and credentials are not part of this preview.</p></div></div><button className="secondary-button" disabled>Connect a provider</button></>}
             {settingTab === 'Shortcuts' && <><h2>Keyboard shortcuts</h2>{[['Search', '⌘ K'], ['New task', '⌘ N'], ['Settings', '⌘ ,'], ['Close dialog', 'Esc']].map(([label, key]) => <div className="setting-row" key={label}><span>{label}</span><kbd>{key}</kbd></div>)}</>}
-            {settingTab === 'About' && <><Mark className="about-mark" /><h2>rozu</h2><p className="section-description">A little curiosity. A lot of possibility.</p><div className="setting-row"><span>Version</span><span>0.1.0</span></div><div className="setting-row"><span>Build</span><span>Interface preview</span></div><div className="setting-row"><span>License</span><span>MIT</span></div><p className="settings-footnote">Frontend only. No AI calls, command execution, connected projects, or background jobs.</p></>}
+            {settingTab === 'About' && <><Mark className="about-mark" /><h2>rozu</h2><p className="section-description">A little curiosity. A lot of possibility.</p><div className="setting-row"><span>Version</span><span>0.1.1</span></div><div className="setting-row"><span>Build</span><span>Interface preview</span></div><div className="setting-row"><span>License</span><span>MIT</span></div><p className="settings-footnote">Frontend only. No AI calls, command execution, connected projects, or background jobs.</p></>}
           </div></div></div>}
         </main>
 
