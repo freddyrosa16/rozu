@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0b0d10">
+  <meta name="description" content="Rozu is an open-source AI agent in the making. Built with curiosity. Shared with everyone.">
+  <title>Rozu — Built with curiosity</title>
+  <link rel="icon" href="./favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="./styles.css">
+  <script src="./waves.js" defer></script>
+</head>
+<body data-theme="blue">
+  <a class="skip-link" href="#main">Skip to content</a>
+  <div class="page">
+    <canvas id="waves" aria-hidden="true"></canvas>
+    <header class="header">
+      <a class="wordmark" href="./" aria-label="Rozu home">rozu</a>
+      <a class="repo-link" href="https://github.com/freddyrosa16/rozu">GitHub <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 18 18 6M6 6h12v12"/></svg></a>
+    </header>
+    <main id="main" tabindex="-1">
+      <div class="intro">
+        <h1><span>A little curiosity.</span><span>A lot of possibility.</span></h1>
+        <p>An open-source AI agent in the making.<br> Built with curiosity. Shared with everyone.</p>
+        <a class="cta" href="https://github.com/freddyrosa16/rozu">Explore on GitHub <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 18 18 6M6 6h12v12"/></svg></a>
+      </div>
+    </main>
+    <footer class="footer">
+      <p>Open source. <a href="https://github.com/freddyrosa16/rozu/blob/main/LICENSE">MIT licensed.</a></p>
+      <fieldset class="palette" aria-label="Color palette">
+        <label><input type="radio" name="palette" value="blue" checked><span class="swatch swatch-blue"></span>Blue</label>
+        <label><input type="radio" name="palette" value="graphite"><span class="swatch swatch-graphite"></span>Graphite</label>
+      </fieldset>
+      <button class="motion-toggle" id="motion-toggle" type="button" aria-label="Pause animation" hidden>
+        <span class="motion-icon"><svg class="pause-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 7v10M15 7v10"/></svg><svg class="play-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 9 6-9 6Z"/></svg></span>
+        <span id="motion-label">Pause animation</span>
+      </button>
+    </footer>
+  </div>
+</body>
+</html>
