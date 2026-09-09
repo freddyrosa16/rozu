@@ -91,7 +91,8 @@ export function useSidebar() {
       onPointerMove(event) {
         const drag = dragRef.current;
         if (drag?.pointer !== event.pointerId) return;
-        drag.latestX = event.clientX;
+        const samples = event.nativeEvent.getCoalescedEvents?.();
+        drag.latestX = samples?.length ? samples[samples.length - 1].clientX : event.clientX;
         if (raf.current === null) raf.current = requestAnimationFrame(flush);
       },
       onPointerUp: event => finish(event),
