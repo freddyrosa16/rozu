@@ -17,21 +17,8 @@
   let columns;
   let rows;
   let mobile = false;
-  let waveColor = [100, 145, 196];
-  let baseColor = [11, 13, 16];
-  function updatePalette() {
-    const style = getComputedStyle(canvas);
-    waveColor = style.getPropertyValue('--wave-rgb').split(',').map(Number);
-    baseColor = style.getPropertyValue('--base-rgb').split(',').map(Number);
-    if (pixels) draw();
-  }
-  document.querySelectorAll('input[name="palette"]').forEach(input => {
-    input.addEventListener('change', () => {
-      document.body.dataset.theme = input.value;
-      document.querySelector('meta[name="theme-color"]').content = input.value === 'blue' ? '#0b0d10' : '#0d0d0d';
-      updatePalette();
-    });
-  });
+  const waveColor = [166, 166, 166];
+  const baseColor = [13, 13, 13];
   function draw() {
     const data = pixels.data;
     const time = elapsed * 0.000018;
@@ -98,7 +85,6 @@
   document.addEventListener('visibilitychange', sync);
   new ResizeObserver(resize).observe(canvas);
   new IntersectionObserver(([entry]) => { visible = entry.isIntersecting; sync(); }).observe(canvas);
-  updatePalette();
   resize();
   sync();
 })();

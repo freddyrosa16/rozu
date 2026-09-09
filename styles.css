@@ -1,4 +1,4 @@
-:root{color-scheme:dark;--bg:#0b0d10;--text:#f1f3f6;--muted:#a4aab3;--accent:#7d9fc6;--frame:#52687e;--wave-rgb:100,145,196;--base-rgb:11,13,16;font-family:Arial,Helvetica,sans-serif;font-synthesis:none}
+:root{color-scheme:dark;--bg:#0d0d0d;--text:#f1f1f1;--muted:#a8a8a8;--accent:#b4b4b4;--frame:#626262;font-family:Arial,Helvetica,sans-serif;font-synthesis:none}
 *{box-sizing:border-box}
 html{background:var(--bg)}
 body{margin:0;color:var(--text);padding:16px;min-width:280px}
@@ -35,14 +35,3 @@ h1 span{display:block}
 @media(max-width:900px){.page{padding:28px 32px}h1{font-size:clamp(48px,7.1vw,72px)}.intro p{font-size:19px}.cta{font-size:18px;min-height:56px}.wordmark{font-size:30px}}
 @media(max-width:600px){body{padding:8px}.page{min-height:calc(100svh - 16px);border-radius:12px;padding:24px}.header{gap:12px}.repo-link{font-size:14px;gap:6px}.repo-link svg{width:20px;height:20px}.wordmark{font-size:28px}main{min-height:510px;padding:80px 0}h1{font-size:clamp(40px,10.3vw,60px);letter-spacing:-.045em;line-height:1.08;margin-bottom:25px}h1 span+span{margin-top:5px}.intro p{font-size:17px;line-height:1.55;max-width:300px}.intro p br{display:none}.intro p br::after{content:' '}.cta{font-size:16px;min-height:54px;padding:13px 20px;margin-top:28px}.footer{font-size:12px;align-items:center;gap:14px;flex-wrap:wrap}.motion-toggle{font-size:12px;gap:7px}.motion-icon{width:25px;height:25px}}
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{scroll-behavior:auto!important;transition:none!important}}
-
-body[data-theme="graphite"]{--bg:#0d0d0d;--text:#f1f1f1;--muted:#a8a8a8;--accent:#b4b4b4;--frame:#626262;--wave-rgb:166,166,166;--base-rgb:13,13,13}
-.palette{display:flex;gap:18px;margin:0;padding:0;border:0;font-size:13px}
-.palette label{display:inline-flex;align-items:center;gap:7px;min-height:44px;cursor:pointer;position:relative;color:var(--muted)}
-.palette input{position:absolute;opacity:0;width:100%;height:100%;margin:0;cursor:pointer}
-.swatch{height:10px;width:10px;border-radius:50%;background:#7d9fc6;box-shadow:0 0 0 3px var(--bg)}
-.swatch-graphite{background:#aaa}
-.palette input:checked+.swatch{outline:1px solid currentColor;outline-offset:3px}
-.palette label:has(input:checked){color:var(--text)}
-.palette label:has(input:focus-visible){outline:2px solid var(--accent);outline-offset:4px;border-radius:3px}
-@media(max-width:600px){.footer{display:grid;grid-template-columns:1fr auto;gap:10px}.footer>p{grid-column:1 / -1}.palette{gap:16px}.footer .motion-toggle{justify-self:end}}
