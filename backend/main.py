@@ -32,9 +32,13 @@ def main():
         model="openrouter/free",
         messages=messages,
     )
-    print(f'Prompt tokens: {response.usage.prompt_tokens}')
-    print(f'Response tokens: {response.usage.completion_tokens}')
-    print(response.choices[0].message.content)
+
+    if args.verbose:
+        print(f'User prompt: {args.user_prompt}')
+        print(f'Prompt tokens: {response.usage.prompt_tokens}')
+        print(f'Response tokens: {response.usage.completion_tokens}')
+    else:
+        print(response.choices[0].message.content)
 
 if __name__ == "__main__":
     main()
