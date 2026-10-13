@@ -6,14 +6,18 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use rozu_tools::{
-    MAX_OUTPUT_BYTES, Risk, ToolCtx, ToolOutput, ToolRegistry, Workspace, truncate_head_tail,
+    MAX_OUTPUT_BYTES, Risk, Sandbox, ToolCtx, ToolOutput, ToolRegistry, Workspace,
+    platform_sandbox, truncate_head_tail,
 };
 use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use tracing::{Instrument, debug, info_span, warn};
+use tracing::{Instrument, debug, info, info_span, warn};
 
-use crate::approval::{ApprovalGate, ApprovalRequest, Decision, ReadOnlyGate};
+use crate::approval::{
+    ApprovalGate, ApprovalMode, ApprovalPolicy, ApprovalRequest, Decision, DecisionSource,
+    ReadOnlyGate, SandboxMode,
+};
 use crate::model::{
     ChatRequest, ContentPart, Message, ModelInfo, Role, StreamEvent, ToolSpec, Usage,
 };
@@ -118,9 +122,24 @@ pub enum AgentEvent {
         output: String,
         is_error: bool,
     },
+    /// An approval decision for a tool call (every call gets one, auto-approved or not).
+    Approval(ApprovalRecord),
     /// Usage for one model response.
     Usage(Usage),
     TurnFinished(TurnOutcome),
+}
+
+/// The decision log entry for one tool call.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ApprovalRecord {
+    pub call_id: String,
+    pub tool: String,
+    pub risk: Risk,
+    pub preview: String,
+    pub sandbox: SandboxMode,
+    pub network: bool,
+    pub decision: Decision,
+    pub source: DecisionSource,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -144,6 +163,8 @@ pub struct Agent {
     tools: Arc<ToolRegistry>,
     workspace: Workspace,
     approvals: Arc<dyn ApprovalGate>,
+    policy: Arc<ApprovalPolicy>,
+    sandbox: Arc<dyn Sandbox>,
     config: AgentConfig,
 }
 
@@ -169,7 +190,9 @@ enum StreamEnd {
 }
 
 impl Agent {
-    /// An agent whose non-read tool calls are denied (see [`Agent::with_approval_gate`]).
+    /// An agent in [`ApprovalMode::ReadOnly`] whose gate denies everything, so only reads run
+    /// until [`Agent::with_approval_policy`] / [`Agent::with_approval_gate`] say otherwise.
+    /// Shell commands use [`platform_sandbox`].
     pub fn new(
         provider: Arc<dyn Provider>,
         tools: Arc<ToolRegistry>,
@@ -181,6 +204,8 @@ impl Agent {
             tools,
             workspace,
             approvals: Arc::new(ReadOnlyGate),
+            policy: Arc::new(ApprovalPolicy::new(ApprovalMode::ReadOnly)),
+            sandbox: platform_sandbox(),
             config,
         }
     }
@@ -188,6 +213,20 @@ impl Agent {
     pub fn with_approval_gate(mut self, gate: Arc<dyn ApprovalGate>) -> Self {
         self.approvals = gate;
         self
+    }
+
+    pub fn with_approval_policy(mut self, policy: Arc<ApprovalPolicy>) -> Self {
+        self.policy = policy;
+        self
+    }
+
+    pub fn with_sandbox(mut self, sandbox: Arc<dyn Sandbox>) -> Self {
+        self.sandbox = sandbox;
+        self
+    }
+
+    pub fn approval_policy(&self) -> &ApprovalPolicy {
+        &self.policy
     }
 
     pub fn config(&self) -> &AgentConfig {
@@ -242,7 +281,8 @@ impl Agent {
             cost_usd: self.config.model_info.as_ref().map(|_| 0.0),
         };
         let specs = self.tool_specs();
-        let ctx = ToolCtx::new(self.workspace.clone(), cancel.clone());
+        let ctx =
+            ToolCtx::new(self.workspace.clone(), cancel.clone()).with_sandbox(self.sandbox.clone());
 
         for step in 1..=self.config.max_steps {
             debug!(step, "requesting model response");
@@ -298,7 +338,7 @@ impl Agent {
                             args_json: call.args_json.clone(),
                         })
                         .await;
-                    self.execute(call, &ctx).await
+                    self.execute(call, &ctx, events).await
                 };
                 let text = truncate_head_tail(&result.content, self.config.max_tool_output_bytes)
                     .into_owned();
@@ -385,9 +425,14 @@ impl Agent {
         }
     }
 
-    /// Runs one tool call: lookup, argument parsing, approval, then the call itself under the
-    /// timeout and the turn's cancellation.
-    async fn execute(&self, call: &PendingCall, ctx: &ToolCtx) -> ToolOutput {
+    /// Runs one tool call: lookup, argument parsing, validation, approval, then the call itself
+    /// under the timeout and the turn's cancellation.
+    async fn execute(
+        &self,
+        call: &PendingCall,
+        ctx: &ToolCtx,
+        events: &mpsc::Sender<AgentEvent>,
+    ) -> ToolOutput {
         let Some(tool) = self.tools.get(&call.name) else {
             return ToolOutput::error(format!("unknown tool: {}", call.name));
         };
@@ -399,28 +444,110 @@ impl Agent {
                 Err(err) => return ToolOutput::error(format!("invalid JSON arguments: {err}")),
             }
         };
+        if let Err(output) = tool.validate(&args, ctx) {
+            return output;
+        }
 
-        let risk = tool.risk(&args);
-        if risk != Risk::Read {
-            let request = ApprovalRequest {
-                tool: call.name.clone(),
-                args: args.clone(),
-                risk,
-            };
-            if let Decision::Deny { reason } = self.approvals.decide(request).await {
+        let risk = tool.risk(&args, ctx);
+        let wants_network = tool.wants_network(&args, ctx);
+        let (sandbox, permissions) =
+            self.policy
+                .confinement(tool.as_ref(), risk, wants_network, self.sandbox.as_ref());
+        let request = ApprovalRequest {
+            call_id: call.id.clone(),
+            tool: call.name.clone(),
+            allow_prefix: self.policy.allow_prefix(tool.as_ref(), &args, risk),
+            preview: tool.preview(&args),
+            args: args.clone(),
+            risk,
+            sandbox,
+            network: permissions.network,
+        };
+        let (decision, source) = match self.policy.auto_approval(&request, tool.as_ref()) {
+            Some(source) => (Decision::Approve, source),
+            None => tokio::select! {
+                biased;
+                _ = ctx.cancel.cancelled() => (
+                    Decision::Deny { reason: "cancelled by the user".into() },
+                    DecisionSource::Cancelled,
+                ),
+                decision = self.approvals.decide(request.clone()) => (decision, DecisionSource::Gate),
+            },
+        };
+        self.log_decision(&request, &decision, &source, events)
+            .await;
+
+        match decision {
+            Decision::Approve => {}
+            Decision::AlwaysAllowPrefix => {
+                if let Err(err) = self.policy.remember(&request) {
+                    warn!(error = %err, "could not save the always-allow rule");
+                }
+            }
+            Decision::Deny { reason } if source == DecisionSource::Cancelled => {
+                return ToolOutput::error(reason);
+            }
+            Decision::Deny { reason } => {
                 return ToolOutput::error(format!("denied: {reason}"));
             }
         }
 
-        let timeout = self.config.tool_timeout;
+        let ctx = ctx.clone().with_permissions(permissions);
+        let timeout = tool.timeout(&args).unwrap_or(self.config.tool_timeout);
         tokio::select! {
             biased;
             _ = ctx.cancel.cancelled() => ToolOutput::error("cancelled by the user"),
-            result = tokio::time::timeout(timeout, tool.call(args, ctx)) => match result {
+            result = tokio::time::timeout(timeout, tool.call(args, &ctx)) => match result {
                 Ok(output) => output,
                 Err(_) => ToolOutput::error(format!("timed out after {}s", timeout.as_secs_f64())),
             },
         }
+    }
+
+    /// Records a decision in the trace log and as an [`AgentEvent::Approval`].
+    async fn log_decision(
+        &self,
+        request: &ApprovalRequest,
+        decision: &Decision,
+        source: &DecisionSource,
+        events: &mpsc::Sender<AgentEvent>,
+    ) {
+        let verdict = match decision {
+            Decision::Approve => "approved",
+            Decision::AlwaysAllowPrefix => "approved (always allow)",
+            Decision::Deny { .. } => "denied",
+        };
+        let reason = match decision {
+            Decision::Deny { reason } => reason.as_str(),
+            _ => "",
+        };
+        if request.risk == Risk::Read && matches!(source, DecisionSource::Mode(_)) {
+            debug!(tool = %request.tool, call_id = %request.call_id, "read auto-approved");
+        } else {
+            info!(
+                target: "rozu::approval",
+                tool = %request.tool,
+                call_id = %request.call_id,
+                risk = %request.risk,
+                sandbox = %request.sandbox,
+                network = request.network,
+                decided_by = %source,
+                reason,
+                "{verdict}"
+            );
+        }
+        let _ = events
+            .send(AgentEvent::Approval(ApprovalRecord {
+                call_id: request.call_id.clone(),
+                tool: request.tool.clone(),
+                risk: request.risk,
+                preview: request.preview.clone(),
+                sandbox: request.sandbox,
+                network: request.network,
+                decision: decision.clone(),
+                source: source.clone(),
+            }))
+            .await;
     }
 }
 

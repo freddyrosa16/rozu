@@ -30,11 +30,13 @@ pub fn redact(input: &str) -> Cow<'_, str> {
 }
 
 /// Installs the global `tracing` subscriber: a `fmt` layer writing to stderr through the
-/// redaction writer, filtered by `RUST_LOG` (default `info`).
+/// redaction writer, filtered by `RUST_LOG` (default `info`, with the `rozu::approval` decision
+/// log at `warn` because the CLI already prints each decision).
 ///
 /// Safe to call more than once; later calls are no-ops.
 pub fn init_tracing() {
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info,rozu::approval=warn"));
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_writer(RedactingMakeWriter::new(io::stderr))

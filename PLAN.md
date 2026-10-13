@@ -11,7 +11,7 @@ Fred approved AI-assisted implementation. He reviews every milestone, and Chief 
 2. **GUI stack:** spike done. The recommendation is **GPUI + gpui-component**, with Tauri 2 as the fallback; see [docs/gui-spike.md](docs/gui-spike.md). Needs Fred and Chief's sign-off before M5.
 3. **Sign in with ChatGPT:** it's allowed for locally run personal and open-source projects. Re-check OpenAI's current terms and whether a client-id registration is needed before M4.
 4. Distribution: is personal-use unsigned enough, or do we need a Developer ID for notarized releases? (M6)
-5. Sandbox default: should network be off by default for shell tools (Codex-style)? Proposed: yes.
+5. Sandbox default: should network be off by default for shell tools (Codex-style)? Proposed: yes (implemented that way in M3; revisit if it's too strict in practice).
 
 ## Requirements
 **Must**
@@ -141,11 +141,43 @@ writes at `price_cache_write_per_mtok` (1.25x input for Anthropic, the input pri
 adapter flags against the fixtures; add one to `OpenAiConfig` if the live check shows a difference.
 
 ### M3: Write tools, shell, sandbox, approvals (≈3 weeks)
-- [ ] `apply_patch`/`write_file`, `shell` with timeout + process-group kill
-- [ ] Seatbelt profile on macOS; risk classification; approval modes; per-project allowlist; decision log
-- [ ] PTY session crate (`portable-pty` + `alacritty_terminal`) driven from the CLI
+- [x] `apply_patch`/`write_file`, `shell` with timeout + process-group kill
+- [x] Seatbelt profile on macOS; risk classification; approval modes; per-project allowlist; decision log
+- [x] PTY session crate (`portable-pty` + `alacritty_terminal`) driven from the CLI
 
 **Done when:** writing outside the workspace is blocked by the sandbox (test), network access triggers an approval prompt, a destructive command always prompts, and an eval task "fix a failing test in a temp repo" passes.
+- [x] Sandbox tests (macOS only): writes outside the workspace and into `.rozu/` are blocked, `$TMPDIR` stays writable, `curl` to 1.1.1.1 fails without network approval
+- [x] Network commands prompt in auto mode; destructive commands prompt in every mode (also with a matching rule); approval matrix and persisted-rule tests
+- [x] Eval: scripted provider fixes a failing shell test in a temp repo via `shell` → `read_file` → `apply_patch` → `shell`
+- [x] Timeout/cancel/drop kill the whole process group (background `sleep`s are gone); classifier table + proptest
+- [ ] Manual check on the Mac: `rozu chat` approval prompts (y/n/a) and `rozu term`
+
+Notes:
+- **Tools:** `write_file` (create/overwrite) and `apply_patch` (exact search/replace `edits`, or a single-file
+  unified `diff`; all-or-nothing, with an actionable error on a mismatch) resolve paths with
+  `Workspace::resolve_for_write` and reject anything outside the workspace or under `.rozu/` *before* approval.
+  `shell` runs `/bin/sh -c` in its own process group (`timeout_secs` default 120, max 600, plus an optional
+  `network: true` request), captures stdout/stderr head+tail, and kills the group with `killpg` on timeout,
+  cancel, drop and when the command finishes (so background children don't outlive the call).
+- **Sandbox:** `Sandbox` trait in `rozu-tools`. `Seatbelt` runs `/usr/bin/sandbox-exec -p <profile>`; the profile is
+  `allow default` + `deny file-write*` + writes re-allowed under the workspace, `$TMPDIR`, `/tmp` and `/dev`, with
+  `<workspace>/.rozu` denied again and `(deny network*)` unless the call was approved with network. `NoSandbox`
+  elsewhere. **Linux Landlock is deferred**; without a sandbox, auto mode asks before shell commands that write.
+  Known Seatbelt limits: `allow default` still permits mach/XPC services; tools that write to `~/.cargo` or
+  similar caches outside the workspace fail under the sandbox (approve with network, or use full access).
+- **Risk classifier** (`classify_command`): splits on `&&`, `||`, `;`, `|`, `&`, newlines, parentheses and
+  backticks, recurses into `sh -c`/`bash -c`/`eval`/`xargs`/`find -exec`, takes the max. Unknown commands are
+  `WriteWorkspace`; redirects or `tee` to paths outside the workspace/temp are `Destructive`.
+- **Approvals** (`rozu-core::approval`): `ApprovalMode::{ReadOnly, AutoWorkspace (default), FullAccess}`.
+  Full access runs shell unsandboxed; an approved `WriteOutside` shell call also runs unsandboxed (it couldn't work
+  otherwise). "Always allow" stores `{tool, prefix}` in `.rozu/approvals.json` (shell prefix = program plus
+  subcommand, e.g. `cargo test`; every segment of a compound command must match a rule; rules never apply to
+  destructive calls or in read-only mode). Every decision is an `AgentEvent::Approval` and a `tracing` event
+  (target `rozu::approval`); M4 writes them to the session log.
+- **PTY:** `rozu_pty::PtySession` (spawn, write, resize, raw byte subscription, `snapshot()`/`screen_text()` of the
+  visible grid, exit status). `rozu term` proxies `$SHELL` through it in raw mode (crossterm). The agent-facing
+  `terminal_read`/`terminal_write` tools come with the GUI terminal pane.
+- Open question 5 (network off by default for shell) is implemented as proposed: off unless approved.
 
 ### M4: Sessions, memory, ChatGPT sign-in, evals (≈2–3 weeks)
 - [ ] JSONL sessions + SQLite index, resume; ROZU.md memory; compaction
@@ -187,7 +219,8 @@ Web search tool, MCP client, Linux/Windows, auto-update.
 |---|---|---|---|
 | GPUI API churn / sparse docs | M | M | Pin version, keep core UI-agnostic, use gpui-component, read Zed source |
 | Provider SSE format drift | M | M | Adapter per provider, fixture tests, typed errors |
-| Seatbelt (`sandbox-exec`) is deprecated by Apple | L | M | It's what Codex uses today; isolate it behind a `Sandbox` trait |
+| Seatbelt (`sandbox-exec`) is deprecated by Apple | L | M | It's what Codex uses today; isolated behind the `Sandbox` trait (M3) |
+| No shell sandbox on Linux yet (Landlock deferred) | M | M | Auto mode asks before unsandboxed shell writes; add a Landlock `Sandbox` impl before Linux builds |
 | Subscription-auth terms change | M | H | API keys are the default; re-check terms before each release |
 | Limited weekly time | H | M | Small slices, CLI-first so value lands before the GUI |
 | Xcode license not accepted on the Mac (blocks the Metal toolchain) | H | L | Fred runs `sudo xcodebuild -license` once |
@@ -197,7 +230,7 @@ Web search tool, MCP client, Linux/Windows, auto-update.
 |---|---|
 | Agent loop, streaming, cancel | M1 |
 | OpenAI / Anthropic / xAI | M1 / M2 |
-| Tools, sandbox, approvals | M1 (read), M3 |
+| Tools, sandbox, approvals | M1 (read), M3 (done) |
 | Terminal/PTY | M3 (core), M5 (UI) |
 | Keychain API keys | M1 |
 | Sign in with ChatGPT | M4 |

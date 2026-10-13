@@ -71,6 +71,57 @@ impl Workspace {
         }
     }
 
+    /// Resolves a path a tool wants to write. Like [`Workspace::resolve`], but the file (and any
+    /// missing parent directories) may not exist yet. The deepest existing ancestor is
+    /// canonicalized, so a symlinked directory can't smuggle the write outside the root, and an
+    /// existing file is resolved through its own symlink.
+    pub fn resolve_for_write(&self, path: &str) -> Result<PathBuf, PathError> {
+        let requested = Path::new(path);
+        let joined = normalize(&if requested.is_absolute() {
+            requested.to_path_buf()
+        } else {
+            self.root.join(requested)
+        });
+        let mut existing = joined.as_path();
+        let mut missing = Vec::new();
+        let base = loop {
+            match existing.canonicalize() {
+                Ok(canonical) => break canonical,
+                Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                    let (Some(parent), Some(name)) = (existing.parent(), existing.file_name())
+                    else {
+                        return Err(PathError::Outside(path.to_owned()));
+                    };
+                    missing.push(name.to_owned());
+                    existing = parent;
+                }
+                Err(err) => {
+                    return Err(PathError::Io {
+                        path: path.to_owned(),
+                        message: err.to_string(),
+                    });
+                }
+            }
+        };
+        let resolved = missing.iter().rev().fold(base, |acc, name| acc.join(name));
+        if resolved.starts_with(&*self.root) && resolved != *self.root {
+            Ok(resolved)
+        } else {
+            Err(PathError::Outside(path.to_owned()))
+        }
+    }
+
+    /// Whether `path` (absolute, or relative to the root) lexically stays inside the workspace.
+    /// Doesn't touch the filesystem; used to classify shell arguments.
+    pub fn contains_lexically(&self, path: &Path) -> bool {
+        let joined = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            self.root.join(path)
+        };
+        normalize(&joined).starts_with(&*self.root)
+    }
+
     /// `path` relative to the root for display (`.` for the root itself).
     pub fn display_relative(&self, path: &Path) -> String {
         match path.strip_prefix(&*self.root) {
@@ -81,8 +132,33 @@ impl Workspace {
     }
 }
 
+/// Directory (relative to the root) holding rozu's per-project settings, such as the approval
+/// allowlist. Tools may not write there, so the agent can't approve itself.
+pub const PROTECTED_DIR: &str = ".rozu";
+
+impl Workspace {
+    /// `<root>/.rozu`, which tools and sandboxed commands may not write to.
+    pub fn protected_dir(&self) -> PathBuf {
+        self.root.join(PROTECTED_DIR)
+    }
+
+    /// Whether a resolved path lies in [`Workspace::protected_dir`]. Case-insensitive, since
+    /// macOS file systems usually are.
+    pub fn is_protected(&self, path: &Path) -> bool {
+        path.strip_prefix(&*self.root)
+            .ok()
+            .and_then(|rel| rel.components().next())
+            .is_some_and(|first| {
+                first
+                    .as_os_str()
+                    .to_string_lossy()
+                    .eq_ignore_ascii_case(PROTECTED_DIR)
+            })
+    }
+}
+
 /// Lexically resolves `.` and `..` without touching the filesystem.
-fn normalize(path: &Path) -> PathBuf {
+pub(crate) fn normalize(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for component in path.components() {
         match component {
@@ -190,6 +266,40 @@ mod tests {
             ws.resolve("alias.rs").unwrap(),
             ws.root().join("src/main.rs")
         );
+    }
+
+    #[test]
+    fn resolve_for_write_allows_new_paths_inside() {
+        let (_dir, ws) = setup();
+        assert_eq!(
+            ws.resolve_for_write("src/new/deep.rs").unwrap(),
+            ws.root().join("src/new/deep.rs")
+        );
+        assert_eq!(
+            ws.resolve_for_write("src/main.rs").unwrap(),
+            ws.root().join("src/main.rs")
+        );
+        for bad in ["../x.txt", "src/../../x.txt", "/etc/passwd", ".", "/"] {
+            assert!(
+                matches!(ws.resolve_for_write(bad), Err(PathError::Outside(_))),
+                "{bad}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_for_write_rejects_symlinked_dir_escape() {
+        let (dir, ws) = setup();
+        std::os::unix::fs::symlink(dir.path(), ws.root().join("parent")).unwrap();
+        assert!(matches!(
+            ws.resolve_for_write("parent/new.txt"),
+            Err(PathError::Outside(_))
+        ));
+        assert!(matches!(
+            ws.resolve_for_write("parent/secret.txt"),
+            Err(PathError::Outside(_))
+        ));
     }
 
     #[test]
