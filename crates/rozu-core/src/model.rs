@@ -222,6 +222,50 @@ pub struct ModelInfo {
     pub long_context: Option<LongContextPrices>,
     #[serde(default)]
     pub billing: Billing,
+    /// What rozu's memory layer can do with this model's provider.
+    #[serde(default)]
+    pub caps: ProviderCaps,
+}
+
+/// How much of rozu's memory policy (masking, compaction, retrieval) a provider supports.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryFeatures {
+    /// Every memory/eval condition can run.
+    #[default]
+    Full,
+    /// Only conditions that don't need per-turn control of the prompt prefix (rozu can still
+    /// rewrite history, but only by starting a new provider session, which loses its cache).
+    Limited,
+    /// None.
+    Unavailable,
+}
+
+/// What a provider lets rozu control and measure, for the UI and the memory eval.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderCaps {
+    /// rozu decides the exact prompt bytes of every request (system prompt, tool schemas,
+    /// history), so per-turn masking and cache breakpoints are possible.
+    pub prompt_prefix_control: bool,
+    /// The provider reports cache-write tokens (otherwise `cache_write_tokens` is always 0 and
+    /// eval rows should record it as unknown).
+    pub cache_write_reported: bool,
+    pub memory_features: MemoryFeatures,
+}
+
+impl Default for ProviderCaps {
+    fn default() -> Self {
+        Self::FULL
+    }
+}
+
+impl ProviderCaps {
+    /// rozu builds every request itself (the HTTP adapters).
+    pub const FULL: Self = Self {
+        prompt_prefix_control: true,
+        cache_write_reported: true,
+        memory_features: MemoryFeatures::Full,
+    };
 }
 
 /// A long-context price tier: a request whose prompt (all input tokens, including cache reads and
@@ -260,7 +304,13 @@ impl ModelInfo {
             price_cache_write_per_mtok: 0.0,
             long_context: None,
             billing: Billing::Subscription,
+            caps: ProviderCaps::default(),
         }
+    }
+
+    pub fn with_caps(mut self, caps: ProviderCaps) -> Self {
+        self.caps = caps;
+        self
     }
 
     /// Whether this model's usage has a USD cost, i.e. [`ModelInfo::cost_usd`] means something.
@@ -361,6 +411,7 @@ mod tests {
             price_cache_write_per_mtok: 1.25,
             long_context: None,
             billing: Billing::Metered,
+            caps: ProviderCaps::default(),
         };
         assert!((model.cost_usd(&total) - 3.0).abs() < 1e-9);
 
@@ -389,6 +440,7 @@ mod tests {
             price_cache_write_per_mtok: 1.25,
             long_context: None,
             billing: Billing::Metered,
+            caps: ProviderCaps::default(),
         }
         .with_long_context(LongContextPrices {
             threshold_tokens: 200_000,

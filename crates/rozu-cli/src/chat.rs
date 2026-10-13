@@ -1,4 +1,5 @@
-//! `rozu chat`: run the agent against OpenAI, Anthropic or xAI with the workspace tools (read,
+//! `rozu chat`: run the agent against OpenAI, Anthropic or xAI (API keys), or Claude, Codex or
+//! Grok through their official CLIs (subscriptions), with the workspace tools (read,
 //! write/patch, shell) under an approval mode.
 //!
 //! Assistant text streams to stdout; tool calls, approval prompts, status and errors go to stderr
@@ -17,13 +18,19 @@ use anyhow::{Context, anyhow};
 use clap::{Args, ValueEnum};
 use rozu_cli_providers::claude::install::{CLAUDE_BIN_ENV, find_claude_binary};
 use rozu_cli_providers::codex::install::{CODEX_BIN_ENV, find_codex_binary};
-use rozu_cli_providers::{ClaudeCliConfig, ClaudeCliProvider, CodexAppServerProvider, CodexConfig};
+use rozu_cli_providers::grok::headless::GrokHeadless;
+use rozu_cli_providers::grok::hook::{self, HookPolicy};
+use rozu_cli_providers::grok::install::find_grok_binary;
+use rozu_cli_providers::{
+    ClaudeCliConfig, ClaudeCliProvider, CodexAppServerProvider, CodexConfig, GrokConfig,
+    GrokSession,
+};
 use rozu_core::{
     Agent, AgentConfig, AgentError, AgentEvent, ApprovalMode, ApprovalPolicy, ApprovalRecord,
     AuditLog, DEFAULT_MAX_STEPS, Decision, DecisionSource, Provider, Session, ToolExecutor,
     TurnOutcome, TurnUsage, approvals_path, new_session_id,
 };
-use rozu_providers::registry::{CLAUDE_CLI_ID, CODEX_ID};
+use rozu_providers::registry::{CLAUDE_CLI_ID, CODEX_ID, GROK_ID};
 use rozu_providers::{ModelChoice, PROVIDERS, registry};
 use rozu_secrets::{KeyringStore, SecretStore, env_var_for, resolve_api_key};
 use rozu_tools::{Risk, SessionTemp, ToolRegistry, Workspace, platform_sandbox};
@@ -34,20 +41,31 @@ use crate::interrupt::{EXIT_INTERRUPTED, Interrupts};
 
 /// Upper bound for `--max-steps`.
 const MAX_STEPS_LIMIT: u64 = 200;
+/// If set to a byte count, Grok gets rozu's `PostToolUse` hook (`rozu grok-hook`), which keeps
+/// the head and tail of rozu tool results longer than that (unverified with Grok Build; off by
+/// default, since `rozu mcp-serve` already caps tool output).
+const GROK_HOOK_MAX_BYTES_ENV: &str = "ROZU_GROK_HOOK_MAX_BYTES";
 
 #[derive(Debug, Args)]
 pub struct ChatArgs {
     /// Provider: openai, anthropic, xai (API keys), claude-cli (your Claude subscription via
-    /// the official claude CLI) or codex (your ChatGPT subscription via the official Codex
-    /// CLI). Defaults to the model's provider, else openai, or (when no API key is configured)
-    /// claude-cli, or codex if only the Codex CLI is installed.
+    /// the official claude CLI), codex (your ChatGPT subscription via the official Codex CLI)
+    /// or grok (your SuperGrok subscription via xAI's Grok Build CLI). Defaults to the model's
+    /// provider, else openai, or (when no API key is configured) the first installed of
+    /// claude-cli, codex and grok.
     #[arg(long, env = "ROZU_PROVIDER")]
     provider: Option<String>,
     /// Model id or provider/model (see `rozu models`); for claude-cli also sonnet, opus, haiku
     /// or any id the claude CLI accepts; for codex any model the Codex CLI accepts (`default`:
-    /// Codex's configured model). Defaults to the provider's default model.
+    /// Codex's configured model); for grok e.g. grok-4.7 (`default`: Grok Build's own).
+    /// Defaults to the provider's default model.
     #[arg(long, env = "ROZU_MODEL")]
     model: Option<String>,
+    /// For --provider grok: run each turn as a headless `grok -p` instead of the default
+    /// long-lived ACP session (fallback mode; rozu's tools are then available only if you
+    /// registered `rozu mcp-serve` with Grok yourself).
+    #[arg(long, env = "ROZU_GROK_HEADLESS")]
+    grok_headless: bool,
     /// Directory the agent works in. File tools reject paths outside it, and sandboxed shell
     /// commands can only write here and to temp directories.
     #[arg(long, default_value = ".")]
@@ -87,6 +105,9 @@ struct AgentFactory {
     claude: Mutex<Option<Arc<ClaudeCliProvider>>>,
     /// One codex app-server (and thread) for the whole chat, kept across `/model` switches.
     codex: Mutex<Option<Arc<CodexAppServerProvider>>>,
+    /// One Grok Build process (and its context epochs) for the whole chat.
+    grok: Mutex<Option<Arc<dyn Provider>>>,
+    grok_headless: bool,
     /// Ties this chat's audit entries (and those of its `rozu mcp-serve`) together.
     session_id: String,
     audit: Option<Arc<AuditLog>>,
@@ -100,6 +121,8 @@ impl AgentFactory {
     fn build(&self, choice: &ModelChoice) -> anyhow::Result<Agent> {
         let provider: Arc<dyn Provider> = if choice.provider.id == CODEX_ID {
             self.codex_provider()?
+        } else if choice.provider.id == GROK_ID {
+            self.grok_provider()?
         } else if choice.provider.is_cli_backed() {
             self.claude_provider()?
         } else {
@@ -109,7 +132,7 @@ impl AgentFactory {
                     .ok_or_else(|| {
                         anyhow!(
                             "no {} API key: run `rozu auth set {}` or set {} (or use a \
-                             subscription: --provider claude-cli or --provider codex)",
+                             subscription: --provider claude-cli, codex or grok)",
                             provider.label,
                             provider.id,
                             env_var_for(provider.id).unwrap_or("its API key variable"),
@@ -196,6 +219,50 @@ impl AgentFactory {
         Ok(provider)
     }
 
+    /// The Grok Build provider, started once: the long-lived ACP session (default) or the
+    /// headless fallback. Grok's built-ins are off; its only tools are rozu's, through
+    /// `rozu mcp-serve --provider grok`, which asks this process's gate.
+    fn grok_provider(&self) -> anyhow::Result<Arc<dyn Provider>> {
+        let mut cached = self.grok.lock().expect("grok provider lock");
+        if let Some(provider) = cached.as_ref() {
+            return Ok(provider.clone());
+        }
+        let binary = find_grok_binary().map_err(|err| anyhow!(err))?;
+        let rozu = std::env::current_exe().context("cannot locate the rozu binary")?;
+        let mut exec = ToolExecutor::new(
+            self.tools.clone(),
+            self.gate.clone(),
+            self.policy.clone(),
+            platform_sandbox(),
+        )
+        .with_audit(self.audit.clone())
+        .with_provider(Some(GROK_ID.to_owned()));
+        exec.temp = self.temp.clone();
+        let mut config = GrokConfig::new(
+            binary,
+            self.workspace.clone(),
+            &rozu,
+            self.mcp_args(Some(GROK_ID)),
+            exec,
+        );
+        config.post_tool_hook = std::env::var(GROK_HOOK_MAX_BYTES_ENV)
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .map(|max_bytes| {
+                hook::command(
+                    &rozu.display().to_string(),
+                    &HookPolicy::Truncate { max_bytes },
+                )
+            });
+        let provider: Arc<dyn Provider> = if self.grok_headless {
+            Arc::new(GrokHeadless::new(config))
+        } else {
+            Arc::new(GrokSession::new(config).context("could not prepare the Grok Build session")?)
+        };
+        *cached = Some(provider.clone());
+        Ok(provider)
+    }
+
     /// Arguments of the `rozu mcp-serve` a vendor CLI starts; `provider` tags its audit entries.
     fn mcp_args(&self, provider: Option<&str>) -> Vec<String> {
         let approval = self
@@ -219,8 +286,8 @@ impl AgentFactory {
 }
 
 /// The provider to use when neither `--provider` nor `--model` is given: with no API key
-/// configured anywhere, claude-cli, or codex when only the Codex CLI is installed; else the
-/// registry's default.
+/// configured anywhere, the first installed of claude-cli, codex and grok (claude-cli when
+/// none is, so the error says how to install it); else the registry's default.
 fn default_provider(
     provider: Option<String>,
     model: Option<&str>,
@@ -231,10 +298,13 @@ fn default_provider(
         (Some(provider), _) => Some(provider),
         (None, Some(_)) => None,
         (None, None) if any_api_key() => None,
-        (None, None) if !cli_installed(CLAUDE_CLI_ID) && cli_installed(CODEX_ID) => {
-            Some(CODEX_ID.to_owned())
-        }
-        (None, None) => Some(CLAUDE_CLI_ID.to_owned()),
+        (None, None) => Some(
+            [CLAUDE_CLI_ID, CODEX_ID, GROK_ID]
+                .into_iter()
+                .find(|id| cli_installed(id))
+                .unwrap_or(CLAUDE_CLI_ID)
+                .to_owned(),
+        ),
     }
 }
 
@@ -243,6 +313,7 @@ fn cli_installed(provider: &str) -> bool {
     match provider {
         CLAUDE_CLI_ID => find_claude_binary().is_some_and(|p| p.exists()),
         CODEX_ID => find_codex_binary().is_some_and(|p| p.exists()),
+        GROK_ID => find_grok_binary().is_ok_and(|p| p.exists()),
         _ => false,
     }
 }
@@ -310,6 +381,8 @@ async fn chat(args: ChatArgs) -> anyhow::Result<ExitCode> {
         gate,
         claude: Mutex::default(),
         codex: Mutex::default(),
+        grok: Mutex::default(),
+        grok_headless: args.grok_headless,
         audit: AuditLog::from_env(&session_id).map(Arc::new),
         session_id,
         temp,
@@ -493,11 +566,19 @@ impl Printer {
     }
 
     fn unpriced_note(&self, choice: &ModelChoice) {
-        if choice.info.is_none() {
-            self.status(&format!(
+        match &choice.info {
+            None => self.status(&format!(
                 "note: {} isn't in `rozu models`, so cost won't be shown",
                 choice.spec()
-            ));
+            )),
+            Some(info) if info.caps.memory_features != rozu_core::MemoryFeatures::Full => {
+                self.status(&format!(
+                    "note: rozu's memory features are limited with {} (no per-turn control of \
+                     the prompt prefix; cache writes aren't reported)",
+                    choice.provider.id
+                ));
+            }
+            Some(_) => {}
         }
     }
 
@@ -726,12 +807,22 @@ mod tests {
     }
 
     #[test]
-    fn claude_cli_then_codex_are_the_defaults_without_api_keys() {
+    fn claude_cli_then_codex_then_grok_are_the_defaults_without_api_keys() {
         let no_keys = || false;
         let keys = || true;
         let both = |_: &str| true;
         let neither = |_: &str| false;
         let only_codex = |id: &str| id == "codex";
+        let codex_and_grok = |id: &str| id == "codex" || id == "grok";
+        let only_grok = |id: &str| id == "grok";
+        assert_eq!(
+            default_provider(None, None, no_keys, codex_and_grok).as_deref(),
+            Some("codex")
+        );
+        assert_eq!(
+            default_provider(None, None, no_keys, only_grok).as_deref(),
+            Some("grok")
+        );
         assert_eq!(
             default_provider(None, None, no_keys, both).as_deref(),
             Some("claude-cli")

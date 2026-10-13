@@ -18,17 +18,19 @@ de-prioritized API-key path.
    ChatGPT login itself; rozu implements no OAuth of its own (M3.5).
 4. Distribution: is personal-use unsigned enough, or do we need a Developer ID for notarized releases? (M6)
 5. Sandbox default: should network be off by default for shell tools (Codex-style)? Proposed: yes (implemented that way in M3; revisit if it's too strict in practice).
-6. **Grok subscription (HELD, Fred to decide):** xAI's official Grok Build CLI (`grok -p`, ACP via
-   `grok agent stdio`) supports SuperGrok login, so a CLI-backed Grok provider is possible in principle. Hermes'
-   SuperGrok path uses xAI's shared OAuth client, which isn't licensed for other apps. Until Fred decides, rozu
-   implements **no Grok subscription/OAuth login of any kind**; the xAI API-key adapter remains the optional
-   later path. Grok Build is not installed on the Mac.
+6. **Grok subscription: APPROVED (2026-10-13)** as a CLI-backed provider on xAI's official Grok Build CLI over
+   ACP (`grok agent stdio`), M3.5c. Grok Build does its own `grok login`; rozu implements **no Grok OAuth** (Hermes'
+   path uses xAI's shared OAuth client, which isn't licensed for other apps), never reads `~/.grok/auth.json`,
+   never uses `GROK_CLI_CHAT_PROXY_BASE_URL`. The xAI API-key adapter stays as the optional path. Still open: the
+   unsent note to xAI asking whether driving a user-installed Grok Build from a desktop app is fine
+   (`research/grok-subscription-paths.md` §5).
 
 ## Requirements
 **Must**
 - Agent loop with streaming output, tool calling, cancel/interrupt, and turn/token caps.
 - CLI-backed providers on the user's own subscriptions: Claude through the official `claude` CLI, OpenAI
-  through the official Codex CLI's `codex app-server` (Sign in with ChatGPT).
+  through the official Codex CLI's `codex app-server` (Sign in with ChatGPT), Grok through xAI's Grok Build CLI
+  (`grok agent stdio`, ACP).
 - Provider abstraction with OpenAI (Responses API), Anthropic (Messages API) and xAI (OpenAI-compatible)
   HTTP adapters, kept as the optional API-key path.
 - Tools: read/list/search files, write/patch files, run shell commands, plus an interactive PTY terminal.
@@ -47,7 +49,8 @@ de-prioritized API-key path.
 
 **Non-goals / prohibited**
 - Reading, copying, extracting or reusing subscription tokens or credential files (Claude Code, Codex CLI,
-  SuperGrok/X Premium, Hermes). Subscriptions are used only by spawning the **official vendor CLI**, which
+  Grok Build / SuperGrok / X Premium, Hermes), or routing a CLI through a rozu-run proxy
+  (`GROK_CLI_CHAT_PROXY_BASE_URL`) that would see its bearer token. Subscriptions are used only by spawning the **official vendor CLI**, which
   does its own login and holds its own credentials; rozu only speaks the CLI's documented machine protocol.
 - Any custom OAuth/login flow against a vendor's subscription (including xAI's shared client).
 - A hosted/server version. This is a local app only.
@@ -60,7 +63,7 @@ rozu/
 ├─ crates/
 │  ├─ rozu-core/           # agent loop, session model, events, policy (no UI, no HTTP)
 │  ├─ rozu-providers/      # openai / anthropic / xai HTTP adapters, SSE, retries, provider/model registry
-│  ├─ rozu-cli-providers/  # CLI-backed providers: CliProcess, claude stream-json [M3.5], codex app-server
+│  ├─ rozu-cli-providers/  # CLI-backed providers: CliProcess, claude stream-json, codex app-server, grok ACP [M3.5]
 │  ├─ rozu-mcp/            # stdio MCP server exposing rozu's tools + permission-prompt tool [M3.5]
 │  ├─ rozu-tools/          # Tool trait, registry, fs tools, shell, approvals, sandbox
 │  ├─ rozu-pty/            # PTY sessions (portable-pty) + vt parser (alacritty_terminal)
@@ -148,8 +151,10 @@ rozu says so and tells the user to run the vendor's own login command.
 - Account/login status comes from app-server's account APIs; if logged out, rozu tells the user to run
   `codex login`. No custom OAuth.
 
-**Grok:** HELD (open question 6). No Grok subscription or OAuth login is implemented. The xAI API-key HTTP
-adapter remains as the optional later path.
+**Grok (SuperGrok subscription):** xAI's official Grok Build CLI over ACP (`grok agent stdio`), M3.5c (open
+question 6). Grok Build's built-ins are off (agent profile with `tools: use_tool`); rozu's MCP server is its only
+toolset; rozu decides every byte of context it sends, one Grok session per context epoch. See the M3.5c notes.
+The xAI API-key HTTP adapter remains the optional path.
 
 #### Tools & approvals with CLI-backed providers
 When the vendor CLI runs its own tools, **rozu must still be the gate**: every tool request goes through rozu's
@@ -167,6 +172,10 @@ When the vendor CLI runs its own tools, **rozu must still be the gate**: every t
   rozu's mode is read-only), cwd = the workspace. Answer each exec/file-change approval request from
   `ApprovalPolicy` (commands go through `classify_command`; file changes through the write-path checks); network
   requests follow rozu's network rule. Done in M3.5 part 2, see the notes there.
+- **Grok:** built-ins off via the agent profile, so only `use_tool` → rozu's MCP tools can run. Grok's
+  `session/request_permission` is approved (once, never "always") only for `use_tool` → `rozu__<registry tool>`,
+  logged `decided_by: delegated-to-rozu-mcp` (rozu mcp-serve then decides the call); everything else is denied
+  (default-deny, logged `policy`). `fs/*` and `terminal/*` requests are refused (rozu advertises neither).
 - **Residual risk:** for a vendor CLI's *built-in* tools, the vendor's own sandbox is the enforcement layer;
   rozu only decides yes/no. **Investigation item:** wrap the whole CLI subprocess in rozu's Seatbelt profile
   (writes limited to the workspace, temp and the CLI's own state dir, e.g. `~/.claude`/`~/.codex`; network
@@ -197,6 +206,13 @@ Per the eval spec §1a, live runs use the Claude subscription provider:
   and the raw breakdown are logged under `rozu::usage` (provider `codex`). Cost is `None` (subscription).
   `cache_hit_rate = Σ cachedInputTokens / Σ inputTokens`. Field names are from the schema; the live values still
   need the smoke test.
+- Grok Build (ACP) reports usage in the `session/prompt` result's `_meta`: `inputTokens` (the **whole** prompt,
+  cached part included), `cachedReadTokens`, `outputTokens`, `reasoningTokens`; headless `streaming-json` reports
+  `input_tokens` as **uncached only**. `grok::protocol::normalize_usage` maps both to `Usage` with `input_tokens` =
+  total, `cache_read_tokens` = cached, `cache_write_tokens` = 0 always (never reported; record `null` in eval rows),
+  cost `None`. Model capability flags (`ModelInfo::caps`: `prompt_prefix_control: false`, `cache_write_reported:
+  false`, `memory_features: Limited`) mark Grok so the UI/eval can tell. Live numbers (Grok Build 1.0.52 pilot): one
+  append-only session 82% cache hits, new session per turn 23%, batched masking with a new session per batch 77%.
 - **Limit:** rozu doesn't control the CLI's system prompt or prefix layout (Claude Code adds its own system
   prompt and tool definitions), so conditions that depend on exact prompt layout (A's volatile line, byte-exact
   `prefix_sha256`, `cache_control` breakpoint placement) may need the API-key path or Claude Agent SDK options
@@ -335,7 +351,7 @@ Notes:
     clients is per host (OBS-3). Claude's built-in `Bash` is denied by policy (it would run outside rozu's
     sandbox); `mcp__rozu__shell` is the way in.
 
-### M3.5: CLI-backed providers (≈2–3 weeks) — Claude CLI first, then Codex app-server
+### M3.5: CLI-backed providers (≈2–3 weeks) — Claude CLI first, then Codex app-server, then Grok Build
 See [Providers](#providers-http-adapters-and-cli-backed-providers).
 - [x] `CliProcess` plumbing: spawn the official binary (path lookup; `--version` shown by `rozu auth status`),
       process-group kill on cancel/drop, stderr to the log file, typed errors (not installed, not logged in,
@@ -362,6 +378,23 @@ See [Providers](#providers-http-adapters-and-cli-backed-providers).
       CLI), `rozu chat --provider codex "list the files and summarize README"`, then ask for a file write and a
       `git push --force` and check rozu's approval cards, Ctrl-C mid-turn, and `"provider":"codex"` in
       `approvals.jsonl`; check the unverified points in the Codex notes below
+- [x] Grok (M3.5c): `grok agent stdio` ACP client on the native binary (`ROZU_GROK_BIN`, else `grok` on `PATH`
+      resolved through symlinks to `grok-native`, never via node), `--no-auto-update`; agent profile with only
+      `use_tool`; rozu's MCP server as the only toolset (`session/new` `mcpServers`), frozen rozu profile + `rozu__*`
+      tool list in `_meta.systemPromptOverride`; `cached_token` auth only; streaming text, `use_tool` tool calls and
+      results; permission requests approved only for `rozu__*` (default-deny, audited `provider: grok`);
+      `session/cancel`; one session per context epoch with `GrokSession::rotate_epoch`; fixture tests with a fake
+      `grok`; `rozu chat --provider grok [--model …]`
+- [x] Grok usage: ACP `_meta` (total input) and headless (uncached input) normalized by one function (tests for
+      both); cost `None`; capability flags on `ModelInfo` (`caps`) mark Grok's memory features as limited
+- [x] Grok CLI: `rozu auth status` grok line (binary, version, login unknown), `rozu auth login grok` (official
+      `grok login`, inherited stdio), `rozu models` static unverified grok list, default order claude-cli → codex →
+      grok, `rozu grok-hook` (PostToolUse hook, passthrough by default), headless fallback behind `--grok-headless`
+- [ ] Live smoke test on the Mac (Fred), Grok: `rozu auth login grok` (if needed), `rozu auth status` (grok line
+      shows `grok-native` and its version), `rozu chat --provider grok "list the files and summarize README"`, ask
+      for a file write and a `git push --force` (rozu's cards via rozu mcp-serve), Ctrl-C mid-turn then a follow-up
+      turn (same process), `"provider":"grok"` in `approvals.jsonl`, usage line; check the unverified points in the
+      Grok notes below
 
 **Done when:** on the Mac, `rozu chat` works end-to-end with Claude (Max) and Codex (ChatGPT) without any API key;
 a write and a destructive command requested by each CLI go through rozu's approval prompt (and an unmappable
@@ -455,6 +488,56 @@ Notes (part 2, Codex, 2026-10-13; protocol = `codex app-server generate-json-sch
   with `turn/completed` `interrupted`; `model/list` returning `model` ids that `turn/start` accepts; the static
   model ids and the 272K context window.
 
+Notes (part 3, Grok Build, 2026-10-13; protocol from Grok Build 1.0.52 ACP/headless transcripts and xAI's user
+guide; research: `grok-rozu-owned-loop.md` LIVE UPDATE, `grok-live-results.md`, `grok-memory-bridge.md`):
+- **Crate:** `rozu_cli_providers::grok` (`GrokSession` (ACP provider), `protocol` (messages, update mapping, usage
+  normalization, errors), `permissions` (agent requests → answers + audit), `install` (binary lookup, version),
+  `hook` (`rozu grok-hook`), `headless` (fallback)). Registry id `grok`; models `default` (no `-m`), `grok-4.7`,
+  `grok-4.7-build`, `grok-4.6` (static, **unverified**), 500K context assumed, `Billing::Subscription`,
+  `caps = GROK_CAPS`.
+- **Process:** one long-lived process per chat, cwd = workspace, `XAI_API_KEY` and `GROK_CLI_CHAT_PROXY_BASE_URL`
+  removed from its environment (even from explicit extra env): `<grok-native> --no-auto-update agent [-m <model>]
+  --agent-profile /tmp/rozu-grok-XXXX/rozu-agent.md stdio`. A model switch restarts it (`-m` is per process); the
+  new process gets a new session with the conversation so far. The profile (frozen) is
+  `---\nname: rozu-backend\ndescription: …\ntools: use_tool\n---\nYou are rozu's model backend.\n`.
+- **Handshake:** `initialize {protocolVersion: 1, clientCapabilities: {fs: {readTextFile: false, writeTextFile:
+  false}, terminal: false}, clientInfo}` → `authenticate {methodId: "cached_token"}` only if offered (no other method
+  is ever picked; an error → `NotLoggedIn` "run `rozu auth login grok`") → `session/new {cwd, mcpServers: [{name:
+  "rozu", command: <rozu>, args: [mcp-serve, --workspace, …, --provider, grok], env: [{name:
+  ROZU_APPROVAL_SOCKET, value}]}], _meta: {systemPromptOverride: <session system messages + rozu__ tool list with
+  input schemas>}}` ("Authentication required" → `NotLoggedIn`).
+- **Turns:** `session/prompt {sessionId, prompt: [{type: text, text}]}`; `session/update` `agent_message_chunk` →
+  text, `tool_call`/`tool_call_update` (`use_tool` `{tool_name: "rozu__x", tool_input}` → tool `x`; other tools →
+  `grok:<name>`; results from `rawOutput.output.OkayOutput` or `content`) → tool call/result events; the prompt
+  result → usage + done (`end_turn`, `max_turn_requests` → end turn; `max_tokens`; `refusal` → content filter;
+  `cancelled`). Decisions of `rozu mcp-serve --provider grok` reach the stream over the approval socket.
+- **Context epochs:** `GrokSession::rotate_epoch(EpochReason::{Masking, Compaction, ProfileRefresh, Other})` makes
+  the next turn open a new session in the same process, with the profile recomputed and the request's (rewritten)
+  history replayed as text ("Earlier in this conversation: …"). Otherwise turns append to the session. Nothing in
+  rozu calls it yet; M4's memory layer will (at batch boundaries).
+- **Cancel:** `session/cancel {sessionId}` (notification), then wait (10 s) for the prompt result; permission
+  requests meanwhile are answered `cancelled`. If it doesn't end, Grok is killed and the next turn restarts it.
+- **Hook:** `rozu grok-hook [--max-bytes N | --replace TEXT]` reads Grok's `PostToolUse` event and prints
+  `{"hookSpecificOutput": {"hookEventName": "PostToolUse", "updatedToolOutput": …}}` only for `rozu__*` tools (never
+  `search_tool`), always exit 0; no flag = passthrough. Off by default; `ROZU_GROK_HOOK_MAX_BYTES` adds it to the
+  agent profile frontmatter as `hooks: {"PostToolUse": [{"matcher": "^rozu__", "hooks": [{"type": "command",
+  "command": "'<rozu>' grok-hook --max-bytes N"}]}]}`. rozu never writes `~/.grok/hooks`.
+- **Headless fallback** (`--grok-headless`): per turn `grok --no-auto-update -p <text> --output-format
+  streaming-json [-m] --tools use_tool --disallowed-tools run_terminal_cmd,read_file,grep,list_dir,search_replace,
+  web_search,web_fetch,Agent --no-subagents --no-plan --disable-web-search --allow "MCPTool(rozu__*)"
+  --system-prompt-override <profile> [-r <session>]`; usage from `end` (uncached input, normalized); cancel kills the
+  run. Headless has no MCP-server flag, so rozu's tools need a user-registered `rozu mcp-serve`.
+- **Not done by design:** no Grok OAuth, no `x.ai/auth/*` calls, no API-key auth method, no chat proxy, no reading of
+  `~/.grok`, no writes to `~/.grok` (hooks/MCP config), no bundling of the CLI.
+- **Unverified against the real CLI** (fixtures are adapted from 1.0.52 transcripts; the real `grok` was not run for
+  this milestone): that `authMethods` offers `cached_token` (1.0.52 signed out showed only `grok.com`; rozu then
+  skips `authenticate` and relies on `session/new`); the `session/request_permission` params/options shape
+  (`toolCall`, `options[].kind` = `allow_once`/`reject_once`) and whether Grok asks at all for MCP tools over ACP;
+  `tool_call` field names over ACP (`title`/`kind`/`rawInput` assumed like headless); that `-m` before
+  `--agent-profile` works for `grok agent`; that `session/cancel` ends the prompt with `stopReason: cancelled`;
+  `hooks:` in agent-profile frontmatter (documented to exist, shape not); the static model ids and 500K window; the
+  headless built-in tool names; that Grok's MCP subprocess (rozu mcp-serve) stays in Grok's process group.
+
 ### M4: Sessions, memory, evals (≈2–3 weeks)
 - [ ] JSONL sessions + SQLite index, resume; ROZU.md memory; compaction
 - [ ] `rozu-cli eval` runner with ≥5 scripted tasks; replay tests from recorded sessions
@@ -509,7 +592,7 @@ Web search tool, MCP client, Linux/Windows, auto-update.
 |---|---|
 | Agent loop, streaming, cancel | M1 |
 | OpenAI / Anthropic / xAI (HTTP, API key) | M1 / M2 |
-| Claude CLI / Codex app-server (subscriptions) | M3.5 |
+| Claude CLI / Codex app-server / Grok Build ACP (subscriptions) | M3.5 |
 | Tools, sandbox, approvals | M1 (read), M3 (done), M3.5 (gate for CLI tools) |
 | Terminal/PTY | M3 (core), M5 (UI) |
 | Keychain API keys | M1 |

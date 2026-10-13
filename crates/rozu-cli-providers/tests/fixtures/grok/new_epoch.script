@@ -1,0 +1,8 @@
+# After rozu rotates the context epoch: a new session in the same process, then a turn with
+# the rewritten history (cold cache: only Grok's fixed block is cached).
+< session/new
+> {"jsonrpc":"2.0","id":__ID__,"result":{"sessionId":"sess-0002"}}
+< session/prompt
+> {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-0001","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"stale session, skipped"}}}}
+> {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-0002","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Fresh epoch."}}}}
+> {"jsonrpc":"2.0","id":__ID__,"result":{"stopReason":"end_turn","_meta":{"inputTokens":6000,"cachedReadTokens":1152,"outputTokens":5}}}

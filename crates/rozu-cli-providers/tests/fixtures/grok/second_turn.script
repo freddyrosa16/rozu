@@ -1,0 +1,4 @@
+# A follow-up turn in the same session: most of the prompt comes from the cache.
+< session/prompt
+> {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-0001","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Second answer."}}}}
+> {"jsonrpc":"2.0","id":__ID__,"result":{"stopReason":"end_turn","_meta":{"inputTokens":18139,"cachedReadTokens":15872,"outputTokens":20,"modelId":"grok-4.7"}}}

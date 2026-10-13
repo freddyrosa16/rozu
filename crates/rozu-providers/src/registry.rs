@@ -3,7 +3,10 @@
 
 use std::sync::Arc;
 
-use rozu_core::{LongContextPrices, ModelInfo, Provider, ProviderError, ProviderResult};
+use rozu_core::{
+    LongContextPrices, MemoryFeatures, ModelInfo, Provider, ProviderCaps, ProviderError,
+    ProviderResult,
+};
 use secrecy::SecretString;
 
 use crate::anthropic::{self, AnthropicConfig, AnthropicProvider};
@@ -21,6 +24,9 @@ enum Kind {
     /// The official Codex CLI's `codex app-server` on the user's ChatGPT subscription; built by
     /// `rozu-cli-providers`.
     Codex,
+    /// xAI's official Grok Build CLI (`grok agent stdio`, ACP) on the user's SuperGrok
+    /// subscription; built by `rozu-cli-providers`.
+    Grok,
 }
 
 /// Id of the CLI-backed Claude provider (`rozu_cli_providers::claude::PROVIDER_ID`).
@@ -35,6 +41,23 @@ pub const CODEX_ID: &str = "codex";
 pub const CODEX_STATIC_MODELS: &[&str] = &["default", "gpt-6.1-sol", "gpt-6-astra", "gpt-6-luna"];
 /// Context window assumed for Codex models (unverified; Codex reports the real one per turn).
 const CODEX_CONTEXT: u32 = 272_000;
+/// Id of the CLI-backed Grok provider (`rozu_cli_providers::grok::PROVIDER_ID`).
+pub const GROK_ID: &str = "grok";
+/// Grok Build models rozu lists. **Unverified**: seen in Grok Build 1.0.52 output (`grok-4.7`
+/// over ACP, `grok-4.7-build` in usage, `grok-4.6` in the signed-out `initialize`), not checked
+/// against what the CLI accepts for `-m`. `default` passes no `-m`, so Grok uses its own default.
+pub const GROK_STATIC_MODELS: &[&str] = &["default", "grok-4.7", "grok-4.7-build", "grok-4.6"];
+/// Context window assumed for Grok Build models (unverified; `initialize` reported 500k for the
+/// 4.5/4.6 models).
+const GROK_CONTEXT: u32 = 500_000;
+/// What rozu can do through Grok Build: it can't control the prompt prefix per turn (Grok adds
+/// its own priority rules, environment block and meta-tools, and caching is per Grok session, so
+/// a history rewrite means a new session with a cold cache), and cache writes are never reported.
+pub const GROK_CAPS: ProviderCaps = ProviderCaps {
+    prompt_prefix_control: false,
+    cache_write_reported: false,
+    memory_features: MemoryFeatures::Limited,
+};
 
 /// A provider rozu can talk to.
 #[derive(Debug, PartialEq, Eq)]
@@ -84,21 +107,38 @@ pub const PROVIDERS: &[ProviderInfo] = &[
         default_model: "default",
         kind: Kind::Codex,
     },
+    ProviderInfo {
+        id: GROK_ID,
+        label: "xAI Grok (SuperGrok subscription, via the Grok Build CLI)",
+        default_base_url: "",
+        default_model: "default",
+        kind: Kind::Grok,
+    },
 ];
 
 impl ProviderInfo {
     /// Whether this provider drives a vendor CLI on the user's subscription (no API key; built
     /// by `rozu-cli-providers`, not [`build`]).
     pub fn is_cli_backed(&self) -> bool {
-        matches!(self.kind, Kind::ClaudeCli | Kind::Codex)
+        matches!(self.kind, Kind::ClaudeCli | Kind::Codex | Kind::Grok)
     }
 
     /// Context window assumed for a model of a CLI-backed provider that isn't listed.
     fn cli_context(&self) -> u32 {
-        if self.kind == Kind::Codex {
-            CODEX_CONTEXT
+        match self.kind {
+            Kind::Codex => CODEX_CONTEXT,
+            Kind::Grok => GROK_CONTEXT,
+            _ => CLAUDE_CLI_CONTEXT,
+        }
+    }
+
+    /// A subscription model of this CLI-backed provider, with the provider's capabilities.
+    fn cli_model(&self, id: &str) -> ModelInfo {
+        let model = ModelInfo::subscription(self.id, id, self.cli_context());
+        if self.kind == Kind::Grok {
+            model.with_caps(GROK_CAPS)
         } else {
-            CLAUDE_CLI_CONTEXT
+            model
         }
     }
 
@@ -113,7 +153,7 @@ pub const DEFAULT_PROVIDER: &str = openai::PROVIDER_ID;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum RegistryError {
-    #[error("unknown provider `{0}` (known: openai, anthropic, xai, claude-cli, codex)")]
+    #[error("unknown provider `{0}` (known: openai, anthropic, xai, claude-cli, codex, grok)")]
     UnknownProvider(String),
     #[error(
         "can't tell which provider serves `{0}`; use provider/model, e.g. anthropic/{0}, or see `rozu models`"
@@ -167,6 +207,13 @@ pub fn models_for(provider: &str) -> Vec<ModelInfo> {
             .iter()
             .map(|id| ModelInfo::subscription(CODEX_ID, *id, CODEX_CONTEXT))
             .collect(),
+        Some(Kind::Grok) => {
+            let grok = provider_info(GROK_ID).expect("grok is registered");
+            GROK_STATIC_MODELS
+                .iter()
+                .map(|id| grok.cli_model(id))
+                .collect()
+        }
         None => Vec::new(),
     }
 }
@@ -220,9 +267,7 @@ pub fn resolve(provider: Option<&str>, model: Option<&str>) -> Result<ModelChoic
     };
     let info = lookup(&format!("{}/{model}", provider.id)).or_else(|| {
         // Every model is covered by the subscription, listed or not.
-        provider
-            .is_cli_backed()
-            .then(|| ModelInfo::subscription(provider.id, &model, provider.cli_context()))
+        provider.is_cli_backed().then(|| provider.cli_model(&model))
     });
     Ok(ModelChoice {
         provider,
@@ -281,7 +326,7 @@ pub fn build(
             }
             Arc::new(AnthropicProvider::new(config)?)
         }
-        Kind::ClaudeCli | Kind::Codex => {
+        Kind::ClaudeCli | Kind::Codex | Kind::Grok => {
             return Err(ProviderError::BadRequest {
                 status: 0,
                 message: format!(
@@ -337,6 +382,7 @@ pub(crate) fn model_table(provider: &str, rows: &[ModelRow]) -> Vec<ModelInfo> {
                 price_cache_write_per_mtok: p.write,
             }),
             billing: rozu_core::Billing::Metered,
+            caps: ProviderCaps::FULL,
         })
         .collect()
 }
@@ -465,16 +511,20 @@ mod tests {
         let all = models();
         for (i, model) in all.iter().enumerate() {
             for other in all[i + 1..].iter().filter(|other| other.id == model.id) {
-                // Codex serves OpenAI's models on the subscription; a bare id still means the
-                // API-key provider listed first.
-                assert!(
-                    other.provider == CODEX_ID && model.provider == openai::PROVIDER_ID,
-                    "duplicate {} ({} and {})",
-                    model.id,
-                    model.provider,
-                    other.provider
+                // Codex and Grok serve OpenAI's and xAI's models on the subscription (and both
+                // have `default`); a bare id still means the provider listed first.
+                let allowed = matches!(
+                    (model.provider.as_str(), other.provider.as_str()),
+                    (openai::PROVIDER_ID, CODEX_ID)
+                        | (xai::PROVIDER_ID, GROK_ID)
+                        | (CODEX_ID, GROK_ID)
                 );
-                assert_eq!(lookup(&model.id).unwrap().provider, openai::PROVIDER_ID);
+                assert!(
+                    allowed,
+                    "duplicate {} ({} and {})",
+                    model.id, model.provider, other.provider
+                );
+                assert_eq!(lookup(&model.id).unwrap().provider, model.provider);
             }
         }
     }
@@ -601,6 +651,38 @@ mod tests {
         assert!(choice.info.is_some_and(|info| !info.is_metered()));
         // ...while the HTTP provider keeps the same id priced.
         assert!(lookup("anthropic/claude-opus-4-5").is_none_or(|m| m.is_metered()));
+    }
+
+    #[test]
+    fn grok_models_are_subscription_billed_with_limited_memory_features() {
+        let provider = provider_info(GROK_ID).unwrap();
+        assert!(provider.is_cli_backed() && !provider.needs_api_key());
+        let models = models_for(GROK_ID);
+        assert!(models.iter().any(|m| m.id == "grok-4.7"));
+        for model in &models {
+            assert!(!model.is_metered(), "{}", model.id);
+            assert_eq!(model.caps, GROK_CAPS, "{}", model.id);
+        }
+        assert_eq!(
+            GROK_CAPS,
+            ProviderCaps {
+                prompt_prefix_control: false,
+                cache_write_reported: false,
+                memory_features: MemoryFeatures::Limited,
+            }
+        );
+        assert_eq!(resolve(Some(GROK_ID), None).unwrap().spec(), "grok/default");
+        // `--provider grok --model grok-4.7` is the subscription, not the xAI API.
+        let choice = resolve(Some(GROK_ID), Some("grok-4.7")).unwrap();
+        assert_eq!(choice.spec(), "grok/grok-4.7");
+        let info = choice.info.unwrap();
+        assert!(!info.is_metered() && info.caps == GROK_CAPS);
+        let unlisted = resolve(Some(GROK_ID), Some("grok-build-next")).unwrap();
+        assert_eq!(unlisted.info.unwrap().caps, GROK_CAPS);
+        // A bare id still means the API-key provider, with full capabilities.
+        let api = resolve(None, Some("grok-4.7")).unwrap();
+        assert_eq!(api.spec(), "xai/grok-4.7");
+        assert_eq!(api.info.unwrap().caps, ProviderCaps::FULL);
     }
 
     #[test]

@@ -396,6 +396,7 @@ async fn usage_and_cost_aggregate_per_turn() {
                 price_cache_write_per_mtok: 2.5,
                 long_context: None,
                 billing: Billing::Metered,
+                caps: Default::default(),
             });
         },
         |_| {},
@@ -462,6 +463,7 @@ async fn long_context_tier_applies_per_response_not_per_turn() {
                     price_cache_write_per_mtok: 1.0,
                     long_context: None,
                     billing: Billing::Metered,
+                    caps: Default::default(),
                 }
                 .with_long_context(LongContextPrices {
                     threshold_tokens: 200_000,

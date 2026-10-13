@@ -6,6 +6,15 @@ use rozu_core::{ChatRequest, Role};
 /// conversation when the CLI hasn't seen it (a fresh session after talking to another model, or
 /// after the CLI was restarted).
 pub fn turn_text(req: &ChatRequest, cli_has_history: bool) -> String {
+    turn_text_with(
+        req,
+        cli_has_history,
+        "Earlier in this conversation (with another model):",
+    )
+}
+
+/// [`turn_text`] with the earlier conversation introduced by `header`.
+pub fn turn_text_with(req: &ChatRequest, cli_has_history: bool, header: &str) -> String {
     let mut turns: Vec<(Role, String)> = req
         .messages
         .iter()
@@ -24,7 +33,7 @@ pub fn turn_text(req: &ChatRequest, cli_has_history: bool) -> String {
     if cli_has_history || turns.is_empty() {
         return latest;
     }
-    let mut text = String::from("Earlier in this conversation (with another model):\n");
+    let mut text = format!("{header}\n");
     for (role, said) in turns {
         let who = if role == Role::User {
             "User"
