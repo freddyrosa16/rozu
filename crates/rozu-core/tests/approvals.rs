@@ -121,6 +121,8 @@ impl Fixture {
         }
     }
 
+    /// Only the Seatbelt (macOS) tests use this.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     fn canary(&self, name: &str) -> PathBuf {
         let path = self.outside.join(name);
         std::fs::write(&path, "canary").unwrap();
