@@ -20,10 +20,11 @@ pub use approval::{
     DecisionSource, PrefixRule, ReadOnlyGate, SandboxMode, approvals_path,
 };
 pub use model::{
-    ChatRequest, ContentPart, Message, ModelInfo, Role, StopReason, StreamEvent, ToolSpec, Usage,
+    ChatRequest, ContentPart, LongContextPrices, Message, ModelInfo, Role, StopReason, StreamEvent,
+    ToolSpec, Usage,
 };
 pub use provider::{EventStream, Provider, ProviderError, ProviderResult};
-pub use telemetry::{init_tracing, redact};
+pub use telemetry::{LogTarget, default_log_path, init_tracing, redact};
 
 /// Version of this crate.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

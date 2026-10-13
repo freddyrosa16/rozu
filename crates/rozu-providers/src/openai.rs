@@ -362,20 +362,42 @@ impl SseState {
     }
 }
 
-/// Known OpenAI models: (id, context window, USD per 1M input / output / cached input tokens).
-/// Caching is implicit, so cache writes cost the normal input price.
-// Prices NEED VERIFICATION against https://openai.com/api/pricing before relying on cost totals;
-// they are list prices as last checked by hand and change without notice.
+/// Known OpenAI models with USD per 1M input / cached input / cache write / output tokens.
+/// Models without a billed cache write use the input price for it.
+// Prices as of 2026-10-13, standard tier, from https://platform.openai.com/docs/pricing; context
+// windows from https://developers.openai.com/api/docs/models (gpt-5.x and gpt-4.1 carried over).
+// Long context is a prompt over 272K tokens; the page only gives a long-context row for
+// gpt-6.1-sol. TODO: add the tiers for gpt-6-astra/gpt-6-luna once their rows are confirmed.
+// Not listed because their context windows weren't on the models page: gpt-6-sol, gpt-5.6-*,
+// gpt-5.5, gpt-5.4*, gpt-5.3-codex, gpt-5.2 (they still work, just without cost estimates).
 pub fn models() -> Vec<ModelInfo> {
+    use crate::registry::prices;
     crate::registry::model_table(
         PROVIDER_ID,
-        1.0,
         &[
-            ("gpt-5.1", 400_000, 1.25, 10.0, 0.125),
-            ("gpt-5", 400_000, 1.25, 10.0, 0.125),
-            ("gpt-5-mini", 400_000, 0.25, 2.0, 0.025),
-            ("gpt-5-nano", 400_000, 0.05, 0.40, 0.005),
-            ("gpt-4.1", 1_047_576, 2.0, 8.0, 0.50),
+            (
+                "gpt-6.1-sol",
+                1_050_000,
+                prices(2.0, 0.10, 2.50, 10.0),
+                Some((272_001, prices(4.0, 0.20, 5.0, 15.0))),
+            ),
+            (
+                "gpt-6-astra",
+                1_050_000,
+                prices(10.0, 1.0, 12.50, 50.0),
+                None,
+            ),
+            (
+                "gpt-6-luna",
+                1_050_000,
+                prices(0.10, 0.01, 0.125, 0.50),
+                None,
+            ),
+            ("gpt-5.1", 400_000, prices(1.25, 0.125, 1.25, 10.0), None),
+            ("gpt-5", 400_000, prices(1.25, 0.125, 1.25, 10.0), None),
+            ("gpt-5-mini", 400_000, prices(0.25, 0.025, 0.25, 2.0), None),
+            ("gpt-5-nano", 400_000, prices(0.05, 0.005, 0.05, 0.40), None),
+            ("gpt-4.1", 1_047_576, prices(2.0, 0.50, 2.0, 8.0), None),
         ],
     )
 }

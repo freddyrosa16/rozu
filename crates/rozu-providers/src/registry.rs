@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use rozu_core::{ModelInfo, Provider, ProviderResult};
+use rozu_core::{LongContextPrices, ModelInfo, Provider, ProviderResult};
 use secrecy::SecretString;
 
 use crate::anthropic::{self, AnthropicConfig, AnthropicProvider};
@@ -35,21 +35,21 @@ pub const PROVIDERS: &[ProviderInfo] = &[
         id: openai::PROVIDER_ID,
         label: "OpenAI",
         default_base_url: openai::DEFAULT_BASE_URL,
-        default_model: "gpt-5.1",
+        default_model: "gpt-6.1-sol",
         kind: Kind::OpenAi,
     },
     ProviderInfo {
         id: anthropic::PROVIDER_ID,
         label: "Anthropic",
         default_base_url: anthropic::DEFAULT_BASE_URL,
-        default_model: "claude-sonnet-4-5",
+        default_model: "claude-sonnet-5-5",
         kind: Kind::Anthropic,
     },
     ProviderInfo {
         id: xai::PROVIDER_ID,
         label: "xAI",
         default_base_url: xai::DEFAULT_BASE_URL,
-        default_model: "grok-4",
+        default_model: "grok-4.7",
         kind: Kind::Xai,
     },
 ];
@@ -214,32 +214,57 @@ pub fn build(
     })
 }
 
-/// Builds [`ModelInfo`]s from `(id, context window, $/M in, $/M out, $/M cached in)` rows. The
-/// cache-write price is `cache_write_multiplier` times the input price. All listed models support
-/// tool calling.
-pub(crate) fn model_table(
-    provider: &str,
-    cache_write_multiplier: f64,
-    rows: &[(&str, u32, f64, f64, f64)],
-) -> Vec<ModelInfo> {
+/// USD per million tokens, in the order the pricing pages list them: input, cached input (cache
+/// read), cache write, output. Providers that don't bill cache writes use the input price.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Prices {
+    pub input: f64,
+    pub cached: f64,
+    pub write: f64,
+    pub output: f64,
+}
+
+pub(crate) const fn prices(input: f64, cached: f64, write: f64, output: f64) -> Prices {
+    Prices {
+        input,
+        cached,
+        write,
+        output,
+    }
+}
+
+/// A model's prices: standard, plus an optional long-context tier `(threshold tokens, prices)`
+/// that applies to requests whose prompt has at least that many tokens.
+pub(crate) type ModelRow = (&'static str, u32, Prices, Option<(u64, Prices)>);
+
+/// Builds [`ModelInfo`]s from `(id, context window, prices, long-context tier)` rows. All listed
+/// models support tool calling.
+pub(crate) fn model_table(provider: &str, rows: &[ModelRow]) -> Vec<ModelInfo> {
     rows.iter()
-        .map(
-            |&(id, context_window, price_in, price_out, price_cached)| ModelInfo {
-                id: id.to_owned(),
-                provider: provider.to_owned(),
-                context_window,
-                supports_tools: true,
-                price_in_per_mtok: price_in,
-                price_out_per_mtok: price_out,
-                price_cached_in_per_mtok: price_cached,
-                price_cache_write_per_mtok: price_in * cache_write_multiplier,
-            },
-        )
+        .map(|&(id, context_window, p, long)| ModelInfo {
+            id: id.to_owned(),
+            provider: provider.to_owned(),
+            context_window,
+            supports_tools: true,
+            price_in_per_mtok: p.input,
+            price_out_per_mtok: p.output,
+            price_cached_in_per_mtok: p.cached,
+            price_cache_write_per_mtok: p.write,
+            long_context: long.map(|(threshold_tokens, p)| LongContextPrices {
+                threshold_tokens,
+                price_in_per_mtok: p.input,
+                price_out_per_mtok: p.output,
+                price_cached_in_per_mtok: p.cached,
+                price_cache_write_per_mtok: p.write,
+            }),
+        })
         .collect()
 }
 
 #[cfg(test)]
 mod tests {
+    use rozu_core::Usage;
+
     use super::*;
 
     fn choice(provider: Option<&str>, model: Option<&str>) -> (String, String, bool) {
@@ -263,18 +288,72 @@ mod tests {
                 assert!(model.context_window > 0 && model.supports_tools);
                 assert!(model.price_cached_in_per_mtok <= model.price_in_per_mtok);
                 assert!(model.price_cache_write_per_mtok >= model.price_in_per_mtok);
+                if let Some(long) = model.long_context {
+                    // The tier is reachable and never cheaper than the standard prices.
+                    assert!(
+                        long.threshold_tokens < u64::from(model.context_window),
+                        "{}",
+                        model.id
+                    );
+                    assert!(long.price_in_per_mtok > model.price_in_per_mtok);
+                    assert!(long.price_out_per_mtok > model.price_out_per_mtok);
+                    assert!(long.price_cached_in_per_mtok >= model.price_cached_in_per_mtok);
+                    assert!(long.price_cache_write_per_mtok >= model.price_cache_write_per_mtok);
+                }
             }
         }
     }
 
     #[test]
+    fn retired_and_unlisted_models_are_gone() {
+        for spec in [
+            "anthropic/claude-opus-4-1",
+            "xai/grok-4",
+            "xai/grok-4-fast-reasoning",
+        ] {
+            assert!(lookup(spec).is_none(), "{spec} should not be listed");
+        }
+    }
+
+    #[test]
     fn cache_write_prices() {
-        let sonnet = lookup("anthropic/claude-sonnet-4-5").unwrap();
-        assert!((sonnet.price_cache_write_per_mtok - 3.75).abs() < 1e-9);
-        for spec in ["openai/gpt-5.1", "xai/grok-4"] {
+        let sonnet = lookup("anthropic/claude-sonnet-5-5").unwrap();
+        assert!((sonnet.price_cache_write_per_mtok - 2.50).abs() < 1e-9);
+        assert!((sonnet.price_cached_in_per_mtok - 0.10).abs() < 1e-9);
+        // OpenAI bills cache writes on the gpt-6 family, not on older models; xAI never does.
+        let sol = lookup("openai/gpt-6.1-sol").unwrap();
+        assert!((sol.price_cache_write_per_mtok - 2.50).abs() < 1e-9);
+        for spec in ["openai/gpt-5.1", "xai/grok-4.7"] {
             let model = lookup(spec).unwrap();
             assert_eq!(model.price_cache_write_per_mtok, model.price_in_per_mtok);
         }
+    }
+
+    #[test]
+    fn long_context_tiers_match_the_pricing_pages() {
+        let usage = |input| Usage {
+            input_tokens: input,
+            output_tokens: 1_000_000,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+        };
+        let cost = |spec: &str, input| lookup(spec).unwrap().cost_usd(&usage(input));
+        // gpt-6.1-sol: over 272K prompt tokens, 4.00 in / 15.00 out.
+        assert!((cost("openai/gpt-6.1-sol", 272_000) - (0.544 + 10.0)).abs() < 1e-9);
+        assert!((cost("openai/gpt-6.1-sol", 272_001) - (1.088_004 + 15.0)).abs() < 1e-9);
+        // Haiku 5.5: over 100,000 prompt tokens, 0.50 in / 2.50 out.
+        assert!((cost("anthropic/claude-haiku-5-5", 100_000) - (0.01 + 0.5)).abs() < 1e-9);
+        assert!((cost("anthropic/claude-haiku-5-5", 100_001) - (0.050_000_5 + 2.5)).abs() < 1e-9);
+        // xAI: a prompt reaching 200K tokens doubles every price.
+        assert!((cost("xai/grok-4.7", 199_999) - (0.399_998 + 6.0)).abs() < 1e-9);
+        assert!((cost("xai/grok-4.7", 200_000) - (0.8 + 12.0)).abs() < 1e-9);
+        // Sonnet 5.5 has 1M context at standard prices.
+        assert!(
+            lookup("anthropic/claude-sonnet-5-5")
+                .unwrap()
+                .long_context
+                .is_none()
+        );
     }
 
     #[test]
@@ -296,8 +375,12 @@ mod tests {
             "anthropic"
         );
         assert_eq!(lookup("claude-sonnet-4-5").unwrap().provider, "anthropic");
-        assert_eq!(lookup("grok-4").unwrap().provider, "xai");
+        assert_eq!(lookup("grok-4.7").unwrap().provider, "xai");
         assert_eq!(lookup("openai/gpt-5.1").unwrap().context_window, 400_000);
+        assert_eq!(
+            lookup("openai/gpt-6.1-sol").unwrap().context_window,
+            1_050_000
+        );
         assert!(lookup("openai/claude-sonnet-4-5").is_none());
         assert!(lookup("nope/gpt-5.1").is_none());
         assert!(lookup("gpt-9000").is_none());
@@ -307,23 +390,28 @@ mod tests {
     fn resolves_defaults() {
         assert_eq!(
             choice(None, None),
-            ("openai".into(), "gpt-5.1".into(), true)
+            ("openai".into(), "gpt-6.1-sol".into(), true)
         );
         assert_eq!(
             choice(Some("anthropic"), None),
-            ("anthropic".into(), "claude-sonnet-4-5".into(), true)
+            ("anthropic".into(), "claude-sonnet-5-5".into(), true)
         );
         assert_eq!(
             choice(Some("xai"), Some("  ")),
-            ("xai".into(), "grok-4".into(), true)
+            ("xai".into(), "grok-4.7".into(), true)
         );
     }
 
     #[test]
     fn resolves_specs_and_bare_ids() {
         assert_eq!(
+            choice(None, Some("xai/grok-4.7")),
+            ("xai".into(), "grok-4.7".into(), true)
+        );
+        // Retired ids still resolve (the provider decides), just without prices.
+        assert_eq!(
             choice(None, Some("xai/grok-4")),
-            ("xai".into(), "grok-4".into(), true)
+            ("xai".into(), "grok-4".into(), false)
         );
         assert_eq!(
             choice(None, Some("claude-haiku-4-5")),
@@ -369,7 +457,7 @@ mod tests {
             Err(RegistryError::UnknownModel("mystery".into()))
         );
         assert!(matches!(
-            resolve(Some("openai"), Some("xai/grok-4")),
+            resolve(Some("openai"), Some("xai/grok-4.7")),
             Err(RegistryError::ProviderMismatch { .. })
         ));
     }

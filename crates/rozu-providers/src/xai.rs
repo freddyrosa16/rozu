@@ -22,21 +22,47 @@ pub fn provider(api_key: SecretString) -> ProviderResult<OpenAiProvider> {
     OpenAiProvider::new(config(api_key))
 }
 
-/// Known xAI models: (id, context window, USD per 1M input / output / cached input tokens).
-/// Caching is implicit, so cache writes cost the normal input price.
-// Prices NEED VERIFICATION against https://docs.x.ai/docs/models before relying on cost totals;
-// they are list prices as last checked by hand and change without notice (grok-4 also charges
-// more above 128k input tokens, which is not modeled).
+/// Known xAI models with USD per 1M input / cached input / cache write / output tokens. Caching
+/// is implicit, so cache writes cost the normal input price.
+// Prices and context windows as of 2026-10-13 from https://docs.x.ai/docs/models. A request whose
+// prompt reaches 200K tokens is billed at the higher rate for all of its tokens.
 pub fn models() -> Vec<ModelInfo> {
+    use crate::registry::prices;
+    const LONG: u64 = 200_000;
+    let grok_4_7 = prices(2.0, 0.50, 2.0, 6.0);
+    let grok_4_7_long = prices(4.0, 1.0, 4.0, 12.0);
+    let grok_4_3 = prices(1.25, 0.20, 1.25, 2.50);
+    let grok_4_3_long = prices(2.50, 0.40, 2.50, 5.0);
     crate::registry::model_table(
         PROVIDER_ID,
-        1.0,
         &[
-            ("grok-4", 256_000, 3.0, 15.0, 0.75),
-            ("grok-4-fast-reasoning", 2_000_000, 0.20, 0.50, 0.05),
-            ("grok-4-fast-non-reasoning", 2_000_000, 0.20, 0.50, 0.05),
-            ("grok-code-fast-1", 256_000, 0.20, 1.50, 0.02),
-            ("grok-3-mini", 131_072, 0.30, 0.50, 0.075),
+            ("grok-4.7", 500_000, grok_4_7, Some((LONG, grok_4_7_long))),
+            ("grok-4.6", 500_000, grok_4_7, Some((LONG, grok_4_7_long))),
+            (
+                "grok-4.5",
+                500_000,
+                prices(2.0, 0.30, 2.0, 6.0),
+                Some((LONG, prices(4.0, 0.60, 4.0, 12.0))),
+            ),
+            ("grok-4.3", 1_000_000, grok_4_3, Some((LONG, grok_4_3_long))),
+            (
+                "grok-4.20-0309-reasoning",
+                1_000_000,
+                grok_4_3,
+                Some((LONG, grok_4_3_long)),
+            ),
+            (
+                "grok-4.20-0309-non-reasoning",
+                1_000_000,
+                grok_4_3,
+                Some((LONG, grok_4_3_long)),
+            ),
+            (
+                "grok-build-0.1",
+                256_000,
+                prices(1.0, 0.20, 1.0, 2.0),
+                Some((LONG, prices(2.0, 0.40, 2.0, 4.0))),
+            ),
         ],
     )
 }

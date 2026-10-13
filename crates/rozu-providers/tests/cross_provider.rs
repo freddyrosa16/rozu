@@ -39,7 +39,7 @@ const CASES: [Case; 3] = [
         call_id: "toolu_01abc",
     },
     Case {
-        spec: "xai/grok-4",
+        spec: "xai/grok-4.7",
         base_suffix: "/v1",
         endpoint: "/v1/responses",
         tool_call: include_str!("fixtures/xai/tool_call.sse"),

@@ -8,7 +8,15 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 const TEXT_FIXTURE: &str = include_str!("../../rozu-providers/tests/fixtures/openai/text.sse");
 
 fn rozu() -> Command {
-    Command::cargo_bin("rozu").expect("rozu binary is built")
+    let mut cmd = Command::cargo_bin("rozu").expect("rozu binary is built");
+    // Keep test logs out of the developer's ~/Library/Logs.
+    cmd.env(
+        "ROZU_LOG_FILE",
+        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("rozu-cli-tests.log"),
+    )
+    .env_remove("ROZU_LOG_STDERR")
+    .env_remove("RUST_LOG");
+    cmd
 }
 
 fn sse(body: &str) -> ResponseTemplate {
@@ -67,7 +75,7 @@ fn chat_with_anthropic_provider() {
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].url.path(), "/v1/messages");
     let body: Value = serde_json::from_slice(&requests[0].body).unwrap();
-    assert_eq!(body["model"], "claude-sonnet-4-5");
+    assert_eq!(body["model"], "claude-sonnet-5-5");
     assert!(body["system"][0]["text"].as_str().unwrap().contains("rozu"));
     assert!(
         runtime
@@ -93,7 +101,7 @@ fn repl_model_switch_applies_to_the_next_turn() {
         .assert()
         .success()
         .stdout("Hello, world!\nHello, world!\n")
-        .stderr(contains("model: openai/gpt-5.1"))
+        .stderr(contains("model: openai/gpt-6.1-sol"))
         .stderr(contains("unknown provider `nope`"))
         .stderr(contains("switched to anthropic/claude-haiku-4-5"));
 
@@ -128,6 +136,16 @@ fn repl_model_switch_applies_to_the_next_turn() {
 }
 
 #[test]
+fn chat_rejects_zero_max_steps() {
+    rozu()
+        .args(["chat", "--max-steps", "0", "hi"])
+        .assert()
+        .code(2)
+        .stderr(contains("invalid value '0' for '--max-steps <MAX_STEPS>'"))
+        .stderr(contains("0 is not in 1..=200"));
+}
+
+#[test]
 fn chat_rejects_unknown_provider() {
     rozu()
         .env_remove("ROZU_MODEL")
@@ -142,16 +160,19 @@ fn models_lists_every_provider_with_prices() {
     let output = rozu().arg("models").assert().success().get_output().clone();
     let stdout = String::from_utf8(output.stdout).expect("utf-8 output");
     for line in [
-        "openai/gpt-5.1 *",
-        "anthropic/claude-sonnet-4-5 *",
-        "xai/grok-4 *",
+        "openai/gpt-6.1-sol *",
+        "anthropic/claude-sonnet-5-5 *",
+        "xai/grok-4.7 *",
     ] {
         assert!(stdout.contains(line), "missing {line} in:\n{stdout}");
     }
+    assert!(!stdout.contains("claude-opus-4-1"), "{stdout}");
     assert!(
         stdout.contains("CONTEXT") && stdout.contains("400K"),
         "{stdout}"
     );
+    // Long-context tiers are shown.
+    assert!(stdout.contains(">272K"), "{stdout}");
     assert!(stdout.contains("verify them"), "{stdout}");
 }
 
@@ -353,6 +374,68 @@ fn chat_reports_provider_errors() {
         .failure()
         .stderr(contains("authentication failed (HTTP 401)"))
         .stderr(contains("sk-test-0123456789abcdef").not());
+}
+
+/// A mock OpenAI server that always fails with 500, so the retry loop logs `warn!`s.
+fn failing_server(runtime: &tokio::runtime::Runtime) -> MockServer {
+    runtime.block_on(async {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(500)
+                    .insert_header("retry-after-ms", "1")
+                    .set_body_string("boom"),
+            )
+            .mount(&server)
+            .await;
+        server
+    })
+}
+
+#[test]
+fn warnings_go_to_the_log_file_not_stderr() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let server = failing_server(&runtime);
+    let dir = tempfile::tempdir().unwrap();
+    let logs = tempfile::tempdir().unwrap();
+    let log_file = logs.path().join("sub/rozu.log");
+
+    let output = chat(&server, dir.path())
+        .env("ROZU_LOG_FILE", &log_file)
+        .arg("hi")
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("error:"), "{stderr}");
+    assert!(
+        !stderr.contains("WARN") && !stderr.contains("retrying request"),
+        "{stderr}"
+    );
+
+    let logged = std::fs::read_to_string(&log_file).unwrap();
+    assert!(
+        logged.contains("WARN") && logged.contains("retrying request"),
+        "{logged}"
+    );
+    // Plain text (no ANSI colours) and still redacted.
+    assert!(!logged.contains('\x1b'), "{logged}");
+    assert!(!logged.contains("0123456789abcdef"), "{logged}");
+}
+
+#[test]
+fn rozu_log_stderr_brings_logs_back_to_the_terminal() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let server = failing_server(&runtime);
+    let dir = tempfile::tempdir().unwrap();
+
+    chat(&server, dir.path())
+        .env("ROZU_LOG_STDERR", "1")
+        .arg("hi")
+        .assert()
+        .failure()
+        .stderr(contains("WARN").and(contains("retrying request")));
 }
 
 #[test]

@@ -26,12 +26,37 @@ pub fn run() -> anyhow::Result<ExitCode> {
             price(model.price_cached_in_per_mtok),
             price(model.price_cache_write_per_mtok),
         );
+        if let Some(long) = model.long_context {
+            println!(
+                "{:<38}{:>9}{:>9}{:>9}{:>12}{:>14}",
+                format!("  prompt {}", threshold(long.threshold_tokens)),
+                "",
+                price(long.price_in_per_mtok),
+                price(long.price_out_per_mtok),
+                price(long.price_cached_in_per_mtok),
+                price(long.price_cache_write_per_mtok),
+            );
+        }
     }
     println!(
         "\n* default for its provider. Prices are USD per million tokens, copied by hand from the \
-         providers' pricing pages; verify them before relying on cost estimates."
+         providers' pricing pages (as of 2026-10-13); verify them before relying on cost \
+         estimates. An indented `prompt` row is a long-context tier: a request with that many \
+         prompt tokens pays those prices for all of its tokens."
     );
     Ok(ExitCode::SUCCESS)
+}
+
+/// `>272K` for a tier starting just over a round number, `≥200K` for one starting at it.
+fn threshold(tokens: u64) -> String {
+    if tokens % 1000 == 1 {
+        format!(">{}K", tokens / 1000)
+    } else {
+        format!(
+            "≥{}",
+            self::tokens(u32::try_from(tokens).unwrap_or(u32::MAX))
+        )
+    }
 }
 
 /// `400K`, `2M`, `1.05M`.
@@ -66,5 +91,8 @@ mod tests {
         assert_eq!(price(3.0), "3.00");
         assert_eq!(price(0.125), "0.125");
         assert_eq!(price(0.05), "0.05");
+        assert_eq!(threshold(272_001), ">272K");
+        assert_eq!(threshold(100_001), ">100K");
+        assert_eq!(threshold(200_000), "≥200K");
     }
 }
