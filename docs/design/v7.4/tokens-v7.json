@@ -1,5 +1,5 @@
 {
-  "$description": "rozu tokens v7 (CURRENT SPEC: v7.3 activity orb pill). Layered after tokens-v6.json. Deprecated from v6: bead.*, size.beadDiameter22, motion.morph 480ms, trail, arcBow, and the v5 progress line under the pill. CSS: tokens.css \u2192 tokens-v4.css \u2192 tokens-v5.css \u2192 tokens-v6.css \u2192 tokens-v7.css.",
+  "$description": "rozu tokens v7 (CURRENT SPEC: v7.4 activity orb pill: five orbs). Layered after tokens-v6.json. Deprecated from v6: bead.*, size.beadDiameter22, motion.morph 480ms, trail, arcBow, and the v5 progress line under the pill. CSS: tokens.css \u2192 tokens-v4.css \u2192 tokens-v5.css \u2192 tokens-v6.css \u2192 tokens-v7.css.",
   "color": {
     "orbDot": {
       "$type": "color",
@@ -137,21 +137,6 @@
     "snapMaxDevicePx": {
       "$type": "number",
       "$value": 1.6
-    },
-    "contextAlpha": {
-      "$type": "number",
-      "$value": [
-        0.18,
-        0.3
-      ],
-      "$description": "faded context dots (cue dots \u03b1 1)"
-    },
-    "cueSize": {
-      "$type": "number",
-      "$value": [
-        1.25,
-        1.4
-      ]
     }
   },
   "motion": {
@@ -180,54 +165,34 @@
       "$value": "150ms"
     },
     "orbTempo": {
-      "thinking": {
+      "working": {
         "$type": "duration",
-        "$value": "1.6s"
-      },
-      "searching": {
-        "$type": "duration",
-        "$value": "2.4s",
-        "$description": "lens orbit"
-      },
-      "reading": {
-        "$type": "duration",
-        "$value": "2.2s"
-      },
-      "readingBand": {
-        "$type": "duration",
-        "$value": "4.4s"
-      },
-      "notes": {
-        "$type": "duration",
-        "$value": "3.0s"
-      },
-      "editing": {
-        "$type": "duration",
-        "$value": "530ms"
-      },
-      "running": {
-        "$type": "duration",
-        "$value": "800ms"
+        "$value": "1.4s",
+        "$description": "comet orbit; the sphere yaws .35 rad/s"
       },
       "waiting": {
         "$type": "duration",
-        "$value": "2.6s"
+        "$value": "1.8s",
+        "$description": "ping and breath"
       },
-      "offlineTick": {
+      "doneDraw": {
         "$type": "duration",
-        "$value": "300ms"
+        "$value": "450ms",
+        "$description": "check stroke, from 250ms, then a 250ms pop"
       },
-      "doneRipple": {
+      "errorShake": {
         "$type": "duration",
-        "$value": "1.1s"
+        "$value": "900ms",
+        "$description": "damped shake, from 300ms"
+      },
+      "offline": {
+        "$type": "duration",
+        "$value": "2.4s",
+        "$description": "dashed ring turn"
       },
       "settle": {
         "$type": "duration",
         "$value": "1.3s"
-      },
-      "notesStroke": {
-        "$type": "duration",
-        "$value": "1.5s"
       }
     }
   },
