@@ -41,6 +41,9 @@ pub struct ToolExecutor {
     pub audit: Option<Arc<AuditLog>>,
     /// The session's private temp dir, the only temp location sandboxed commands may write.
     pub temp: Option<Arc<SessionTemp>>,
+    /// The CLI-backed provider whose requests this executor decides (e.g. `codex`), recorded in
+    /// the audit log.
+    pub provider: Option<String>,
 }
 
 impl ToolExecutor {
@@ -66,11 +69,17 @@ impl ToolExecutor {
             default_timeout: DEFAULT_TOOL_TIMEOUT,
             audit: None,
             temp,
+            provider: None,
         }
     }
 
     pub fn with_audit(mut self, audit: Option<Arc<AuditLog>>) -> Self {
         self.audit = audit;
+        self
+    }
+
+    pub fn with_provider(mut self, provider: Option<String>) -> Self {
+        self.provider = provider;
         self
     }
 
@@ -250,6 +259,27 @@ impl ToolExecutor {
         (decision, source)
     }
 
+    /// Decides `request` by asking the gate (the user) whatever the mode or rules say, e.g. for a
+    /// vendor CLI's sandbox or network escalation. Logs the decision like [`Self::decide`]; an
+    /// "always allow" answer is treated as a one-time approval and stores nothing.
+    pub async fn ask_user(
+        &self,
+        request: &ApprovalRequest,
+        cancel: &CancellationToken,
+        events: &mpsc::Sender<AgentEvent>,
+    ) -> (Decision, DecisionSource) {
+        let (mut decision, source) = self.ask_gate(request, cancel).await;
+        if decision == Decision::AlwaysAllowPrefix {
+            decision = Decision::Approve;
+        }
+        let _ = events
+            .send(AgentEvent::Approval(
+                self.record_decision(request, &decision, &source),
+            ))
+            .await;
+        (decision, source)
+    }
+
     /// Records a decision in the trace log (target `rozu::approval`) and the audit log, and
     /// returns its log entry.
     pub fn record_decision(
@@ -260,7 +290,7 @@ impl ToolExecutor {
     ) -> ApprovalRecord {
         let record = log_decision(request, decision, source);
         if let Some(audit) = &self.audit {
-            audit.record(&record, self.policy.mode());
+            audit.record_for(&record, self.policy.mode(), self.provider.as_deref());
         }
         record
     }

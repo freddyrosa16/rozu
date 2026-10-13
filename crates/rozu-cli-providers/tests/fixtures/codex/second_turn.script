@@ -1,0 +1,6 @@
+# A second turn on the same thread: the thread total grows to 3000/2400/70.
+< turn/start
+> {"id":__ID__,"result":{"turn":{"id":"turn_2","items":[],"status":"inProgress"}}}
+> {"method":"item/completed","params":{"item":{"type":"agentMessage","id":"msg_2","text":"Second answer."},"threadId":"thr_1","turnId":"turn_2"}}
+> {"method":"thread/tokenUsage/updated","params":{"threadId":"thr_1","turnId":"turn_2","tokenUsage":{"last":{"inputTokens":1800,"cachedInputTokens":1400,"outputTokens":40,"reasoningOutputTokens":0,"totalTokens":1840},"total":{"inputTokens":3000,"cachedInputTokens":2400,"outputTokens":70,"reasoningOutputTokens":10,"totalTokens":3070},"modelContextWindow":272000}}}
+> {"method":"turn/completed","params":{"threadId":"thr_1","turn":{"id":"turn_2","items":[],"status":"completed"}}}

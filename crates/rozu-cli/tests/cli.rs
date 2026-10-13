@@ -20,7 +20,9 @@ fn rozu() -> Command {
         std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("rozu-cli-tests-approvals.jsonl"),
     )
     .env_remove("ROZU_LOG_STDERR")
-    .env_remove("RUST_LOG");
+    .env_remove("RUST_LOG")
+    // Never run the developer's real Codex CLI (e.g. for `rozu models`).
+    .env("ROZU_CODEX_BIN", "/nonexistent/codex");
     cmd
 }
 

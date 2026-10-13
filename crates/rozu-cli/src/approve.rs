@@ -12,7 +12,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use clap::ValueEnum;
-use rozu_core::{ApprovalGate, ApprovalMode, ApprovalRequest, Decision};
+use rozu_core::{
+    ApprovalGate, ApprovalMode, ApprovalRequest, CODEX_SANDBOX, Decision, SandboxMode,
+};
 use tokio::sync::{Mutex, mpsc, oneshot};
 
 /// `--approval` values.
@@ -146,6 +148,9 @@ fn deny(reason: &str) -> Decision {
 /// What the `u` key does, spelled out on every card that offers it.
 const UNSANDBOXED_KEY: &str =
     "[u] run UNSANDBOXED, this command only (no sandbox: full access to your files and network)";
+/// `u` on a Codex command: the most specific one-time approval Codex's protocol has.
+const CODEX_ONCE_KEY: &str =
+    "[u] approve this command once (it still runs in Codex's sandbox; rozu can't lift it)";
 
 /// The approval card: what will run, how it is confined and the available keys.
 pub fn render_card(req: &ApprovalRequest, color: bool) -> String {
@@ -184,7 +189,12 @@ pub fn render_card(req: &ApprovalRequest, color: bool) -> String {
                 path.display()
             ));
         }
-        if req.outside_unknown && req.can_run_unsandboxed() {
+        if req.outside_unknown && is_codex(req) {
+            out.push_str(
+                "│ note: it may write outside the workspace; Codex's sandbox will block that \
+                 (Codex may then ask again)\n",
+            );
+        } else if req.outside_unknown && req.can_run_unsandboxed() {
             out.push_str(
                 "│ note: it may write outside the workspace where rozu can't tell; the sandbox \
                  will block that (use [u] if it must)\n",
@@ -206,10 +216,19 @@ pub fn render_card(req: &ApprovalRequest, color: bool) -> String {
         parts.push(format!("[a] always allow `{rule}` in this project"));
     }
     if keys.unsandboxed {
-        parts.push(UNSANDBOXED_KEY.to_owned());
+        parts.push(if is_codex(req) {
+            CODEX_ONCE_KEY.to_owned()
+        } else {
+            UNSANDBOXED_KEY.to_owned()
+        });
     }
     out.push_str(&parts.join("  "));
     out
+}
+
+/// A command the Codex CLI runs under its own sandbox, which rozu can't lift.
+fn is_codex(req: &ApprovalRequest) -> bool {
+    req.sandbox == SandboxMode::Enforced(CODEX_SANDBOX)
 }
 
 /// The keys a card accepts.
@@ -339,7 +358,6 @@ pub fn stdin_is_interactive() -> bool {
 
 #[cfg(test)]
 mod tests {
-    use rozu_core::SandboxMode;
     use rozu_tools::{AllowRule, Risk};
     use serde_json::json;
 
@@ -401,6 +419,22 @@ mod tests {
             "{card}"
         );
         assert!(card.contains("the sandbox will block that"), "{card}");
+    }
+
+    #[test]
+    fn codex_cards_say_u_is_a_one_time_approval() {
+        let mut req = request(None);
+        req.tool = "codex:shell".into();
+        req.sandbox = SandboxMode::Enforced(CODEX_SANDBOX);
+        req.outside_unknown = true;
+        let card = render_card(&req, false);
+        assert!(
+            card.contains("sandbox: codex's own (writes: workspace + tmp; network off)"),
+            "{card}"
+        );
+        assert!(card.contains(CODEX_ONCE_KEY), "{card}");
+        assert!(!card.contains("UNSANDBOXED"), "{card}");
+        assert!(card.contains("Codex's sandbox will block that"), "{card}");
     }
 
     #[test]

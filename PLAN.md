@@ -162,10 +162,11 @@ When the vendor CLI runs its own tools, **rozu must still be the gate**: every t
   expose **rozu's own tools** (`read_file`, `list_dir`, `grep`, `apply_patch`, `write_file`, `shell`) over the same
   MCP server, so rozu's workspace checks and Seatbelt sandbox apply exactly as with the HTTP providers. The
   permission-prompt tool still covers anything left enabled.
-- **Codex:** start app-server with config overrides for approval policy `on-request` (or `untrusted`) and
-  sandbox `workspace-write` (or `read-only` when rozu's mode is read-only), cwd = the workspace. Answer each
-  exec/file-change approval request from `ApprovalPolicy` (commands go through `classify_command`; file changes
-  through the write-path checks); network requests follow rozu's network rule.
+- **Codex:** start app-server with config overrides for approval policy `untrusted` (chosen over `on-request`,
+  which lets Codex run sandboxed commands without asking) and sandbox `workspace-write` (or `read-only` when
+  rozu's mode is read-only), cwd = the workspace. Answer each exec/file-change approval request from
+  `ApprovalPolicy` (commands go through `classify_command`; file changes through the write-path checks); network
+  requests follow rozu's network rule. Done in M3.5 part 2, see the notes there.
 - **Residual risk:** for a vendor CLI's *built-in* tools, the vendor's own sandbox is the enforcement layer;
   rozu only decides yes/no. **Investigation item:** wrap the whole CLI subprocess in rozu's Seatbelt profile
   (writes limited to the workspace, temp and the CLI's own state dir, e.g. `~/.claude`/`~/.codex`; network
@@ -185,8 +186,17 @@ Per the eval spec §1a, live runs use the Claude subscription provider:
   `total_cost_usd` from the CLI is stored only inside `usage_raw`.
 - Pacing: `--max-runs-per-hour N` and `--resume`; on a rate-limit / usage-limit result the runner stops cleanly
   (current run marked `status=rate_limited`, not failed) so `--resume` continues later.
-- Codex app-server reports token usage (incl. cached input) through token-count events; **verify the exact
-  fields** before using it for eval runs (no cache-write accounting is expected → `cache_write_tokens: null`).
+- Codex app-server (0.147.0 schema) reports usage in the `thread/tokenUsage/updated` notification:
+  `params.tokenUsage.{total, last}` are `TokenUsageBreakdown`s with `inputTokens`, `cachedInputTokens`,
+  `cacheWriteInputTokens` (schema default 0), `outputTokens`, `reasoningOutputTokens`, `totalTokens`, plus
+  `modelContextWindow`. `total` is the thread's running sum, `last` the latest model call. rozu reports one turn as
+  `total` at `turn/completed` minus `total` at the previous turn's end, mapped as: `inputTokens` → `input_tokens`
+  (already includes the cached part), `cachedInputTokens` → `cache_read_tokens`, `cacheWriteInputTokens` →
+  `cache_write_tokens` (0 in practice; OpenAI doesn't bill cache writes; record it as `null` in eval rows unless
+  non-zero), `outputTokens` (includes reasoning) → `output_tokens`. `reasoningOutputTokens` has no `Usage` field; it
+  and the raw breakdown are logged under `rozu::usage` (provider `codex`). Cost is `None` (subscription).
+  `cache_hit_rate = Σ cachedInputTokens / Σ inputTokens`. Field names are from the schema; the live values still
+  need the smoke test.
 - **Limit:** rozu doesn't control the CLI's system prompt or prefix layout (Claude Code adds its own system
   prompt and tool definitions), so conditions that depend on exact prompt layout (A's volatile line, byte-exact
   `prefix_sha256`, `cache_control` breakpoint placement) may need the API-key path or Claude Agent SDK options
@@ -335,16 +345,23 @@ See [Providers](#providers-http-adapters-and-cli-backed-providers).
 - [x] rozu stdio MCP server (`rozu mcp-serve`): rozu's tools + the `approve` permission-prompt tool, all through
       `ApprovalPolicy`; Claude launched with `--mcp-config --strict-mcp-config --permission-prompt-tool` and its
       built-in mutating tools disallowed
-- [ ] Codex: `codex app-server` JSON-RPC client (initialize, thread/turn, item events, token usage), approval
-      requests answered by `ApprovalPolicy` (default-deny for unmapped requests); sandbox/approval config overrides
-- [ ] Sign in with ChatGPT via `codex app-server` (account status, prompt the user to run `codex login`); no
-      custom OAuth, no reading of Codex's credential files
+- [x] Codex: `codex app-server` JSON-RPC client (initialize, thread/turn, item events, token usage), approval
+      requests answered by `ApprovalPolicy` (default-deny for unmapped requests); sandbox/approval config overrides;
+      fixture tests with a fake `codex` app-server; `rozu chat --provider codex`
+- [x] Sign in with ChatGPT via the official Codex CLI (`account/read` status; `rozu auth login codex` runs
+      `codex login`; `rozu auth status` reads only the auth mode from `codex login status`); no custom OAuth, no
+      token handling (a token-refresh request is refused), no reading of Codex's credential files
 - [x] Usage (Claude): `result.usage` → `Usage`; `cost_usd` is `None` for subscription models (`Billing::Subscription`);
       the CLI's `total_cost_usd` is only logged (target `rozu::usage`) with the raw usage
-- [ ] Usage (Codex): token-count events → `Usage` (verify the fields first)
+- [x] Usage (Codex): `thread/tokenUsage/updated` → `Usage` per turn (fields from the 0.147.0 schema; see
+      [Memory eval with subscription providers](#memory-eval-with-subscription-providers))
 - [ ] Investigation: Seatbelt-wrap the whole CLI subprocess (workspace + CLI state dir writes, vendor-host network)
 - [ ] Live smoke test on the Mac (Fred): `rozu auth status`, then `rozu chat --provider claude-cli "list the files and
       summarize README"`; a write and a `git push --force` requested by Claude show rozu's approval prompt
+- [ ] Live smoke test on the Mac (Fred), Codex: `rozu auth status` (codex line), `rozu models` (codex list from the
+      CLI), `rozu chat --provider codex "list the files and summarize README"`, then ask for a file write and a
+      `git push --force` and check rozu's approval cards, Ctrl-C mid-turn, and `"provider":"codex"` in
+      `approvals.jsonl`; check the unverified points in the Codex notes below
 
 **Done when:** on the Mac, `rozu chat` works end-to-end with Claude (Max) and Codex (ChatGPT) without any API key;
 a write and a destructive command requested by each CLI go through rozu's approval prompt (and an unmappable
@@ -390,6 +407,53 @@ Notes (part 1, Claude, 2026-10-13):
 - **Unverified against the real CLI** (fixtures are hand-recorded from the documented format): the exact
   stream-json input envelope (`session_id: ""`, `parent_tool_use_id: null`), the not-logged-in and usage-limit
   texts, and that MCP servers stay in Claude's process group. The live smoke test above checks these.
+
+Notes (part 2, Codex, 2026-10-13; protocol = `codex app-server generate-json-schema` from codex 0.147.0):
+- **Crate:** `rozu_cli_providers::codex` (`CodexAppServerProvider`, `protocol` (message parsing, notification →
+  `StreamEvent` mapping, usage, errors), `approvals` (server requests → policy → responses), `install` (binary
+  lookup, `--version`, `codex login status`, `model/list`)). Shared with Claude: `CliProcess`, `which`, `turn`
+  (turn text + system prompt). The registry lists `codex` (models: `default` = Codex's configured model, plus a
+  static **unverified** list; `rozu models` asks the installed CLI's `model/list` instead when it answers).
+- **Process:** one long-lived app-server per chat; one thread (`thread/start`) per session; each rozu turn is a
+  `turn/start` (with `model` unless it is `default`, so `/model` switches don't restart anything). Command line
+  (cwd = workspace; `OPENAI_API_KEY`/`CODEX_API_KEY` removed from the environment):
+  `codex -c approval_policy="untrusted" -c sandbox_mode="workspace-write"
+  -c sandbox_workspace_write.network_access=false -c web_search="disabled"
+  -c mcp_servers.rozu.command="<rozu>" -c mcp_servers.rozu.args=["mcp-serve", "--workspace", "<ws>", "--approval",
+  "<mode>", "--session-id", "<id>", "--provider", "codex"] -c mcp_servers.rozu.env={ ROZU_APPROVAL_SOCKET = "<sock>" }
+  app-server` (`sandbox_mode="read-only"` in rozu's read-only mode). Handshake: `initialize` (clientInfo `rozu`,
+  no experimental API) → `initialized` → `account/read {refreshToken:false}` (only `account.type` is read; no
+  account and `requiresOpenaiAuth` → `NotLoggedIn` "run `rozu auth login codex`") → `thread/start {cwd,
+  approvalPolicy, sandbox, developerInstructions = rozu's system prompt + MCP tool note}`.
+- **Events:** `item/agentMessage/delta` → text; `item/started`/`item/completed` for `commandExecution`
+  (`codex:shell`), `fileChange` (`codex:apply_patch`), `mcpToolCall` (rozu's tools by name), `webSearch`,
+  `dynamicToolCall` → tool call + result; a completed `agentMessage` without deltas → text; `turn/completed`
+  → usage + done / cancelled (`interrupted`) / typed error (`failed`: `unauthorized` → not logged in,
+  `usageLimitExceeded` → usage limit). Reasoning summaries are not shown (logged at debug).
+- **Cancel:** `turn/interrupt {threadId, turnId}`, then wait (10 s) for `turn/completed`; approval requests
+  meanwhile are answered `cancel`. If the turn doesn't end, or the stream is dropped, the app-server is killed
+  and the next turn starts a new thread with the conversation so far as a transcript.
+- **Approvals** (see `codex/approvals.rs` for the table): commands → `classify_command` on the command with Codex's
+  `sh|bash|zsh -c|-lc '<script>'` wrapper unwrapped (card shows both); escalations (a `reason`, a
+  `networkApprovalContext` host, a cwd outside the workspace) always ask; file changes → per-path write checks
+  (diff from the `fileChange` item, since `item/fileChange/requestApproval` carries only the item id; `.rozu/`
+  denied; delete = destructive; `grantRoot` asks); `item/permissions/requestApproval` always asks and grants only
+  the requested profile for `scope: "turn"`; elicitations → `decline`; dynamic tool calls → `success: false`;
+  `account/chatgptAuthTokens/refresh`, `item/tool/requestUserInput`, `attestation/generate` and unknown methods →
+  JSON-RPC error -32601. Answers are always one-time (`accept`/`approved`), never `acceptForSession`,
+  `approved_for_session` or policy amendments; `a` stores rozu's own rule (tool `codex:shell`), `u` is a one-time
+  approval (Codex's sandbox can't be lifted by rozu; the card says so). Every decision is in `approvals.jsonl`
+  with `"provider": "codex"` (also those of `rozu mcp-serve --provider codex`).
+- **Not done by design:** no `chatgptAuthTokens` login, no token refresh, no reading of `~/.codex`.
+- **Unverified against the real CLI** (fixtures are hand-written from the schema): that `-c` overrides placed before
+  `app-server` apply to it and that the TOML values parse as written (incl. the `mcp_servers.rozu.env` inline
+  table); that Codex 0.147 has no switch to disable its built-in shell/apply_patch (none is in the config schema);
+  which requests `untrusted` actually produces for patches and MCP tool calls (if Codex routes approval of rozu's
+  MCP tools through `mcpServer/elicitation/request`, rozu's default-deny would block them, and the mapping needs
+  revisiting); the JSON-RPC envelope without a `"jsonrpc"` field; `codex login status` wording (matched: "Logged in
+  using ChatGPT", "…an API key", "Not logged in") and that it prints to stderr; whether `turn/interrupt` always ends
+  with `turn/completed` `interrupted`; `model/list` returning `model` ids that `turn/start` accepts; the static
+  model ids and the 272K context window.
 
 ### M4: Sessions, memory, evals (≈2–3 weeks)
 - [ ] JSONL sessions + SQLite index, resume; ROZU.md memory; compaction

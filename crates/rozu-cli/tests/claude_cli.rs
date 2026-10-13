@@ -32,7 +32,9 @@ fn rozu() -> Command {
     .env_remove("RUST_LOG")
     .env_remove("ROZU_PROVIDER")
     .env_remove("ROZU_MODEL")
-    .env("NO_COLOR", "1");
+    .env("NO_COLOR", "1")
+    // Never run the developer's real Codex CLI (e.g. for `rozu models`).
+    .env("ROZU_CODEX_BIN", "/nonexistent/codex");
     cmd
 }
 

@@ -1,16 +1,20 @@
-//! `rozu auth`: manage provider API keys in the OS keychain, and report the claude CLI's login
-//! (which the CLI itself manages; rozu never sees its credentials).
+//! `rozu auth`: manage provider API keys in the OS keychain, report the vendor CLIs' logins
+//! (which the CLIs manage themselves; rozu never sees their credentials), and start the official
+//! `codex login`.
 
 use std::io::{self, IsTerminal, Read};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use anyhow::{Context, bail};
+use anyhow::{Context, anyhow, bail};
 use clap::{Subcommand, ValueEnum};
 use rozu_cli_providers::claude::install::{
     AuthStatus, CLAUDE_BIN_ENV, claude_auth_status, claude_version, find_claude_binary,
 };
-use rozu_providers::registry::{self, CLAUDE_CLI_ID};
+use rozu_cli_providers::codex::install::{
+    CODEX_BIN_ENV, LoginStatus, codex_login_status, codex_version, find_codex_binary,
+};
+use rozu_providers::registry::{self, CLAUDE_CLI_ID, CODEX_ID};
 use rozu_secrets::{KeyringStore, SERVICE, SecretStore, env_var_for};
 use secrecy::SecretString;
 
@@ -19,10 +23,20 @@ pub enum AuthCommand {
     /// Store a provider API key in the OS keychain. Prompts without echo, or reads piped stdin.
     Set { provider: ProviderName },
     /// Show which providers have a key and where it comes from (never prints the key), and
-    /// whether the claude CLI is installed and logged in.
+    /// whether the claude and codex CLIs are installed and logged in.
     Status,
     /// Remove a provider API key from the OS keychain.
     Delete { provider: ProviderName },
+    /// Log in to a subscription with the vendor's own CLI (`codex`: runs the official
+    /// `codex login`, which opens the browser for Sign in with ChatGPT). rozu never sees the
+    /// credentials.
+    Login { cli: LoginCli },
+}
+
+/// CLIs `rozu auth login` can start the login of.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum LoginCli {
+    Codex,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -73,7 +87,35 @@ pub fn run(command: AuthCommand) -> anyhow::Result<ExitCode> {
             }
             Ok(ExitCode::SUCCESS)
         }
+        AuthCommand::Login {
+            cli: LoginCli::Codex,
+        } => codex_login(),
     }
+}
+
+/// Runs the official `codex login` with the terminal attached. Codex does the whole login and
+/// stores its own credentials; rozu only passes its exit status on.
+fn codex_login() -> anyhow::Result<ExitCode> {
+    let binary = find_codex_binary().ok_or_else(|| {
+        anyhow!(
+            "the Codex CLI isn't installed (looked on PATH and in /opt/homebrew/bin); install it \
+             or set {CODEX_BIN_ENV}"
+        )
+    })?;
+    eprintln!(
+        "Running the official `codex login` ({}). Codex keeps its own credentials; rozu never \
+         sees them.",
+        binary.display()
+    );
+    let status = std::process::Command::new(&binary)
+        .arg("login")
+        .status()
+        .with_context(|| format!("could not run {}", binary.display()))?;
+    Ok(match status.code() {
+        Some(0) => ExitCode::SUCCESS,
+        Some(code) => ExitCode::from(u8::try_from(code).unwrap_or(1)),
+        None => ExitCode::FAILURE,
+    })
 }
 
 fn set(store: &dyn SecretStore, provider: ProviderName) -> anyhow::Result<ExitCode> {
@@ -143,7 +185,37 @@ fn status(store: &dyn SecretStore) -> anyhow::Result<ExitCode> {
         "{}",
         runtime.block_on(claude_cli_status(find_claude_binary()))
     );
+    println!(
+        "{}",
+        runtime.block_on(codex_cli_status(find_codex_binary()))
+    );
     Ok(ExitCode::SUCCESS)
+}
+
+/// One line about the Codex CLI: found where, which version, logged in or not (and how). Only
+/// the auth mode is taken from `codex login status`; nothing it prints is shown.
+async fn codex_cli_status(binary: Option<PathBuf>) -> String {
+    let id = CODEX_ID;
+    let Some(binary) = binary else {
+        return format!(
+            "{id}: codex CLI not found (PATH, /opt/homebrew/bin); install the Codex CLI or set \
+             {CODEX_BIN_ENV}"
+        );
+    };
+    let version = match codex_version(&binary).await {
+        Ok(version) => version,
+        Err(err) => return format!("{id}: {} doesn't run ({err})", binary.display()),
+    };
+    let login = match codex_login_status(&binary).await {
+        Ok(LoginStatus::ChatGpt) => "logged in (ChatGPT)".to_owned(),
+        Ok(LoginStatus::ApiKey) => "logged in (API key)".to_owned(),
+        Ok(LoginStatus::NotLoggedIn) => "not logged in; run `rozu auth login codex`".to_owned(),
+        Ok(LoginStatus::Unknown) => {
+            "login status unknown (couldn't read `codex login status`)".to_owned()
+        }
+        Err(err) => format!("login status unknown ({err})"),
+    };
+    format!("{id}: {} ({version}), {login}", binary.display())
 }
 
 /// One line about the claude CLI: found where, which version, logged in or not. Only `loggedIn`
@@ -217,6 +289,48 @@ mod tests {
         let missing = claude_cli_status(None).await;
         assert!(
             missing.contains("not found") && missing.contains(CLAUDE_BIN_ENV),
+            "{missing}"
+        );
+    }
+
+    /// The fake `codex` from the provider fixtures, printing `status` for `codex login status`.
+    fn fake_codex(dir: &std::path::Path, status: &str) -> PathBuf {
+        let fake = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../rozu-cli-providers/tests/fixtures/codex/fake_codex.sh"
+        );
+        let wrapper = dir.join(format!("codex-{}", status.len()));
+        std::fs::write(
+            &wrapper,
+            format!("#!/bin/sh\nFAKE_CODEX_LOGIN_STATUS='{status}' exec /bin/sh '{fake}' \"$@\"\n"),
+        )
+        .unwrap();
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        wrapper
+    }
+
+    #[tokio::test]
+    async fn codex_cli_status_shows_version_and_auth_mode_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let line = codex_cli_status(Some(fake_codex(dir.path(), "Logged in using ChatGPT"))).await;
+        assert!(line.starts_with("codex: "), "{line}");
+        assert!(line.ends_with("(0.147.0), logged in (ChatGPT)"), "{line}");
+
+        // The masked key `codex login status` prints is never shown.
+        let line = codex_cli_status(Some(fake_codex(
+            dir.path(),
+            "Logged in using an API key - sk-proj-***ABCD",
+        )))
+        .await;
+        assert!(line.ends_with("logged in (API key)"), "{line}");
+        assert!(!line.contains("ABCD"), "{line}");
+
+        let line = codex_cli_status(Some(fake_codex(dir.path(), "Not logged in"))).await;
+        assert!(line.contains("run `rozu auth login codex`"), "{line}");
+
+        let missing = codex_cli_status(None).await;
+        assert!(
+            missing.contains("not found") && missing.contains(CODEX_BIN_ENV),
             "{missing}"
         );
     }

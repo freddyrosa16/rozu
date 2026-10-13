@@ -69,6 +69,32 @@ classify it). Token usage, including cache reads/writes, is shown after each tur
 subscription). `ROZU_CLAUDE_BIN` points rozu at a specific `claude` binary; otherwise it looks on `PATH` and in
 `~/.local/bin`. `ANTHROPIC_API_KEY` is removed from the CLI's environment so it uses your subscription login.
 
+### ChatGPT on your subscription (`codex`)
+With a ChatGPT plan and no API key, rozu drives the official Codex CLI's `codex app-server`. Sign in with ChatGPT
+is done by Codex itself; rozu never sees or refreshes the tokens.
+
+```sh
+./target/release/rozu auth login codex     # runs the official `codex login` (opens the browser)
+./target/release/rozu auth status          # codex: /opt/homebrew/bin/codex (0.147.0), logged in (ChatGPT)
+
+./target/release/rozu chat --provider codex "list the files and summarize README"
+./target/release/rozu chat --provider codex --model gpt-6.1-sol  # `default` = the model Codex is configured with
+./target/release/rozu models                                     # codex models come from the installed CLI
+```
+
+Codex runs its own agent loop with `approval_policy="untrusted"` and its `workspace-write` sandbox (network off;
+`read-only` in rozu's read-only mode). Its own shell commands and patches stay enabled (Codex has no switch to turn
+them off), but **every approval request Codex sends is answered by rozu**: commands go through rozu's risk classifier
+(Codex's `zsh -lc '…'` wrapper is unwrapped first), file changes through rozu's path checks (`.rozu/` is denied,
+deletes are destructive), and escalations (a retry outside the sandbox, network access, more permissions) always
+ask you. Approvals are one-time: rozu never answers "for this session". On a Codex card `u` means "approve once";
+Codex's sandbox stays on. Anything rozu can't map (MCP elicitations, dynamic tools, user-input requests, unknown
+methods) is denied, and a ChatGPT token-refresh request is refused. rozu's own tools are also available to Codex
+through rozu's MCP server. Decisions land in the audit log with `"provider": "codex"`. Without `--provider`/`--model`
+and no API key, rozu uses `claude-cli`, or `codex` if only the Codex CLI is installed. `ROZU_CODEX_BIN` points rozu at
+a specific `codex` binary; otherwise it looks on `PATH` and in `/opt/homebrew/bin`. `OPENAI_API_KEY` and
+`CODEX_API_KEY` are removed from Codex's environment so it uses your ChatGPT login.
+
 ### Approvals and sandbox
 Every tool call gets a risk class (read, write in workspace, write outside, network, opaque, destructive) and is
 either auto-approved or shown as an approval card with the exact command or diff, the sandbox and the network state:
@@ -127,6 +153,7 @@ Environment variables:
   `https://api.anthropic.com`, `https://api.x.ai/v1`), for proxies and tests.
 - `ROZU_PROVIDER`, `ROZU_MODEL`: defaults for `--provider` / `--model`.
 - `ROZU_CLAUDE_BIN`: the `claude` binary for `claude-cli`.
+- `ROZU_CODEX_BIN`: the `codex` binary for `codex`.
 - `RUST_LOG`: log filter (default `info`). Logs go to `~/Library/Logs/rozu/rozu.log` (`ROZU_LOG_FILE` moves it,
   `ROZU_LOG_STDERR=1` sends them to stderr). API keys are redacted from logs. Approval decisions are logged under
   the `rozu::approval` target and, structured, in the audit log.
@@ -137,8 +164,9 @@ Environment variables:
 - API keys for OpenAI, Anthropic and xAI, stored in the OS keychain (never in files or logs).
 - Claude subscription: through the official `claude` CLI, which logs in and keeps its credentials itself
   (`--provider claude-cli`, above). rozu never reads Claude Code's credential files or tokens.
-- ChatGPT subscription (Sign in with ChatGPT through the official Codex CLI) is planned (M3.5 part 2).
-  No Grok subscription login is implemented.
+- ChatGPT subscription: Sign in with ChatGPT through the official Codex CLI (`rozu auth login codex` runs
+  `codex login`; `--provider codex`, above). rozu never reads `~/.codex/auth.json` or handles ChatGPT tokens.
+- No Grok subscription login is implemented.
 
 ## License
 MIT, see [LICENSE](LICENSE).

@@ -171,7 +171,10 @@ mod tests {
             let shown: Vec<_> = pts.iter().filter(|p| p.s > 0.02).collect();
             assert_eq!(dots.len(), shown.len());
             // The nearest drawn sample is drawn last.
-            let near = shown.iter().max_by(|a, b| a.p[2].total_cmp(&b.p[2])).unwrap();
+            let near = shown
+                .iter()
+                .max_by(|a, b| a.p[2].total_cmp(&b.p[2]))
+                .unwrap();
             let k = CAMERA / (CAMERA - near.p[2]);
             assert!((dots.last().unwrap().x - (44.0 + near.p[0] * k * 35.2) as f32).abs() < 1e-3);
             for d in &dots {
