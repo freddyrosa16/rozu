@@ -1,4 +1,4 @@
-//! v7.4 activity pill demo: the dot orb (22px in the pill, 88px large), the label and a mono
+//! v7.5 activity pill demo: the dotted-globe orb (22px in the pill, 88px large), the label and a mono
 //! timer, cycling all ten states. Labels come from a scripted agent turn run through
 //! `rozu_activity::ActivityTracker`.
 //!
@@ -16,7 +16,7 @@ use gpui::{
 };
 use rozu_activity::tokens::{ORB_LG_PX, ORB_PX, PILL_HEIGHT_DOCK_PX, Palette, Theme};
 use rozu_activity::{
-    Activity, ActivityEvent, ActivityState, ActivityTracker, DrawDot, FramePolicy, Orb,
+    Activity, ActivityEvent, ActivityState, ActivityTracker, DrawDot, FramePolicy, Orb, OrbSize,
     ProjectOptions, project_with,
 };
 
@@ -59,6 +59,8 @@ struct Demo {
     focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
     orb: Orb,
+    /// The 22px pill's own point set, kept on the same timeline as `orb`.
+    orb_small: Orb,
     tracker: ActivityTracker,
     script: Vec<Step>,
     step: usize,
@@ -100,6 +102,7 @@ impl Demo {
             focus,
             _subscriptions: vec![activation],
             orb: Orb::new(ActivityState::Thinking, 0.0),
+            orb_small: Orb::with_size(OrbSize::Small, ActivityState::Thinking, 0.0),
             tracker: ActivityTracker::new(),
             script: script(),
             step: 0,
@@ -156,6 +159,7 @@ impl Demo {
         };
         if let Some(activity) = activity {
             self.orb.set_state(activity.state, self.anim_t);
+            self.orb_small.set_state(activity.state, self.anim_t);
             self.activity = activity;
         }
         self.step_started = self.wall_t;
@@ -168,6 +172,7 @@ impl Demo {
             "m" => {
                 let on = !self.orb.reduced_motion();
                 self.orb.set_reduced_motion(on);
+                self.orb_small.set_reduced_motion(on);
             }
             "space" => self.paused = !self.paused,
             "right" => self.go_to((self.step + 1) % n),
@@ -228,9 +233,8 @@ impl Render for Demo {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = Palette::for_theme(self.theme);
         let scale = window.scale_factor();
-        let samples = self.orb.sample(self.anim_t);
-        let small = project_with(&samples, ORB_PX, scale, self.opts);
-        let large = project_with(&samples, ORB_LG_PX, scale, self.opts);
+        let small = project_with(&self.orb_small.sample(self.anim_t), ORB_PX, scale, self.opts);
+        let large = project_with(&self.orb.sample(self.anim_t), ORB_LG_PX, scale, self.opts);
 
         let a = &self.activity;
         let tone = a.state.tone();

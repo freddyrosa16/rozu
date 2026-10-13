@@ -1,4 +1,4 @@
-/* rozu tokens v7 (CURRENT SPEC: v7.4 activity orb pill, one dotted ring with ten symbols). Load order: tokens.css → tokens-v4.css → tokens-v5.css → tokens-v6.css → tokens-v7.css.
+/* rozu tokens v7 (CURRENT SPEC: v7.5 activity orb pill, a dotted globe per state at two tuned sizes). Load order: tokens.css → tokens-v4.css → tokens-v5.css → tokens-v6.css → tokens-v7.css.
    DEPRECATED from v6: --bead-*, --dur-morph (480ms), trail/arc tokens, and the v5 progress line under the pill. No new hues. */
 [data-theme=dark]{--orb-dot:#F4F1EA;--orb-pill-bg:#1B1B1D;--orb-pill-border:#2A2A2E;--orb-label:#F4F1EA;--orb-meta:#9A9AA2;
   --warning:#FBBF24;--success:#4ADE80;--danger:#F87171}
@@ -9,11 +9,13 @@
   --orb-camera:3.2;                         /* k = F/(F−z) */
   --orb-depth-alpha-far:.12;--orb-depth-size-far:.40;
   --orb-light-x:-.55;--orb-light-y:.6;--orb-light-z:.58; /* α×(.62+.48λ), size×(.9+.2λ) */
-  --orb-dot-base:.017;--orb-dot-base-22:.05;            /* × orb size */
+  --orb-dot-base:.011;--orb-dot-base-22:.045;           /* × orb size */
   --orb-lit-size:1.55;--orb-lit-alpha:.5;
-  --dur-orb-morph:600ms;--orb-stagger:2.5ms;--orb-lift:.55;
+  --dur-orb-morph:600ms;--orb-stagger:300ms;--orb-lift:.55; /* dot i starts hash(i)·300ms late */
   --dur-orb-pulse:150ms;--orb-pulse-lit:.8;
-  --orb-ring-dots:44;--orb-ring-radius:.86;--orb-ring-alpha:.55;      /* v7.4: the dotted ring every state shares */
+  --orb-globe-radius:.9;--orb-globe-tilt:.3;                          /* v7.5: the dotted globe */
+  --orb-rings-lg:15;--orb-lon-lg:30;--orb-dots-lg:284;                /* ≥30px: 15 lines of latitude, 284 dots */
+  --orb-rings-22:9;--orb-lon-22:15;--orb-dots-22:86;--orb-dot-mul-22:1.15;--orb-speed-mul-22:1.15; /* 22px: its own point set */
   --tempo-thinking:1.6s;--tempo-notes:2.6s;--tempo-reading:2.2s;--tempo-searching:2.4s;--tempo-editing:2.4s;--tempo-running:900ms;
   --tempo-waiting:1.8s;--tempo-offline:2.4s;--dur-done-draw:450ms;--dur-error-shake:900ms;--dur-settle:1.3s;
   --dur-orb-reduced-fade:150ms;

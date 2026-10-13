@@ -1,4 +1,4 @@
-//! The tokens-v7 values the pill needs (`docs/design/v7.4/tokens-v7.json`; the colours are unchanged from v7.2), as 0xRRGGBB.
+//! The tokens-v7 values the pill needs (`docs/design/v7.5/tokens-v7.json`; the colours are unchanged from v7.2), as 0xRRGGBB.
 
 use crate::state::Tone;
 
