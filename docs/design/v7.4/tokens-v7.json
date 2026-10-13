@@ -1,5 +1,5 @@
 {
-  "$description": "rozu tokens v7 (CURRENT SPEC: v7.4 activity orb pill: five orbs). Layered after tokens-v6.json. Deprecated from v6: bead.*, size.beadDiameter22, motion.morph 480ms, trail, arcBow, and the v5 progress line under the pill. CSS: tokens.css \u2192 tokens-v4.css \u2192 tokens-v5.css \u2192 tokens-v6.css \u2192 tokens-v7.css.",
+  "$description": "rozu tokens v7 (CURRENT SPEC: v7.4 activity orb pill: one dotted ring, ten symbols). Layered after tokens-v6.json. Deprecated from v6: bead.*, size.beadDiameter22, motion.morph 480ms, trail, arcBow, and the v5 progress line under the pill. CSS: tokens.css \u2192 tokens-v4.css \u2192 tokens-v5.css \u2192 tokens-v6.css \u2192 tokens-v7.css.",
   "color": {
     "orbDot": {
       "$type": "color",
@@ -137,6 +137,17 @@
     "snapMaxDevicePx": {
       "$type": "number",
       "$value": 1.6
+    },
+    "ring": {
+      "$type": "number",
+      "$value": {
+        "dots": 44,
+        "radius": 0.86,
+        "z": 0.3,
+        "alpha": 0.55,
+        "size": 0.85
+      },
+      "$description": "the dotted ring every state shares; dots 0..44"
     }
   },
   "motion": {
@@ -165,15 +176,40 @@
       "$value": "150ms"
     },
     "orbTempo": {
-      "working": {
+      "thinking": {
         "$type": "duration",
-        "$value": "1.4s",
-        "$description": "comet orbit; the sphere yaws .35 rad/s"
+        "$value": "1.6s",
+        "$description": "ring sweep"
+      },
+      "notes": {
+        "$type": "duration",
+        "$value": "2.6s",
+        "$description": "write 1.9s, hold, repeat"
+      },
+      "reading": {
+        "$type": "duration",
+        "$value": "2.2s",
+        "$description": "band down the page"
+      },
+      "searching": {
+        "$type": "duration",
+        "$value": "2.4s",
+        "$description": "magnifier circles"
+      },
+      "editing": {
+        "$type": "duration",
+        "$value": "2.4s",
+        "$description": "type 1.6s, then blink at 200ms"
+      },
+      "running": {
+        "$type": "duration",
+        "$value": "900ms",
+        "$description": "two arcs chase"
       },
       "waiting": {
         "$type": "duration",
         "$value": "1.8s",
-        "$description": "ping and breath"
+        "$description": "ring breath"
       },
       "doneDraw": {
         "$type": "duration",
@@ -188,7 +224,7 @@
       "offline": {
         "$type": "duration",
         "$value": "2.4s",
-        "$description": "dashed ring turn"
+        "$description": "retry arrow turn"
       },
       "settle": {
         "$type": "duration",

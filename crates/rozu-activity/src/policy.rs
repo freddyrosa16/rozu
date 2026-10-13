@@ -95,7 +95,7 @@ mod tests {
         let mut rm = Orb::new(Thinking, 0.0);
         rm.set_reduced_motion(true);
         assert_eq!(p.fps(&rm, 1.0), 0);
-        rm.set_state(Waiting, 2.0);
+        rm.set_state(Reading, 2.0);
         assert_eq!(p.fps(&rm, 2.05), 60, "cross-fade");
         assert_eq!(p.fps(&rm, 2.2), 0);
     }

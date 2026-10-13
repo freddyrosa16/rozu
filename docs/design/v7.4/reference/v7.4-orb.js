@@ -1,10 +1,9 @@
 // rozu v7.4 activity orbs: five orbs instead of ten. Same 3D dot language, projection and morph as v7.3
 // (120 points, perspective, depth size/fade, top-left light, depth sort). draw(T) is a pure function of time.
 //
-// v7.4 maps the ten activity states onto five orbs. Every "busy" state (thinking, notes, reading, searching,
-// editing, running) shares the Working orb, because the label already says what the agent is doing, and a
-// different orb per tool made a fast agent loop morph several times a second. The four that need a different
-// read at a glance keep their own orb: Waiting (needs you), Done, Error and Offline.
+// v7.4: every state is a symbol inside the same fully dotted ring, so all ten read at 22px: a turning sphere,
+// lines being written, a reading band, a magnifier, a typing caret, a play button, pause bars, a check, a cross
+// and a broken ring with a retry arrow.
 const N=120,TAU=Math.PI*2,F=3.2;
 const cl=(v,a=0,b=1)=>Math.max(a,Math.min(b,v));
 const fib=(i,n)=>{const y=1-2*(i+.5)/n,r=Math.sqrt(1-y*y),a=i*2.39996323;return [Math.cos(a)*r,y,Math.sin(a)*r]};
@@ -15,56 +14,87 @@ const D=i=>fib(i,N);
 const view=(p,t,yaw)=>rX(rY(p,t*yaw),.3);
 const sc=(d,r)=>[d[0]*r,d[1]*r,d[2]*r];
 const Q=(p,lit,s,a)=>({p,lit,s,a});
-// Glyph layout shared by Done, Error and Offline: a faint ring of RING dots (indices 0..RING-1) around a bold
-// stroke glyph made of the rest, drawn on a plane at z = GZ facing the camera. Both sets are contiguous index
-// runs, so the 22px subsample keeps an even share of each.
-const RING=44,GZ=.3,GR=.86;
-const ringAt=(j,n,rot)=>{const a=TAU*j/n+rot;return [GR*Math.cos(a),GR*Math.sin(a),GZ]};
-// Point at arc-length fraction u along a polyline.
-const along=(pts,u)=>{const seg=[];let L=0;for(let k=0;k+1<pts.length;k++){const l=Math.hypot(pts[k+1][0]-pts[k][0],pts[k+1][1]-pts[k][1]);seg.push(l);L+=l}
-  let d=u*L;for(let k=0;k<seg.length;k++){if(d<=seg[k]||k===seg.length-1){const f=seg[k]?cl(d/seg[k]):0;return [pts[k][0]+(pts[k+1][0]-pts[k][0])*f,pts[k][1]+(pts[k+1][1]-pts[k][1])*f]}d-=seg[k]}};
-const CHECK=[[-.46,.02],[-.14,-.32],[.48,.34]];
-const CROSS_A=[[-.36,.36],[.36,-.36]],CROSS_B=[[.36,.36],[-.36,-.36]];
+// Every orb is the same frame: a fully dotted ring of RING dots (indices 0..RING-1, radius GR) on the plane
+// z = GZ facing the camera, around a glyph made of the other GLYPH dots. The ring dots never move between orbs,
+// so a change only reshapes the glyph. Both sets are contiguous index runs, so the 22px subsample keeps an even
+// share of each.
+const RING=44,GLYPH=N-RING,GZ=.3,GR=.86;
+const ringAt=j=>{const a=Math.PI/2-TAU*j/RING;return [GR*Math.cos(a),GR*Math.sin(a),GZ]};
+const ringAngle=j=>((TAU*j/RING)%TAU); // clockwise from 12 o'clock
+// Point at arc-length fraction u along a set of polylines (strokes), as one path.
+const along=(strokes,u)=>{const segs=[];let L=0;for(const pts of strokes)for(let k=0;k+1<pts.length;k++){const l=Math.hypot(pts[k+1][0]-pts[k][0],pts[k+1][1]-pts[k][1]);segs.push([pts[k],pts[k+1],l]);L+=l}
+  let d=u*L;for(let k=0;k<segs.length;k++){const [a,b,l]=segs[k];if(d<=l||k===segs.length-1){const f=l?cl(d/l):0;return [a[0]+(b[0]-a[0])*f,a[1]+(b[1]-a[1])*f]}d-=l}};
+const gu=i=>(i-RING)/(GLYPH-1); // glyph dot i as a fraction 0..1
+const ring=(j,lit=0,a=.55)=>Q(ringAt(j),lit,.85+.4*lit,Math.max(a,lit));
+const flat=(xy,lit,s,a)=>Q([xy[0],xy[1],GZ],lit,s,a);
+// Lag (rad, 0..2π) of ring dot j behind a head moving clockwise at angle h.
+const behind=(j,h)=>((h-ringAngle(j))%TAU+TAU)%TAU;
+const arc=(c,r,a0,a1,n=24)=>{const p=[];for(let k=0;k<=n;k++){const a=a0+(a1-a0)*k/n;p.push([c[0]+r*Math.cos(a),c[1]+r*Math.sin(a)])}return p};
+const CHECK=[[[-.46,.02],[-.14,-.32],[.48,.34]]];
+const CROSS=[[[-.36,.36],[.36,-.36]],[[.36,.36],[-.36,-.36]]];
+const NOTES=[[[-.44,.26],[.44,.26]],[[-.44,0],[.44,0]],[[-.44,-.26],[.16,-.26]]];
+const READ=[[[-.46,.3],[.46,.3]],[[-.46,.1],[.46,.1]],[[-.46,-.1],[.46,-.1]],[[-.46,-.3],[.2,-.3]]];
+const PLAY=[[[-.2,.34],[-.2,-.34],[.36,0],[-.2,.34]]];
+const PAUSE=[[[-.17,.32],[-.17,-.32]],[[.17,.32],[.17,-.32]]];
 const ORBS={
- // WORKING: a slowly turning sphere with one lit comet orbiting it on a tilted path, its tail fading. Reads as a
- // spinner at 22px (a bright arc going round) and as a 3D orbit at 88px (the comet grows in front, shrinks behind).
- working:{loop:1.4,gen:(i,t)=>{
-   const d=D(i),r=.9+.05*Math.sin(TAU*t/2.8+3*d[1]),p=view(sc(d,r),t,.35),m=Math.hypot(...p)||1;
-   const q=rX([p[0]/m,p[1]/m,p[2]/m],-.75); // orbit frame: the orbit is q.y≈0, tilted toward the camera
-   const th=Math.atan2(q[2],q[0]),head=TAU*t/1.4,band=Math.exp(-Math.pow(q[1]/.5,2));
-   let lit=0;for(const off of [0,Math.PI]){const lag=((head+off-th)%TAU+TAU)%TAU,tail=lag<2.4?1-lag/2.4:0;lit=Math.max(lit,tail*Math.sqrt(tail)*(off?.55:1))} // a comet and a fainter twin opposite it
-   lit=cl(1.35*band*lit);return Q(p,lit,.6+.8*lit,.38+.62*lit)}},
- // WAITING (amber): the sphere stops turning and breathes; a lit ring pings outward from its face every 1.8s,
- // like a notification asking for you.
+ // THINKING: a small dot sphere turns inside the ring while a lit arc sweeps round the ring.
+ thinking:{loop:1.6,gen:(i,t)=>{
+   if(i<RING){const g=behind(i,TAU*t/1.6),tail=g<2.2?1-g/2.2:0;return ring(i,tail*tail)}
+   const d=fib(i-RING,GLYPH),p=rX(rY(sc(d,.46),t*1.1),.45);
+   const lit=cl((p[2]/.46)*.8);return Q(p,lit*.7,.8+.35*lit,.4+.6*lit)}},
+ // NOTES: three lines write themselves left to right, then hold and start over.
+ notes:{loop:2.6,gen:(i,t)=>{
+   if(i<RING)return ring(i);
+   const u=gu(i),w=cl((t%2.6)/1.9),on=u<=w,head=on&&u>w-.04&&w<1;
+   const xy=along(NOTES,u);return flat(xy,on?1:0,head?1.5:on?1:.45,on?1:.16)}},
+ // READING: four lines of text; a lit band moves down the page, one line at a time.
+ reading:{loop:2.2,gen:(i,t)=>{
+   if(i<RING)return ring(i);
+   const xy=along(READ,gu(i)),yb=.42-.84*((t%2.2)/2.2),on=Math.exp(-Math.pow((xy[1]-yb)/.09,2));
+   return flat(xy,on,.7+.5*on,.28+.72*on)}},
+ // SEARCHING: a magnifying glass circles slowly, scanning.
+ searching:{loop:2.4,gen:(i,t)=>{
+   if(i<RING)return ring(i);
+   const a=TAU*t/2.4,c=[-.08+.12*Math.cos(a),.08+.12*Math.sin(a)];
+   const u=gu(i),xy=u<.74?along([arc(c,.24,0,TAU,36)],u/.74):along([[[c[0]+.17,c[1]-.17],[c[0]+.4,c[1]-.4]]],(u-.74)/.26);
+   return flat(xy,1,1.05,1)}},
+ // EDITING: a line types out behind a blinking caret.
+ editing:{loop:2.4,gen:(i,t)=>{
+   if(i<RING)return ring(i);
+   const ph=t%2.4,w=cl(ph/1.6),x=-.46+.92*w,u=gu(i);
+   if(u<.14){const y=-.24+.5*(u/.14),blink=w>=1&&Math.floor((ph-1.6)/.2)%2===1;return flat([x+.05,y],blink?0:1,blink?0:.95,blink?0:1)} // caret
+   const v=(u-.14)/.86,xx=-.46+.92*v,on=xx<=x;return flat([xx,-.2],on?1:0,on?1:.45,on?1:.16)}},
+ // RUNNING: a play triangle; two lit arcs chase each other round the ring.
+ running:{loop:.9,gen:(i,t)=>{
+   if(i<RING){let lit=0;for(const off of [0,Math.PI]){const g=behind(i,TAU*t/.9+off);lit=Math.max(lit,g<1.4?1-g/1.4:0)}return ring(i,lit)}
+   return flat(along(PLAY,gu(i)),1,1.05,1)}},
+ // WAITING (amber): pause bars; the whole ring breathes, asking for you.
  waiting:{loop:1.8,tone:"warning",gen:(i,t)=>{
-   const d=D(i),b=Math.sin(TAU*t/1.8),p=view(sc(d,.86*(1+.04*b)),0,0),m=Math.hypot(...p)||1;
-   const g=Math.acos(cl(p[2]/m,-1,1)),u=(t/1.8)%1,front=u*2.2,ping=Math.exp(-Math.pow((g-front)/.28,2))*(1-u);
-   const lit=cl(ping*1.4),glow=.25*(b*.5+.5)*Math.max(0,p[2]/m); // the face glows faintly with the breath between pings
-   return Q(p,lit,.5+.8*lit,.32+.68*Math.max(lit,glow))}},
- // DONE (green): the cloud gathers into a check mark inside a faint ring; the check draws itself once, then holds.
+   const b=.5+.5*Math.sin(TAU*t/1.8);
+   if(i<RING)return ring(i,.25+.55*b);
+   return flat(along(PAUSE,gu(i)),1,1.05+.15*b,1)}},
+ // DONE (green): a check mark draws itself once, then holds.
  done:{loop:0,tone:"success",gen:(i,t)=>{
-   if(i<RING)return Q(ringAt(i,RING,Math.PI/2),0,.5,.3);
-   const u=(i-RING)/(N-RING-1),xy=along(CHECK,u),drawn=cl((t-.25)/.45),on=u<=drawn;
+   if(i<RING)return ring(i);
+   const u=gu(i),xy=along(CHECK,u),drawn=cl((t-.25)/.45),on=u<=drawn;
    const pop=t>.7&&t<.95?Math.sin(Math.PI*(t-.7)/.25):0;
-   return Q([xy[0],xy[1],GZ],on?1:.25,(on?1.15:.6)*(1+.2*pop),on?1:.35)}},
- // ERROR (red): the cloud gathers into a cross inside a faint ring, which shakes once like a head saying no.
+   return flat(xy,on?1:.25,(on?1.15:.6)*(1+.2*pop),on?1:.35)}},
+ // ERROR (red): a cross that shakes once, like a head saying no.
  error:{loop:0,tone:"danger",gen:(i,t)=>{
    const st=t-.3,dx=st>0&&st<.9?.13*Math.exp(-5*st)*Math.sin(28*st):0;
-   if(i<RING){const r=ringAt(i,RING,Math.PI/2);return Q([r[0]+dx,r[1],r[2]],0,.5,.3)}
-   const j=i-RING,n=N-RING,half=n>>1,u=j<half?j/(half-1):(j-half)/(n-half-1),xy=along(j<half?CROSS_A:CROSS_B,u);
-   return Q([xy[0]+dx,xy[1],GZ],1,1.15,1)}},
- // OFFLINE (dim): a dashed ring turning slowly, the way a connection retries; nothing inside it.
+   if(i<RING){const r=ring(i);r.p[0]+=dx;return r}
+   const xy=along(CROSS,gu(i));return flat([xy[0]+dx,xy[1]],1,1.15,1)}},
+ // OFFLINE (dim): the ring is broken at the top; a retry arrow inside turns slowly.
  offline:{loop:2.4,dim:true,gen:(i,t)=>{
-   const a=TAU*i/N-TAU*t/2.4,seg=((i/N*6)%1),gap=seg>.62;
-   const r=[GR*Math.cos(a+Math.PI/2),GR*Math.sin(a+Math.PI/2),GZ];
-   if(gap)return Q(r,0,0,0);
-   const head=Math.abs(seg-.31)<.08;return Q(r,head?.6:0,head?.9:.65,head?.8:.45)}},
+   if(i<RING){const a=ringAngle(i),gap=a<.55||a>TAU-.55;return gap?Q(ringAt(i),0,0,0):ring(i,0,.4)}
+   const u=gu(i),rot=-TAU*t/2.4;
+   if(u<.8){const a=rot+Math.PI*.5+1.6*Math.PI*(u/.8);return flat([.4*Math.cos(a),.4*Math.sin(a)],.7,1.05,.9)}
+   const tip=rot+Math.PI*.5+1.6*Math.PI,v=(u-.8)/.2,side=v<.5?1:-1,k=.24*(v<.5?v:v-.5)*2;
+   const back=tip-Math.PI*.5+side*.8; // the arrow travels anticlockwise; its barbs point back from the tip
+   return flat([.4*Math.cos(tip)+k*Math.cos(back),.4*Math.sin(tip)+k*Math.sin(back)],.7,1.05,.9)}},
 };
-// Which orb each activity state shows.
-const ORB_OF={thinking:"working",notes:"working",reading:"working",searching:"working",editing:"working",running:"working",
-  waiting:"waiting",done:"done",error:"error",offline:"offline"};
-const ORBS_ORDER=["working","waiting","done","error","offline"];
-const STILL={working:.45,waiting:.5,done:1.5,error:1.5,offline:0};
+const ORDER=["thinking","notes","reading","searching","editing","running","waiting","done","error","offline"];
+const STILL={thinking:.55,notes:1.2,reading:.6,searching:.3,editing:1.1,running:.3,waiting:.45,done:1.5,error:1.5,offline:.3};
 const MORPH=.6,STAG=.0025;
 const crit=u=>u<=0?0:u>=1.6?1:1-(1+7*u)*Math.exp(-7*u);
 // tl: [{orb, start}], consecutive entries with different orbs.
@@ -86,4 +116,4 @@ function drawOrb(canvas,tl,T){const dpr=(window.devicePixelRatio||1),size=canvas
     if(small&&r*dpr<1.6){ctx.fillRect(Math.round((b.x-r)*dpr)/dpr,Math.round((b.y-r)*dpr)/dpr,Math.max(px,Math.round(2*r*dpr)/dpr),Math.max(px,Math.round(2*r*dpr)/dpr))}
     else{ctx.beginPath();ctx.arc(b.x,b.y,r,0,TAU);ctx.fill()}}
   ctx.globalAlpha=1}
-if(typeof module!=="undefined")module.exports={N,ORBS,ORB_OF,ORBS_ORDER,STILL,sample,hash,fib};
+if(typeof module!=="undefined")module.exports={N,ORBS,ORDER,STILL,sample,hash,fib};
