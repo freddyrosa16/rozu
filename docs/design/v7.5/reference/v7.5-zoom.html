@@ -3,7 +3,7 @@
 [data-theme=light]{--bg:#ECECEF;--orb-dot:#25242A;--warning:#8A5206;--success:#126B33;--danger:#B91C1C}
 body{margin:0;background:var(--bg);display:grid;grid-template-columns:repeat(6,auto);gap:8px;padding:8px;width:max-content;height:max-content}
 canvas.b{width:120px;height:120px}canvas.s{width:22px;height:22px;image-rendering:pixelated}
-</style></head><body data-theme="dark"><script src="v7.4-orb.js"></script><script>
+</style></head><body data-theme="dark"><script src="v7.5-orb.js"></script><script>
 const q=new URLSearchParams(location.search);document.body.dataset.theme=q.get('theme')||'dark';
 const orb=q.get('orb')||'thinking',ts=(q.get('ts')||'0,.2,.4,.6,.8,1').split(',').map(Number),cls=q.get('c')||'b';
 for(const t of ts){const c=document.createElement('canvas');c.className=cls;document.body.appendChild(c);drawOrb(c,[{orb,start:0}],t)}
