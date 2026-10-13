@@ -61,7 +61,8 @@ async fn streams_plain_text() {
             StreamEvent::Usage(Usage {
                 input_tokens: 12,
                 output_tokens: 4,
-                cached_input_tokens: 0
+                cache_read_tokens: 0,
+                cache_write_tokens: 0
             }),
             StreamEvent::Done(StopReason::EndTurn),
         ]
@@ -111,19 +112,22 @@ async fn tool_use_round_trip_through_agent() {
         h.session.messages.last().unwrap().text_content(),
         "The answer is 42."
     );
-    // Input includes cache writes (300) and reads (300); only reads count as cached.
+    // Input includes the first request's cache write (300) and the second's cache read (300).
     let usage = h.session.last_turn.usage;
     assert_eq!(
         usage,
         Usage {
             input_tokens: 320 + 325,
             output_tokens: 36,
-            cached_input_tokens: 300
+            cache_read_tokens: 300,
+            cache_write_tokens: 300
         }
     );
     let cost = h.session.last_turn.cost_usd.unwrap();
     assert!((cost - info.unwrap().cost_usd(&usage)).abs() < 1e-12);
-    assert!(cost > 0.0);
+    // Sonnet 4.5: 45 uncached * $3 + 300 read * $0.30 + 300 written * $3.75 + 36 out * $15, per 1M.
+    let expected = (45.0 * 3.0 + 300.0 * 0.30 + 300.0 * 3.75 + 36.0 * 15.0) / 1_000_000.0;
+    assert!((cost - expected).abs() < 1e-12, "{cost}");
 
     let requests = server.received_requests().await.unwrap();
     assert_eq!(requests.len(), 2);

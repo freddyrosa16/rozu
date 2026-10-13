@@ -135,8 +135,9 @@ anything that isn't `Risk::Read`.
 Notes: the registry (`rozu_providers::registry`) owns providers, models and default models; `rozu models`
 lists them. Errors are unified as `Auth`, `RateLimited`, `BadRequest`, `Server` (5xx incl. 529), `Network`,
 `Cancelled`, plus in-stream `Api`/`Decode`/`UnexpectedEof`. Usage is normalized so `input_tokens` includes
-cached input (Anthropic reports cache reads/writes separately); cost uses the cached-input price for cache
-reads and counts Anthropic cache writes at the base input price, so it slightly underestimates. xAI needed no
+cache reads and writes, which are also carried separately as `cache_read_tokens`/`cache_write_tokens`
+(Anthropic reports both; OpenAI/xAI report only reads). Cost prices reads at the cached-input price and
+writes at `price_cache_write_per_mtok` (1.25x input for Anthropic, the input price elsewhere). xAI needed no
 adapter flags against the fixtures; add one to `OpenAiConfig` if the live check shows a difference.
 
 ### M3: Write tools, shell, sandbox, approvals (≈3 weeks)
@@ -150,8 +151,14 @@ adapter flags against the fixtures; add one to `OpenAiConfig` if the live check 
 - [ ] JSONL sessions + SQLite index, resume; ROZU.md memory; compaction
 - [ ] Sign in with ChatGPT (PKCE loopback) → keychain; token refresh
 - [ ] `rozu-cli eval` runner with ≥5 scripted tasks; replay tests from recorded sessions
+- [ ] `rozu eval memory --condition <ID|all> --seeds N --mode live|dry`: replays scripted sessions per memory condition and logs per run: input/output tokens, cache read/write tokens, cost, latency, recall
 
 **Done when:** a session survives restart and resumes, a long session compacts without losing pinned memory, ChatGPT login works end-to-end on the Mac, and the eval suite runs in CI with mocked providers.
+
+**Memory eval compatibility:**
+- Eval conditions are named presets of the real memory/compaction settings, not separate code paths, so what the eval measures is what ships.
+- The memory layer keeps a stable prompt prefix (system prompt + pinned memory + tool schemas) so it stays a cache hit across turns, and hides/elides old tool outputs in batches (not one per turn) so the prefix isn't invalidated on every request.
+- Provider usage already carries `cache_read_tokens` and `cache_write_tokens` (M2 follow-up), and `ModelInfo` prices both, so per-run cost needs no new provider work. `dry` mode runs against recorded/mocked providers.
 
 ### M5: GUI (BLOCKED until Designer's spec arrives through Chief)
 - [ ] Stack chosen per the spike (pending sign-off), with tokens imported into the theme (frontend-from-design-system)

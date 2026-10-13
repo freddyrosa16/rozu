@@ -295,9 +295,11 @@ impl Decoder for SseState {
                     out.push(StreamEvent::Usage(Usage {
                         input_tokens: usage["input_tokens"].as_u64().unwrap_or(0),
                         output_tokens: usage["output_tokens"].as_u64().unwrap_or(0),
-                        cached_input_tokens: usage["input_tokens_details"]["cached_tokens"]
+                        cache_read_tokens: usage["input_tokens_details"]["cached_tokens"]
                             .as_u64()
                             .unwrap_or(0),
+                        // Caching is implicit; writes are not reported (or billed extra).
+                        cache_write_tokens: 0,
                     }));
                 }
                 let reason = match response["incomplete_details"]["reason"].as_str() {
@@ -361,11 +363,13 @@ impl SseState {
 }
 
 /// Known OpenAI models: (id, context window, USD per 1M input / output / cached input tokens).
+/// Caching is implicit, so cache writes cost the normal input price.
 // Prices NEED VERIFICATION against https://openai.com/api/pricing before relying on cost totals;
 // they are list prices as last checked by hand and change without notice.
 pub fn models() -> Vec<ModelInfo> {
     crate::registry::model_table(
         PROVIDER_ID,
+        1.0,
         &[
             ("gpt-5.1", 400_000, 1.25, 10.0, 0.125),
             ("gpt-5", 400_000, 1.25, 10.0, 0.125),
@@ -483,7 +487,8 @@ mod tests {
                 StreamEvent::Usage(Usage {
                     input_tokens: 5,
                     output_tokens: 7,
-                    cached_input_tokens: 2
+                    cache_read_tokens: 2,
+                    cache_write_tokens: 0
                 }),
                 StreamEvent::Done(StopReason::ToolUse),
             ]

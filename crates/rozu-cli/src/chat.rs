@@ -296,15 +296,23 @@ impl Printer {
         }
     }
 
-    /// `[12 in (8 cached) / 4 out tokens · ~$0.0001]` after a turn that used tokens.
+    /// `[12 in (8 cached, 2 cache-written) / 4 out tokens · ~$0.0001]` after a turn that used
+    /// tokens.
     fn usage_line(&self, turn: &TurnUsage) {
         let usage = &turn.usage;
         if usage.input_tokens == 0 && usage.output_tokens == 0 {
             return;
         }
         let mut line = format!("[{} in", usage.input_tokens);
-        if usage.cached_input_tokens > 0 {
-            line.push_str(&format!(" ({} cached)", usage.cached_input_tokens));
+        let mut cache = Vec::new();
+        if usage.cache_read_tokens > 0 {
+            cache.push(format!("{} cached", usage.cache_read_tokens));
+        }
+        if usage.cache_write_tokens > 0 {
+            cache.push(format!("{} cache-written", usage.cache_write_tokens));
+        }
+        if !cache.is_empty() {
+            line.push_str(&format!(" ({})", cache.join(", ")));
         }
         line.push_str(&format!(" / {} out tokens", usage.output_tokens));
         if let Some(cost) = turn.cost_usd {

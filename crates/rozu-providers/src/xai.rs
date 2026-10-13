@@ -23,12 +23,14 @@ pub fn provider(api_key: SecretString) -> ProviderResult<OpenAiProvider> {
 }
 
 /// Known xAI models: (id, context window, USD per 1M input / output / cached input tokens).
+/// Caching is implicit, so cache writes cost the normal input price.
 // Prices NEED VERIFICATION against https://docs.x.ai/docs/models before relying on cost totals;
 // they are list prices as last checked by hand and change without notice (grok-4 also charges
 // more above 128k input tokens, which is not modeled).
 pub fn models() -> Vec<ModelInfo> {
     crate::registry::model_table(
         PROVIDER_ID,
+        1.0,
         &[
             ("grok-4", 256_000, 3.0, 15.0, 0.75),
             ("grok-4-fast-reasoning", 2_000_000, 0.20, 0.50, 0.05),
