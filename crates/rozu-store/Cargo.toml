@@ -1,0 +1,11 @@
+[package]
+name = "rozu-store"
+description = "On-disk sessions and project memory for rozu"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
