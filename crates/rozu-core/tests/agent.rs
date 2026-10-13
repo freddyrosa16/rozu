@@ -10,9 +10,9 @@ use futures::stream::{self, StreamExt};
 use rozu_core::{
     Agent, AgentConfig, AgentError, AgentEvent, ApprovalGate, ApprovalMode, ApprovalPolicy,
     ApprovalRecord, ApprovalRequest, ApprovalRules, ChatRequest, ContentPart, Decision,
-    DecisionSource, EventStream, Message, ModelInfo, PrefixRule, Provider, ProviderError,
-    ProviderResult, Role, SandboxMode, Session, StopReason, StreamEvent, TurnOutcome, Usage,
-    approvals_path,
+    DecisionSource, EventStream, LongContextPrices, Message, ModelInfo, PrefixRule, Provider,
+    ProviderError, ProviderResult, Role, SandboxMode, Session, StopReason, StreamEvent,
+    TurnOutcome, Usage, approvals_path,
 };
 use rozu_tools::{NoSandbox, Risk, Shell, Tool, ToolCtx, ToolOutput, ToolRegistry, Workspace};
 use serde_json::{Value, json};
@@ -381,6 +381,7 @@ async fn usage_and_cost_aggregate_per_turn() {
                 price_out_per_mtok: 10.0,
                 price_cached_in_per_mtok: 0.5,
                 price_cache_write_per_mtok: 2.5,
+                long_context: None,
             });
         },
         |_| {},
@@ -413,6 +414,60 @@ async fn usage_and_cost_aggregate_per_turn() {
     assert!((h.session.last_turn.cost_usd.unwrap() - 2.5).abs() < 1e-9);
     assert_eq!(h.session.usage.cache_read_tokens, 1_000_000);
     assert!((h.session.cost_usd - 6.0).abs() < 1e-9);
+}
+
+#[tokio::test]
+async fn long_context_tier_applies_per_response_not_per_turn() {
+    let usage = |input| {
+        StreamEvent::Usage(Usage {
+            input_tokens: input,
+            output_tokens: 0,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+        })
+    };
+    let mut tool = vec![usage(150_000)];
+    tool.extend(tool_call("call_1", "echo", r#"{"path":"a"}"#));
+    tool.push(StreamEvent::Done(StopReason::ToolUse));
+    let mut h = Harness::with_config(
+        [
+            ok(tool),
+            ok(vec![usage(150_000), StreamEvent::Done(StopReason::EndTurn)]),
+            ok(vec![usage(250_000), StreamEvent::Done(StopReason::EndTurn)]),
+        ],
+        |config| {
+            config.model_info = Some(
+                ModelInfo {
+                    id: "test-model".into(),
+                    provider: "test".into(),
+                    context_window: 1_000_000,
+                    supports_tools: true,
+                    price_in_per_mtok: 1.0,
+                    price_out_per_mtok: 1.0,
+                    price_cached_in_per_mtok: 1.0,
+                    price_cache_write_per_mtok: 1.0,
+                    long_context: None,
+                }
+                .with_long_context(LongContextPrices {
+                    threshold_tokens: 200_000,
+                    price_in_per_mtok: 2.0,
+                    price_out_per_mtok: 2.0,
+                    price_cached_in_per_mtok: 2.0,
+                    price_cache_write_per_mtok: 2.0,
+                }),
+            );
+        },
+        |_| {},
+    );
+
+    // Two 150k-token requests: 300k tokens in the turn, but neither request is long.
+    h.run("first").await.0.unwrap();
+    assert_eq!(h.session.last_turn.usage.input_tokens, 300_000);
+    assert!((h.session.last_turn.cost_usd.unwrap() - 0.3).abs() < 1e-9);
+
+    // One 250k-token request: every token at the long-context price.
+    h.run("second").await.0.unwrap();
+    assert!((h.session.last_turn.cost_usd.unwrap() - 0.5).abs() < 1e-9);
 }
 
 #[tokio::test]

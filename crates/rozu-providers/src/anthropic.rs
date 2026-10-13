@@ -370,19 +370,73 @@ impl Decoder for SseState {
     }
 }
 
-/// Known Anthropic models: (id, context window, USD per 1M input / output / cache-read tokens).
-/// Cache writes cost 1.25x input (the 5-minute TTL price).
-// Prices NEED VERIFICATION against https://www.anthropic.com/pricing before relying on cost
-// totals; they are list prices as last checked by hand and change without notice.
+/// Known Anthropic models with USD per 1M input / cache hit / cache write (5-minute TTL) / output
+/// tokens.
+// Prices as of 2026-10-13 from https://platform.claude.com/docs/en/about-claude/pricing (was
+// docs.anthropic.com/en/docs/about-claude/pricing); ids and context windows from
+// https://platform.claude.com/docs/en/about-claude/models/overview and .../model-ids-and-versions.
+// Claude 4.6 and later have a 1M context window at standard prices, except Haiku 5.5, which
+// charges more for prompts over 100,000 tokens. claude-opus-4-1 is retired on the Claude API.
 pub fn models() -> Vec<ModelInfo> {
+    use crate::registry::prices;
+    let opus = prices(5.0, 0.50, 6.25, 25.0);
     crate::registry::model_table(
         PROVIDER_ID,
-        1.25,
         &[
-            ("claude-sonnet-4-5", 200_000, 3.0, 15.0, 0.30),
-            ("claude-opus-4-1", 200_000, 15.0, 75.0, 1.50),
-            ("claude-opus-4-5", 200_000, 5.0, 25.0, 0.50),
-            ("claude-haiku-4-5", 200_000, 1.0, 5.0, 0.10),
+            (
+                "claude-fable-5-1",
+                1_000_000,
+                prices(10.0, 0.25, 12.50, 50.0),
+                None,
+            ),
+            (
+                "claude-opus-5-5",
+                1_000_000,
+                prices(4.0, 0.20, 5.0, 20.0),
+                None,
+            ),
+            (
+                "claude-sonnet-5-5",
+                1_000_000,
+                prices(2.0, 0.10, 2.50, 10.0),
+                None,
+            ),
+            (
+                "claude-haiku-5-5",
+                1_000_000,
+                prices(0.10, 0.01, 0.125, 0.50),
+                Some((100_001, prices(0.50, 0.05, 0.625, 2.50))),
+            ),
+            ("claude-opus-5", 1_000_000, opus, None),
+            (
+                "claude-sonnet-5",
+                1_000_000,
+                prices(2.0, 0.20, 2.50, 10.0),
+                None,
+            ),
+            ("claude-opus-4-8", 1_000_000, opus, None),
+            ("claude-opus-4-7", 1_000_000, opus, None),
+            ("claude-opus-4-6", 1_000_000, opus, None),
+            (
+                "claude-sonnet-4-6",
+                1_000_000,
+                prices(3.0, 0.30, 3.75, 15.0),
+                None,
+            ),
+            ("claude-opus-4-5", 200_000, opus, None),
+            // Deprecated.
+            (
+                "claude-sonnet-4-5",
+                200_000,
+                prices(3.0, 0.30, 3.75, 15.0),
+                None,
+            ),
+            (
+                "claude-haiku-4-5",
+                200_000,
+                prices(1.0, 0.10, 1.25, 5.0),
+                None,
+            ),
         ],
     )
 }

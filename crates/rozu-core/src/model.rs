@@ -194,19 +194,56 @@ pub struct ModelInfo {
     /// USD per million input tokens written to the prompt cache. Equal to the input price for
     /// providers without a write premium.
     pub price_cache_write_per_mtok: f64,
+    /// Higher prices for requests with a long prompt, if the model has them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub long_context: Option<LongContextPrices>,
+}
+
+/// A long-context price tier: a request whose prompt (all input tokens, including cache reads and
+/// writes) has at least `threshold_tokens` tokens pays these prices for **all** of its tokens,
+/// output included. Each request is priced on its own.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct LongContextPrices {
+    /// Smallest prompt size, in tokens, billed at the long-context prices.
+    pub threshold_tokens: u64,
+    pub price_in_per_mtok: f64,
+    pub price_out_per_mtok: f64,
+    pub price_cached_in_per_mtok: f64,
+    pub price_cache_write_per_mtok: f64,
 }
 
 impl ModelInfo {
-    /// Estimated USD cost of `usage` at list prices: cache reads at the cache-read price, cache
-    /// writes at the cache-write price, and the rest of the input at the normal price.
+    pub fn with_long_context(mut self, prices: LongContextPrices) -> Self {
+        self.long_context = Some(prices);
+        self
+    }
+
+    /// Estimated USD cost of **one response's** `usage` at list prices: cache reads at the
+    /// cache-read price, cache writes at the cache-write price, and the rest of the input at the
+    /// normal price, all at the long-context tier when the prompt reaches its threshold. Price
+    /// each response separately; summed usage would cross the threshold too early.
     pub fn cost_usd(&self, usage: &Usage) -> f64 {
+        let (p_in, p_out, p_read, p_write) = match self.long_context {
+            Some(long) if usage.input_tokens >= long.threshold_tokens => (
+                long.price_in_per_mtok,
+                long.price_out_per_mtok,
+                long.price_cached_in_per_mtok,
+                long.price_cache_write_per_mtok,
+            ),
+            _ => (
+                self.price_in_per_mtok,
+                self.price_out_per_mtok,
+                self.price_cached_in_per_mtok,
+                self.price_cache_write_per_mtok,
+            ),
+        };
         let read = usage.cache_read_tokens.min(usage.input_tokens);
         let write = usage.cache_write_tokens.min(usage.input_tokens - read);
         let uncached = usage.input_tokens - read - write;
-        (uncached as f64 * self.price_in_per_mtok
-            + read as f64 * self.price_cached_in_per_mtok
-            + write as f64 * self.price_cache_write_per_mtok
-            + usage.output_tokens as f64 * self.price_out_per_mtok)
+        (uncached as f64 * p_in
+            + read as f64 * p_read
+            + write as f64 * p_write
+            + usage.output_tokens as f64 * p_out)
             / 1_000_000.0
     }
 }
@@ -272,6 +309,7 @@ mod tests {
             price_out_per_mtok: 10.0,
             price_cached_in_per_mtok: 0.1,
             price_cache_write_per_mtok: 1.25,
+            long_context: None,
         };
         assert!((model.cost_usd(&total) - 3.0).abs() < 1e-9);
 
@@ -286,5 +324,67 @@ mod tests {
         // Over-reported cache counts never price more input than was billed.
         total.cache_write_tokens = 900_000;
         assert!((model.cost_usd(&total) - (0.5 * 0.1 + 0.5 * 1.25 + 2.0)).abs() < 1e-9);
+    }
+
+    fn tiered_model() -> ModelInfo {
+        ModelInfo {
+            id: "m".into(),
+            provider: "p".into(),
+            context_window: 1_000_000,
+            supports_tools: true,
+            price_in_per_mtok: 1.0,
+            price_out_per_mtok: 10.0,
+            price_cached_in_per_mtok: 0.1,
+            price_cache_write_per_mtok: 1.25,
+            long_context: None,
+        }
+        .with_long_context(LongContextPrices {
+            threshold_tokens: 200_000,
+            price_in_per_mtok: 2.0,
+            price_out_per_mtok: 20.0,
+            price_cached_in_per_mtok: 0.2,
+            price_cache_write_per_mtok: 2.5,
+        })
+    }
+
+    fn usage(input: u64, read: u64, write: u64, output: u64) -> Usage {
+        Usage {
+            input_tokens: input,
+            output_tokens: output,
+            cache_read_tokens: read,
+            cache_write_tokens: write,
+        }
+    }
+
+    #[test]
+    fn long_context_tier_starts_at_the_threshold() {
+        let model = tiered_model();
+        // Just under: standard prices. 199,999 * 1.0 + 1,000 * 10.0.
+        let under = model.cost_usd(&usage(199_999, 0, 0, 1_000));
+        assert!((under - (0.199_999 + 0.01)).abs() < 1e-9, "{under}");
+        // At the threshold every token, output included, pays the long-context price.
+        let at = model.cost_usd(&usage(200_000, 0, 0, 1_000));
+        assert!((at - (0.4 + 0.02)).abs() < 1e-9, "{at}");
+    }
+
+    #[test]
+    fn long_context_threshold_counts_cached_input() {
+        let model = tiered_model();
+        // 150k cache reads + 40k writes + 10k uncached = 200k prompt tokens: long tier.
+        let cost = model.cost_usd(&usage(200_000, 150_000, 40_000, 0));
+        let expected = (10_000.0 * 2.0 + 150_000.0 * 0.2 + 40_000.0 * 2.5) / 1e6;
+        assert!((cost - expected).abs() < 1e-9, "{cost}");
+    }
+
+    #[test]
+    fn model_info_without_long_context_round_trips() {
+        let mut model = tiered_model();
+        model.long_context = None;
+        let json = serde_json::to_value(&model).unwrap();
+        assert!(json.get("long_context").is_none());
+        assert_eq!(serde_json::from_value::<ModelInfo>(json).unwrap(), model);
+        let tiered = tiered_model();
+        let json = serde_json::to_string(&tiered).unwrap();
+        assert_eq!(serde_json::from_str::<ModelInfo>(&json).unwrap(), tiered);
     }
 }
