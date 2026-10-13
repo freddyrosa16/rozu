@@ -31,8 +31,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use rozu_core::{
-    ApprovalGate, ApprovalMode, ApprovalRecord, ApprovalRequest, ChatRequest, Decision,
-    EventStream, Provider, ProviderError, ProviderKind, ProviderResult, StreamEvent, ToolExecutor,
+    ApprovalGate, ApprovalMode, ApprovalRequest, ChatRequest, Decision, EventStream, Provider,
+    ProviderError, ProviderKind, ProviderResult, StreamEvent, ToolExecutor,
 };
 use rozu_mcp::{APPROVAL_SOCKET_ENV, ApprovalBridge, SERVER_NAME};
 use rozu_tools::Workspace;
@@ -116,8 +116,8 @@ struct State {
     mapper: Option<Mapper>,
     /// Notifications read while waiting for a response, not yet handled.
     pending: VecDeque<(String, Value)>,
-    /// Decision-log entries from `rozu mcp-serve`.
-    records: mpsc::UnboundedReceiver<ApprovalRecord>,
+    /// Decision-log entries from `rozu mcp-serve` and the prompts the bridge opened.
+    records: mpsc::UnboundedReceiver<StreamEvent>,
 }
 
 pub struct CodexAppServerProvider {
@@ -146,7 +146,7 @@ impl CodexAppServerProvider {
         let (records_tx, records) = mpsc::unbounded_channel();
         let socket = runtime_dir.path().join("approval.sock");
         // rozu's own tools (via `rozu mcp-serve`) get the user's real answers, `u` included.
-        let bridge = match ApprovalBridge::bind(&socket, user_gate, records_tx) {
+        let bridge = match ApprovalBridge::bind(&socket, PROVIDER_ID, user_gate, records_tx) {
             Ok(bridge) => Some(bridge),
             Err(err) => {
                 warn!(error = %err, "no approval bridge; prompts from rozu's MCP tools will be denied");
@@ -357,6 +357,8 @@ impl CodexAppServerProvider {
                             workspace: &self.config.workspace,
                             cancel: &cancel,
                             mapper: state.mapper.as_ref(),
+                            // Outside a turn there is no stream to report prompts on.
+                            prompts: None,
                         },
                     )
                     .await;
@@ -421,6 +423,10 @@ struct OneTimeGate(Arc<dyn ApprovalGate>);
 
 #[async_trait]
 impl ApprovalGate for OneTimeGate {
+    fn asks_user(&self) -> bool {
+        self.0.asks_user()
+    }
+
     async fn decide(&self, request: ApprovalRequest) -> Decision {
         match self.0.decide(request).await {
             Decision::ApproveUnsandboxed => Decision::Approve,
@@ -466,7 +472,7 @@ impl Drop for TurnGuard {
 
 enum Next {
     Cancelled,
-    Record(ApprovalRecord),
+    Record(StreamEvent),
     Line(Result<Option<Value>, ReadError>),
     Message(ProviderResult<Value>),
     Pending(String, Value),
@@ -484,11 +490,14 @@ enum Flow {
 }
 
 impl CodexAppServerProvider {
+    /// Handles one message. Approval prompts it opens are sent on `prompts` while they are
+    /// open, so the stream can report them before the answer is known.
     async fn handle(
         config: &CodexConfig,
         state: &mut State,
         message: Value,
         cancel: &CancellationToken,
+        prompts: Option<&mpsc::UnboundedSender<StreamEvent>>,
     ) -> Flow {
         match Incoming::parse(message) {
             Some(Incoming::Notification { method, params }) => {
@@ -504,6 +513,7 @@ impl CodexAppServerProvider {
                         workspace: &config.workspace,
                         cancel,
                         mapper: state.mapper.as_ref(),
+                        prompts,
                     },
                 )
                 .await;
@@ -575,7 +585,7 @@ impl CodexAppServerProvider {
                     },
                 };
                 if let Flow::End { keep, .. } =
-                    Self::handle(config, state, message, &cancelled).await
+                    Self::handle(config, state, message, &cancelled, None).await
                 {
                     return keep;
                 }
@@ -641,6 +651,7 @@ impl Provider for CodexAppServerProvider {
             state,
             finished: false,
         };
+        let (prompts_tx, mut prompts) = mpsc::unbounded_channel();
         Ok(Box::pin(async_stream::stream! {
             loop {
                 let state = &mut *guard.state;
@@ -675,10 +686,25 @@ impl Provider for CodexAppServerProvider {
                         yield Err(ProviderError::Cancelled);
                         break;
                     }
-                    Next::Record(record) => Flow::Events(vec![StreamEvent::Approval(record)]),
+                    Next::Record(event) => Flow::Events(vec![event]),
                     Next::Pending(method, params) => Self::notification(state, &method, &params),
                     Next::Message(Ok(message)) => {
-                        Self::handle(&config, state, message, &cancel).await
+                        // Report approval prompts as they open, while the answer is awaited.
+                        let handled =
+                            Self::handle(&config, state, message, &cancel, Some(&prompts_tx));
+                        tokio::pin!(handled);
+                        let flow = loop {
+                            let prompt = tokio::select! {
+                                biased;
+                                Some(prompt) = prompts.recv() => prompt,
+                                flow = &mut handled => break flow,
+                            };
+                            yield Ok(prompt);
+                        };
+                        while let Ok(prompt) = prompts.try_recv() {
+                            yield Ok(prompt);
+                        }
+                        flow
                     }
                     Next::Message(Err(err)) => {
                         yield Err(err);

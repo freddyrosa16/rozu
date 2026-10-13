@@ -117,17 +117,30 @@ pub struct Ask {
 /// The [`ApprovalGate`] handed to the agent.
 pub struct CliGate {
     asks: mpsc::Sender<Ask>,
+    /// Whether someone can answer (stdin is a terminal); otherwise every ask is denied without
+    /// a prompt.
+    interactive: bool,
 }
 
 impl CliGate {
-    pub fn new() -> (Arc<Self>, mpsc::Receiver<Ask>) {
+    pub fn new(interactive: bool) -> (Arc<Self>, mpsc::Receiver<Ask>) {
         let (tx, rx) = mpsc::channel(4);
-        (Arc::new(Self { asks: tx }), rx)
+        (
+            Arc::new(Self {
+                asks: tx,
+                interactive,
+            }),
+            rx,
+        )
     }
 }
 
 #[async_trait]
 impl ApprovalGate for CliGate {
+    fn asks_user(&self) -> bool {
+        self.interactive
+    }
+
     async fn decide(&self, request: ApprovalRequest) -> Decision {
         let (reply, answer) = oneshot::channel();
         if self.asks.send(Ask { request, reply }).await.is_err() {
@@ -492,7 +505,8 @@ mod tests {
 
     #[tokio::test]
     async fn non_interactive_prompts_are_denied() {
-        let (gate, mut asks) = CliGate::new();
+        let (gate, mut asks) = CliGate::new(false);
+        assert!(!gate.asks_user(), "no prompt opens without a terminal");
         let input = Input {
             lines: Arc::new(Mutex::new(mpsc::unbounded_channel().1)),
         };
@@ -534,7 +548,8 @@ mod tests {
             let input = Input {
                 lines: Arc::new(Mutex::new(rx)),
             };
-            let (gate, mut asks) = CliGate::new();
+            let (gate, mut asks) = CliGate::new(true);
+            assert!(gate.asks_user());
             let answering = tokio::spawn(async move {
                 let ask = asks.recv().await.unwrap();
                 answer(ask, &input, true, false).await;

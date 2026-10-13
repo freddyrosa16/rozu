@@ -9,18 +9,23 @@
 //!    150ms brighten pulse, or static frames in reduced-motion mode.
 //! 3. [`project`] turns the samples into a depth-sorted draw list (≤120 dots) for a given orb
 //!    size and scale factor, applying each dot's state size (`base · s · k · …`).
-//! 4. [`FramePolicy`] says how often to draw, and [`ActivityTracker`] maps agent events to states
-//!    and labels.
+//! 4. [`FramePolicy`] says how often to draw, [`ActivityTracker`] maps agent events to states
+//!    and labels (an open approval prompt → Waiting), and [`Debouncer`] keeps fast tool calls
+//!    from flickering the pill. With `core`, `replay` has a scripted turn for demos.
 
+mod debounce;
 mod events;
 mod generate;
 mod orb;
 mod policy;
 mod project;
+#[cfg(feature = "core")]
+pub mod replay;
 mod state;
 pub mod tokens;
 
-pub use events::{Activity, ActivityEvent, ActivityTracker, tool_state};
+pub use debounce::{Debouncer, MIN_DWELL};
+pub use events::{Activity, ActivityEvent, ActivityTracker, ApprovalOutcome, tool_state};
 #[cfg(feature = "core")]
 pub use events::{from_agent_event, from_agent_events};
 pub use generate::{CAMERA, Dot, N_POINTS, Vec3, fib, generate, hash};

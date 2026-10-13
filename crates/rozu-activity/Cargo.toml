@@ -13,6 +13,10 @@ default = ["core"]
 # `from_agent_events` / `From<&AgentEvent>`. Off for GUI spikes that only want the orb.
 core = ["dep:rozu-core"]
 
+[[example]]
+name = "replay"
+required-features = ["core"]
+
 [dependencies]
 rozu-core = { workspace = true, optional = true }
 serde_json.workspace = true
