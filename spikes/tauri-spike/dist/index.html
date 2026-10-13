@@ -1,0 +1,10 @@
+<!doctype html><html><body style="background:#111318;color:#e6e6e6;font:13px Menlo,monospace;margin:8px">
+<div id="log">Tauri spike — streaming…</div>
+<script>
+const log = document.getElementById('log'); let buf = [];
+window.__TAURI__.event.listen('token', e => buf.push(e.payload));
+// batch per animation frame, as a real UI would
+(function tick(){ if (buf.length){ const f=document.createDocumentFragment();
+  for (const l of buf){ const d=document.createElement('div'); d.textContent=l; f.appendChild(d);} buf=[];
+  log.appendChild(f); window.scrollTo(0, document.body.scrollHeight);} requestAnimationFrame(tick); })();
+</script></body></html>
