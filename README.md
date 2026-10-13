@@ -148,11 +148,30 @@ the workspace (`cp build.tgz ~/Downloads/`), the card lists them and the sandbox
 exactly those paths. If the sandbox blocks something anyway, the output says `blocked by rozu sandbox: writes
 outside workspace…` and rozu asks once whether to rerun it unsandboxed.
 
+**Tool caches outside the workspace are blocked too, in every mode.** Writes to `~/.cargo`, `~/.npm`,
+`~/.cache/pip`, `~/go`, `~/Library/Caches/…` and the like fail under the sandbox even in `--approval full`: `cargo`
+locks `~/.cargo/.package-cache` on every build, `npm install` writes `~/.npm`. You'll see the `blocked by rozu
+sandbox` note and a one-time offer to rerun that command with `u` (unsandboxed, this command only; nothing is
+remembered). To avoid the prompt, keep the caches where the sandbox allows writes, by starting rozu with them in the
+workspace (add the directories to `.gitignore`):
+
+```sh
+CARGO_HOME="$PWD/.cache/cargo" npm_config_cache="$PWD/.cache/npm" PIP_CACHE_DIR="$PWD/.cache/pip" \
+  GOMODCACHE="$PWD/.cache/go/mod" GOCACHE="$PWD/.cache/go/build" rozu chat
+```
+
+or per command in the session temp dir, e.g. `CARGO_HOME="$TMPDIR/cargo" cargo build` or `npm install --cache
+"$TMPDIR/npm"` (deleted when rozu exits). A fresh cache has to be filled once, which needs network access, so that
+first command asks for approval.
+
 Destructive commands (`rm -rf`, `git push --force`, `git reset --hard`, `git branch -D`, `git clean -fd`, `sudo`,
 redirects to paths outside the workspace, …) **always** ask, in every mode. So do **opaque** commands, whose effect
-rozu can't read off the command line: language interpreters (`python`, `perl`, `ruby`, `node`, `osascript`, …),
-`sh -c`/`bash -c`/`zsh -c`, `eval`, `source`, `exec`, scripts piped into a shell, and any output redirect or `tee` to
-a file (`> out.txt`).
+rozu can't read off the command line: inline code (`python -c`, `perl -e`, `node -e`, `sh -c`/`bash -c`/`zsh -c`,
+code on an interpreter's stdin or in a heredoc, `eval`, `source`, `exec`), other interpreters (`osascript`, …),
+scripts outside the workspace, and any output redirect or `tee` to a file (`> out.txt`). A **script file inside the
+workspace** is treated the same whichever interpreter runs it (`sh`, `bash`, `zsh`, `python`, `perl`, `ruby`,
+`node`): like `make`, it's a sandboxed workspace write, so `sh test.sh` and `python test.py` run without a prompt in
+`auto` and `full`.
 
 Keys at the prompt:
 
@@ -164,8 +183,9 @@ Keys at the prompt:
 | `u` | run **unsandboxed, this command only**: no sandbox at all, full access to your files and the network. Never remembered, never chosen by a mode or rule. Only offered where there is a sandbox to lift |
 
 Rules live in `.rozu/approvals.json` in the workspace; tools and sandboxed commands can't write there. Without a
-terminal on stdin, every prompt is denied. There is no sandbox on Linux yet, so in auto mode shell commands that
-write ask first. Commands time out after 120 s by default (max 600 s), and the whole process group is killed on
+terminal on stdin, every prompt is denied. There is no sandbox on Linux (or anywhere but macOS) yet: `rozu chat`
+and `rozu doctor` print a red warning banner there, in auto mode shell commands that write ask first, and in full
+mode they run unconfined without asking. Commands time out after 120 s by default (max 600 s), and the whole process group is killed on
 timeout or Ctrl-C.
 
 Every approval decision (automatic or yours, allowed or denied) is appended to the audit log

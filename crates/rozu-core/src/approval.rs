@@ -200,6 +200,73 @@ impl ApprovalRecord {
     }
 }
 
+/// Longest [`PendingApproval::summary`].
+const MAX_SUMMARY_CHARS: usize = 200;
+
+/// An approval prompt that is open and waiting for the user. Sent the moment the user is asked
+/// (never for decisions a mode, rule or policy makes on its own), and followed by one
+/// [`ApprovalResolution`] for the same `request_id` unless the turn is torn down first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingApproval {
+    /// The tool call the prompt is about ([`ApprovalRequest::call_id`]).
+    pub request_id: String,
+    pub tool: String,
+    /// One line saying what would run: the first line of the preview, clipped.
+    pub summary: String,
+    /// Who asked: a CLI-backed provider (`claude-cli`, `codex`, `grok`) or the model provider
+    /// whose agent loop rozu runs (`openai`, …).
+    pub provider: String,
+}
+
+impl PendingApproval {
+    pub fn new(request: &ApprovalRequest, provider: impl Into<String>) -> Self {
+        let first = request.preview.lines().next().unwrap_or("").trim();
+        let mut summary: String = first.chars().take(MAX_SUMMARY_CHARS).collect();
+        if first.chars().count() > MAX_SUMMARY_CHARS {
+            summary.push('…');
+        }
+        if request.blocked_retry {
+            summary = format!("rerun unsandboxed: {summary}");
+        }
+        Self {
+            request_id: request.call_id.clone(),
+            tool: request.tool.clone(),
+            summary,
+            provider: provider.into(),
+        }
+    }
+}
+
+/// How an open approval prompt ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApprovalResolution {
+    Approved,
+    Denied,
+    /// Nobody answered: the turn was cancelled, or the asker went away, while it was open.
+    Expired,
+}
+
+impl ApprovalResolution {
+    /// The resolution of a prompt answered with `decision` (by the user, or a cancellation).
+    pub fn of(decision: &Decision, source: &DecisionSource) -> Self {
+        match (decision, source) {
+            (_, DecisionSource::Cancelled) => Self::Expired,
+            (Decision::Deny { .. }, _) => Self::Denied,
+            _ => Self::Approved,
+        }
+    }
+}
+
+impl fmt::Display for ApprovalResolution {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Approved => "approved",
+            Self::Denied => "denied",
+            Self::Expired => "expired",
+        })
+    }
+}
+
 /// How a call would be confined if it runs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Confinement {
@@ -215,6 +282,13 @@ pub struct Confinement {
 #[async_trait]
 pub trait ApprovalGate: Send + Sync {
     async fn decide(&self, req: ApprovalRequest) -> Decision;
+
+    /// Whether [`Self::decide`] waits for a person, so asking it opens an approval prompt
+    /// ([`PendingApproval`]). False for gates that answer on their own (a non-interactive
+    /// session's default) and for relays whose other end reports the prompt itself.
+    fn asks_user(&self) -> bool {
+        true
+    }
 }
 
 /// Denies every request it is asked about.
@@ -223,6 +297,10 @@ pub struct ReadOnlyGate;
 
 #[async_trait]
 impl ApprovalGate for ReadOnlyGate {
+    fn asks_user(&self) -> bool {
+        false
+    }
+
     async fn decide(&self, req: ApprovalRequest) -> Decision {
         Decision::Deny {
             reason: format!(
@@ -557,7 +635,16 @@ mod tests {
                 [false, false, false],
             ),
             ("> out.txt", Risk::Opaque, [false, false, false]),
-            ("python3 script.py", Risk::Opaque, [false, false, false]),
+            // Script files in the workspace run sandboxed like `make`, whatever the interpreter.
+            (
+                "python3 script.py",
+                Risk::WriteWorkspace,
+                [false, true, true],
+            ),
+            ("sh script.sh", Risk::WriteWorkspace, [false, true, true]),
+            ("node script.js", Risk::WriteWorkspace, [false, true, true]),
+            ("python3 /opt/x.py", Risk::Opaque, [false, false, false]),
+            ("sh /opt/x.sh", Risk::Opaque, [false, false, false]),
         ];
         for (command, risk, expected) in cases {
             for (mode, auto) in [ReadOnly, AutoWorkspace, FullAccess]

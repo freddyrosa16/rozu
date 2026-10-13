@@ -20,8 +20,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use futures::StreamExt;
 use rozu_core::{
-    ApprovalGate, ApprovalMode, ApprovalRecord, ApprovalRequest, Decision, DecisionSource,
-    SandboxMode,
+    ApprovalGate, ApprovalMode, ApprovalRecord, ApprovalRequest, ApprovalResolution, Decision,
+    DecisionSource, PendingApproval, SandboxMode, StreamEvent,
 };
 use rozu_tools::{AllowRule, Risk};
 use serde::{Deserialize, Serialize};
@@ -329,8 +329,10 @@ fn to_line<T: Serialize>(value: &T) -> io::Result<Vec<u8>> {
 // ---------------------------------------------------------------------------------------------
 // Parent side
 
-/// The parent's end: answers `ask`s with `gate` and forwards `record`s to `records`. Stops
-/// listening and removes the socket file when dropped.
+/// The parent's end: answers `ask`s with `gate` and forwards `record`s to `events` as
+/// [`StreamEvent::Approval`]s. When `gate` asks the user, the open prompt is reported on
+/// `events` too ([`StreamEvent::ApprovalPending`], then [`StreamEvent::ApprovalResolved`]),
+/// tagged with `provider`. Stops listening and removes the socket file when dropped.
 pub struct ApprovalBridge {
     path: PathBuf,
     task: tokio::task::JoinHandle<()>,
@@ -342,16 +344,23 @@ impl ApprovalBridge {
     #[cfg(unix)]
     pub fn bind(
         path: impl Into<PathBuf>,
+        provider: impl Into<String>,
         gate: Arc<dyn ApprovalGate>,
-        records: mpsc::UnboundedSender<ApprovalRecord>,
+        events: mpsc::UnboundedSender<StreamEvent>,
     ) -> io::Result<Self> {
         let path = path.into();
+        let provider: Arc<str> = provider.into().into();
         let listener = tokio::net::UnixListener::bind(&path)?;
         let task = tokio::spawn(async move {
             loop {
                 match listener.accept().await {
                     Ok((stream, _)) => {
-                        tokio::spawn(serve_connection(stream, gate.clone(), records.clone()));
+                        tokio::spawn(serve_connection(
+                            stream,
+                            provider.clone(),
+                            gate.clone(),
+                            events.clone(),
+                        ));
                     }
                     Err(err) => {
                         warn!(error = %err, "approval socket accept failed");
@@ -366,8 +375,9 @@ impl ApprovalBridge {
     #[cfg(not(unix))]
     pub fn bind(
         _path: impl Into<PathBuf>,
+        _provider: impl Into<String>,
         _gate: Arc<dyn ApprovalGate>,
-        _records: mpsc::UnboundedSender<ApprovalRecord>,
+        _events: mpsc::UnboundedSender<StreamEvent>,
     ) -> io::Result<Self> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
@@ -390,8 +400,9 @@ impl Drop for ApprovalBridge {
 #[cfg(unix)]
 async fn serve_connection(
     stream: tokio::net::UnixStream,
+    provider: Arc<str>,
     gate: Arc<dyn ApprovalGate>,
-    records: mpsc::UnboundedSender<ApprovalRecord>,
+    events: mpsc::UnboundedSender<StreamEvent>,
 ) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -409,15 +420,32 @@ async fn serve_connection(
         Ok(Message::Ask { request }) => {
             let request = ApprovalRequest::from(request);
             debug!(tool = %request.tool, call_id = %request.call_id, "approval asked over the bridge");
+            let prompt = gate.asks_user();
+            let request_id = request.call_id.clone();
+            if prompt {
+                let _ = events.send(StreamEvent::ApprovalPending(PendingApproval::new(
+                    &request, &*provider,
+                )));
+            }
+            let resolved = |resolution| {
+                if prompt {
+                    let _ = events.send(StreamEvent::ApprovalResolved {
+                        request_id: request_id.clone(),
+                        resolution,
+                    });
+                }
+            };
             let mut read = lines.into_inner();
             let decision = tokio::select! {
                 decision = gate.decide(request) => decision,
                 // The server hung up (the CLI was cancelled or exited): withdraw the question.
                 _ = async { while read.read(&mut [0u8; 64]).await.is_ok_and(|n| n > 0) {} } => {
                     debug!("approval asker went away");
+                    resolved(ApprovalResolution::Expired);
                     return;
                 }
             };
+            resolved(ApprovalResolution::of(&decision, &DecisionSource::Gate));
             let reply = Reply {
                 decision: decision.into(),
             };
@@ -431,7 +459,7 @@ async fn serve_connection(
             }
         }
         Ok(Message::Record { record }) => {
-            let _ = records.send(record.into());
+            let _ = events.send(StreamEvent::Approval(record.into()));
         }
         Err(err) => warn!(error = %err, "malformed approval message"),
     }
@@ -535,6 +563,11 @@ impl SocketGate {
 
 #[async_trait]
 impl ApprovalGate for SocketGate {
+    /// A relay: the parent's [`ApprovalBridge`] reports the prompt when its own gate asks.
+    fn asks_user(&self) -> bool {
+        false
+    }
+
     async fn decide(&self, request: ApprovalRequest) -> Decision {
         let tool = request.tool.clone();
         match self.ask(request).await {
