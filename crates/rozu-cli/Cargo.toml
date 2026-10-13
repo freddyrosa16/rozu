@@ -1,0 +1,26 @@
+[package]
+name = "rozu-cli"
+description = "Headless CLI driver for the rozu coding agent"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "rozu"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+rozu-core.workspace = true
+rozu-providers.workspace = true
+rozu-pty.workspace = true
+rozu-secrets.workspace = true
+rozu-store.workspace = true
+rozu-tools.workspace = true
+
+[dev-dependencies]
+assert_cmd.workspace = true
+predicates.workspace = true

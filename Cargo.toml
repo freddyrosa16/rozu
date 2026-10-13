@@ -1,0 +1,32 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+# GUI spikes are throwaway, standalone projects.
+exclude = ["spikes"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+repository = "https://github.com/freddyrosa16/rozu"
+publish = false
+
+[workspace.dependencies]
+# Internal crates
+rozu-core = { path = "crates/rozu-core" }
+rozu-providers = { path = "crates/rozu-providers" }
+rozu-tools = { path = "crates/rozu-tools" }
+rozu-pty = { path = "crates/rozu-pty" }
+rozu-secrets = { path = "crates/rozu-secrets" }
+rozu-store = { path = "crates/rozu-store" }
+
+# External crates
+clap = { version = "4.5", features = ["derive"] }
+regex = "1.11"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+# Dev/test
+assert_cmd = "2"
+predicates = "3"
