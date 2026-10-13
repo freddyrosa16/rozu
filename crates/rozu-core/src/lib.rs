@@ -13,7 +13,7 @@ pub mod telemetry;
 
 pub use agent::{
     Agent, AgentConfig, AgentError, AgentEvent, DEFAULT_MAX_STEPS, DEFAULT_TOOL_TIMEOUT, Session,
-    TurnOutcome,
+    TurnOutcome, TurnUsage,
 };
 pub use approval::{ApprovalGate, ApprovalRequest, Decision, ReadOnlyGate};
 pub use model::{

@@ -14,7 +14,9 @@ use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, info_span, warn};
 
 use crate::approval::{ApprovalGate, ApprovalRequest, Decision, ReadOnlyGate};
-use crate::model::{ChatRequest, ContentPart, Message, Role, StreamEvent, ToolSpec, Usage};
+use crate::model::{
+    ChatRequest, ContentPart, Message, ModelInfo, Role, StreamEvent, ToolSpec, Usage,
+};
 use crate::provider::{Provider, ProviderError};
 
 /// Default cap on model requests per user turn.
@@ -31,6 +33,9 @@ pub struct AgentConfig {
     pub max_output_tokens: Option<u32>,
     /// Tool results longer than this are cut to head + tail before going back to the model.
     pub max_tool_output_bytes: usize,
+    /// Prices for cost accounting. `None` (an unlisted model) means tokens are counted but cost
+    /// is unknown.
+    pub model_info: Option<ModelInfo>,
 }
 
 impl AgentConfig {
@@ -41,15 +46,35 @@ impl AgentConfig {
             tool_timeout: DEFAULT_TOOL_TIMEOUT,
             max_output_tokens: None,
             max_tool_output_bytes: MAX_OUTPUT_BYTES,
+            model_info: None,
         }
+    }
+
+    pub fn with_model_info(mut self, info: Option<ModelInfo>) -> Self {
+        self.model_info = info;
+        self
     }
 }
 
-/// The conversation so far plus running totals.
+/// Tokens and estimated cost of one user turn (all of its model requests).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct TurnUsage {
+    pub usage: Usage,
+    /// `None` when the model has no known prices.
+    pub cost_usd: Option<f64>,
+}
+
+/// The conversation so far plus running totals. A session can outlive an [`Agent`], so the
+/// model (and provider) can change between turns.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Session {
     pub messages: Vec<Message>,
+    /// Tokens over all turns.
     pub usage: Usage,
+    /// Estimated USD over all turns whose model had known prices.
+    pub cost_usd: f64,
+    /// The most recent turn, including one that was cancelled or failed.
+    pub last_turn: TurnUsage,
 }
 
 impl Session {
@@ -60,7 +85,18 @@ impl Session {
     pub fn with_system_prompt(prompt: impl Into<String>) -> Self {
         Self {
             messages: vec![Message::system(prompt)],
-            usage: Usage::default(),
+            ..Self::default()
+        }
+    }
+
+    /// Adds one response's usage to the totals, pricing it with `model`.
+    fn record_usage(&mut self, usage: Usage, model: Option<&ModelInfo>) {
+        self.usage += usage;
+        self.last_turn.usage += usage;
+        if let Some(model) = model {
+            let cost = model.cost_usd(&usage);
+            self.cost_usd += cost;
+            *self.last_turn.cost_usd.get_or_insert(0.0) += cost;
         }
     }
 }
@@ -201,6 +237,10 @@ impl Agent {
         cancel: CancellationToken,
     ) -> Result<TurnOutcome, AgentError> {
         session.messages.push(Message::user(user_input));
+        session.last_turn = TurnUsage {
+            usage: Usage::default(),
+            cost_usd: self.config.model_info.as_ref().map(|_| 0.0),
+        };
         let specs = self.tool_specs();
         let ctx = ToolCtx::new(self.workspace.clone(), cancel.clone());
 
@@ -333,7 +373,7 @@ impl Agent {
                     }
                     StreamEvent::ToolCallEnd { .. } => {}
                     StreamEvent::Usage(usage) => {
-                        session.usage += usage;
+                        session.record_usage(usage, self.config.model_info.as_ref());
                         let _ = events.send(AgentEvent::Usage(usage)).await;
                     }
                     StreamEvent::Done(reason) => {

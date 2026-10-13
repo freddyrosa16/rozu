@@ -1,7 +1,8 @@
-//! `rozu chat`: run the agent against OpenAI with the read-only workspace tools.
+//! `rozu chat`: run the agent against OpenAI, Anthropic or xAI with the read-only workspace tools.
 //!
 //! Assistant text streams to stdout; tool calls, status and errors go to stderr (dimmed on a
-//! terminal), so `rozu chat "…" > answer.md` captures just the answer.
+//! terminal), so `rozu chat "…" > answer.md` captures just the answer. In the interactive session,
+//! `/model <provider/model>` switches the model for the next turn while keeping the conversation.
 
 use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
@@ -11,22 +12,22 @@ use std::sync::{Arc, Mutex};
 use anyhow::{Context, anyhow};
 use clap::Args;
 use rozu_core::{
-    Agent, AgentConfig, AgentError, AgentEvent, DEFAULT_MAX_STEPS, ModelInfo, Session, TurnOutcome,
-    Usage,
+    Agent, AgentConfig, AgentError, AgentEvent, DEFAULT_MAX_STEPS, Session, TurnOutcome, TurnUsage,
 };
-use rozu_providers::openai::{self, OpenAiConfig, OpenAiProvider};
-use rozu_secrets::{KeyringStore, resolve_api_key};
+use rozu_providers::{ModelChoice, registry};
+use rozu_secrets::{KeyringStore, env_var_for, resolve_api_key};
 use rozu_tools::{ToolRegistry, Workspace};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-pub const DEFAULT_MODEL: &str = "gpt-5.1";
-
 #[derive(Debug, Args)]
 pub struct ChatArgs {
-    /// Model id.
-    #[arg(long, default_value = DEFAULT_MODEL)]
-    model: String,
+    /// Provider: openai, anthropic or xai. Defaults to the model's provider, else openai.
+    #[arg(long, env = "ROZU_PROVIDER")]
+    provider: Option<String>,
+    /// Model id or provider/model (see `rozu models`). Defaults to the provider's default model.
+    #[arg(long, env = "ROZU_MODEL")]
+    model: Option<String>,
     /// Directory the agent's tools may read. Paths outside it are rejected.
     #[arg(long, default_value = ".")]
     workspace: PathBuf,
@@ -43,34 +44,73 @@ pub fn run(args: ChatArgs) -> anyhow::Result<ExitCode> {
     runtime.block_on(chat(args))
 }
 
-async fn chat(args: ChatArgs) -> anyhow::Result<ExitCode> {
-    let store = KeyringStore::default();
-    let (key, _source) =
-        resolve_api_key(&store, openai::PROVIDER_ID, |var| std::env::var(var).ok())?.ok_or_else(
-            || anyhow!("no OpenAI API key: run `rozu auth set openai` or set OPENAI_API_KEY"),
-        )?;
-    let mut config = OpenAiConfig::new(key);
-    if let Some(base_url) = std::env::var("OPENAI_BASE_URL")
+/// Builds an [`Agent`] for a model choice; kept around so `/model` can rebuild mid-session.
+struct AgentFactory {
+    store: KeyringStore,
+    tools: Arc<ToolRegistry>,
+    workspace: Workspace,
+    max_steps: usize,
+}
+
+impl AgentFactory {
+    /// Resolves the provider's key (env var first, then the keychain) and builds the agent.
+    fn build(&self, choice: &ModelChoice) -> anyhow::Result<Agent> {
+        let provider = choice.provider;
+        let (key, _source) =
+            resolve_api_key(&self.store, provider.id, |var| std::env::var(var).ok())?.ok_or_else(
+                || {
+                    anyhow!(
+                        "no {} API key: run `rozu auth set {}` or set {}",
+                        provider.label,
+                        provider.id,
+                        env_var_for(provider.id).unwrap_or("its API key variable"),
+                    )
+                },
+            )?;
+        let base_url = base_url_override(provider.id);
+        let provider = registry::build(provider, key, base_url.as_deref(), None)?;
+        let mut config = AgentConfig::new(&choice.model).with_model_info(choice.info.clone());
+        config.max_steps = self.max_steps;
+        Ok(Agent::new(
+            provider,
+            self.tools.clone(),
+            self.workspace.clone(),
+            config,
+        ))
+    }
+}
+
+/// `OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL` or `XAI_BASE_URL`, if set: for proxies and tests.
+fn base_url_override(provider: &str) -> Option<String> {
+    std::env::var(format!("{}_BASE_URL", provider.to_ascii_uppercase()))
         .ok()
         .filter(|url| !url.trim().is_empty())
-    {
-        config = config.with_base_url(base_url);
-    }
-    let provider = Arc::new(OpenAiProvider::new(config)?);
+}
 
+/// Parses a `/model` argument: a provider name (its default model), `provider/model` or a model id.
+fn parse_model_switch(arg: &str) -> Result<ModelChoice, registry::RegistryError> {
+    if registry::provider_info(arg).is_some() {
+        registry::resolve(Some(arg), None)
+    } else {
+        registry::resolve(None, Some(arg))
+    }
+}
+
+async fn chat(args: ChatArgs) -> anyhow::Result<ExitCode> {
+    let mut choice = registry::resolve(args.provider.as_deref(), args.model.as_deref())?;
     let workspace = Workspace::new(&args.workspace)
         .with_context(|| format!("cannot open workspace {}", args.workspace.display()))?;
-    let mut agent_config = AgentConfig::new(&args.model);
-    agent_config.max_steps = args.max_steps;
-    let agent = Agent::new(
-        provider,
-        Arc::new(ToolRegistry::read_only()),
-        workspace.clone(),
-        agent_config,
-    );
+    let factory = AgentFactory {
+        store: KeyringStore::default(),
+        tools: Arc::new(ToolRegistry::read_only()),
+        workspace: workspace.clone(),
+        max_steps: args.max_steps,
+    };
+    let mut agent = factory.build(&choice)?;
     let mut session = Session::with_system_prompt(system_prompt(&workspace));
-    let printer = Printer::new(openai::model_info(&args.model));
+    let printer = Printer::new();
     let interrupts = Interrupts::install();
+    printer.unpriced_note(&choice);
 
     let prompt = args.prompt.join(" ");
     if !prompt.trim().is_empty() {
@@ -84,9 +124,9 @@ async fn chat(args: ChatArgs) -> anyhow::Result<ExitCode> {
     let interactive = io::stdin().is_terminal();
     if interactive {
         printer.status(&format!(
-            "rozu {} · {} · {}\nCtrl-C cancels a turn (twice exits) · Ctrl-D or /exit quits",
+            "rozu {} · {} · {}\nCtrl-C cancels a turn (twice exits) · /model <provider/model> switches · Ctrl-D or /exit quits",
             env!("CARGO_PKG_VERSION"),
-            args.model,
+            choice.spec(),
             workspace.root().display()
         ));
     }
@@ -104,6 +144,28 @@ async fn chat(args: ChatArgs) -> anyhow::Result<ExitCode> {
         }
         if matches!(input, "/exit" | "/quit") {
             break;
+        }
+        if let Some(arg) = command_arg(input, "/model") {
+            if arg.is_empty() {
+                printer.status(&format!(
+                    "model: {} · usage: /model <provider/model> (see `rozu models`)",
+                    choice.spec()
+                ));
+                continue;
+            }
+            match parse_model_switch(arg)
+                .map_err(anyhow::Error::from)
+                .and_then(|next| Ok((factory.build(&next)?, next)))
+            {
+                Ok((next_agent, next)) => {
+                    agent = next_agent;
+                    choice = next;
+                    printer.status(&format!("switched to {}", choice.spec()));
+                    printer.unpriced_note(&choice);
+                }
+                Err(err) => eprintln!("error: {err:#}"),
+            }
+            continue;
         }
         if let Err(err) = turn(
             &agent,
@@ -165,7 +227,14 @@ async fn turn(
     };
     let (result, ()) = tokio::join!(run, render);
     interrupts.end_turn();
+    printer.usage_line(&session.last_turn);
     result
+}
+
+/// The argument of `/name arg`, or `""` for a bare `/name`; `None` for other input.
+fn command_arg<'a>(input: &'a str, name: &str) -> Option<&'a str> {
+    let rest = input.strip_prefix(name)?;
+    (rest.is_empty() || rest.starts_with(char::is_whitespace)).then(|| rest.trim())
 }
 
 /// First Ctrl-C cancels the running turn; a second one (or one at the prompt) exits.
@@ -209,14 +278,40 @@ impl Interrupts {
 
 /// Output styling shared by all turns.
 struct Printer {
-    model: Option<ModelInfo>,
     dim: bool,
 }
 
 impl Printer {
-    fn new(model: Option<ModelInfo>) -> Self {
+    fn new() -> Self {
         let dim = io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none();
-        Self { model, dim }
+        Self { dim }
+    }
+
+    fn unpriced_note(&self, choice: &ModelChoice) {
+        if choice.info.is_none() {
+            self.status(&format!(
+                "note: {} isn't in `rozu models`, so cost won't be shown",
+                choice.spec()
+            ));
+        }
+    }
+
+    /// `[12 in (8 cached) / 4 out tokens · ~$0.0001]` after a turn that used tokens.
+    fn usage_line(&self, turn: &TurnUsage) {
+        let usage = &turn.usage;
+        if usage.input_tokens == 0 && usage.output_tokens == 0 {
+            return;
+        }
+        let mut line = format!("[{} in", usage.input_tokens);
+        if usage.cached_input_tokens > 0 {
+            line.push_str(&format!(" ({} cached)", usage.cached_input_tokens));
+        }
+        line.push_str(&format!(" / {} out tokens", usage.output_tokens));
+        if let Some(cost) = turn.cost_usd {
+            line.push_str(&format!(" · ~${cost:.4}"));
+        }
+        line.push(']');
+        self.status(&line);
     }
 
     fn status(&self, text: &str) {
@@ -231,7 +326,6 @@ impl Printer {
         TurnPrinter {
             printer: self,
             mid_line: false,
-            usage: Usage::default(),
         }
     }
 }
@@ -240,7 +334,6 @@ struct TurnPrinter<'a> {
     printer: &'a Printer,
     /// Whether stdout has text not yet ended by a newline.
     mid_line: bool,
-    usage: Usage,
 }
 
 impl TurnPrinter<'_> {
@@ -270,17 +363,15 @@ impl TurnPrinter<'_> {
                 };
                 self.status(&summary);
             }
-            AgentEvent::Usage(usage) => self.usage += usage,
-            AgentEvent::TurnFinished(outcome) => {
-                match outcome {
-                    TurnOutcome::Completed => {}
-                    TurnOutcome::Cancelled => self.status("[cancelled]"),
-                    TurnOutcome::MaxSteps => {
-                        self.status("[stopped: reached the step limit for this turn]")
-                    }
+            // Totals come from the session once the turn ends (see `Printer::usage_line`).
+            AgentEvent::Usage(_) => {}
+            AgentEvent::TurnFinished(outcome) => match outcome {
+                TurnOutcome::Completed => {}
+                TurnOutcome::Cancelled => self.status("[cancelled]"),
+                TurnOutcome::MaxSteps => {
+                    self.status("[stopped: reached the step limit for this turn]")
                 }
-                self.usage_line();
-            }
+            },
         }
     }
 
@@ -298,21 +389,6 @@ impl TurnPrinter<'_> {
     fn status(&mut self, text: &str) {
         self.end_line();
         self.printer.status(text);
-    }
-
-    fn usage_line(&mut self) {
-        if self.usage == Usage::default() {
-            return;
-        }
-        let mut line = format!(
-            "[{} in / {} out tokens",
-            self.usage.input_tokens, self.usage.output_tokens
-        );
-        if let Some(model) = &self.printer.model {
-            line.push_str(&format!(" · ~${:.4}", model.cost_usd(&self.usage)));
-        }
-        line.push(']');
-        self.status(&line);
     }
 }
 
@@ -339,5 +415,25 @@ mod tests {
         assert_eq!(clip("a\nb", 10), "a b");
         assert_eq!(clip("abcdef", 3), "abc…");
         assert_eq!(clip("ééé", 3), "ééé");
+    }
+
+    #[test]
+    fn parses_slash_commands() {
+        assert_eq!(command_arg("/model", "/model"), Some(""));
+        assert_eq!(
+            command_arg("/model  xai/grok-4 ", "/model"),
+            Some("xai/grok-4")
+        );
+        assert_eq!(command_arg("/models", "/model"), None);
+        assert_eq!(command_arg("hello", "/model"), None);
+    }
+
+    #[test]
+    fn model_switch_accepts_provider_spec_or_id() {
+        let spec = |arg| parse_model_switch(arg).unwrap().spec();
+        assert_eq!(spec("anthropic"), "anthropic/claude-sonnet-4-5");
+        assert_eq!(spec("xai/grok-4"), "xai/grok-4");
+        assert_eq!(spec("gpt-5-mini"), "openai/gpt-5-mini");
+        assert!(parse_model_switch("mystery").is_err());
     }
 }
