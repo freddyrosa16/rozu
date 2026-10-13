@@ -8,7 +8,7 @@ use std::ops::AddAssign;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::approval::ApprovalRecord;
+use crate::approval::{ApprovalRecord, ApprovalResolution, PendingApproval};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -184,6 +184,14 @@ pub enum StreamEvent {
     },
     /// An approval decision rozu made for a tool an agent backend asked to run.
     Approval(ApprovalRecord),
+    /// An approval prompt for an agent backend's request is open and waiting for the user
+    /// (forwarded as [`crate::AgentEvent::ApprovalPending`]).
+    ApprovalPending(PendingApproval),
+    /// That prompt closed (forwarded as [`crate::AgentEvent::ApprovalResolved`]).
+    ApprovalResolved {
+        request_id: String,
+        resolution: ApprovalResolution,
+    },
     /// Always the last event of a successful stream.
     Done(StopReason),
 }

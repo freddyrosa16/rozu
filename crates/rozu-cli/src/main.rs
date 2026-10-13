@@ -7,6 +7,7 @@ mod grok_hook;
 mod interrupt;
 mod mcp_serve;
 mod models;
+mod sandbox_warning;
 mod term;
 
 use std::process::ExitCode;
@@ -22,7 +23,7 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Print versions of the rozu crates and where logs go.
+    /// Print versions of the rozu crates, where logs go and how shell commands are sandboxed.
     Doctor,
     /// Manage provider API keys (stored in the OS keychain), check the claude, codex and grok
     /// CLIs, and start `codex login` or `grok login`.
@@ -77,6 +78,13 @@ fn main() -> ExitCode {
                 }
                 rozu_core::LogTarget::Stderr => println!("{:<20}stderr", "log file"),
                 rozu_core::LogTarget::Off => println!("{:<20}off", "log file"),
+            }
+            let sandbox = rozu_tools::platform_sandbox();
+            if sandbox.enforced() {
+                println!("{:<20}{} (shell commands)", "sandbox", sandbox.name());
+            } else {
+                println!("{:<20}NONE (shell commands are not confined)", "sandbox");
+                sandbox_warning::warn_if_unsandboxed();
             }
             Ok(ExitCode::SUCCESS)
         }

@@ -12,9 +12,10 @@ use futures::StreamExt;
 use rozu_cli_providers::grok::install::grok_version;
 use rozu_cli_providers::{EpochReason, GrokConfig, GrokSession};
 use rozu_core::{
-    Agent, AgentConfig, AgentEvent, ApprovalMode, ApprovalPolicy, ApprovalRecord, AuditLog,
-    ChatRequest, Decision, DecisionSource, Message, ModelInfo, Provider, ProviderError,
-    ReadOnlyGate, SandboxMode, Session, StopReason, StreamEvent, ToolExecutor, TurnOutcome, Usage,
+    Agent, AgentConfig, AgentEvent, ApprovalGate, ApprovalMode, ApprovalPolicy, ApprovalRecord,
+    ApprovalRequest, ApprovalResolution, AuditLog, ChatRequest, Decision, DecisionSource, Message,
+    ModelInfo, PendingApproval, Provider, ProviderError, ReadOnlyGate, SandboxMode, Session,
+    StopReason, StreamEvent, ToolExecutor, TurnOutcome, Usage,
 };
 use rozu_mcp::SocketGate;
 use rozu_tools::{NoSandbox, Risk, ToolRegistry, Workspace};
@@ -56,11 +57,11 @@ impl Fake {
         Workspace::new(self.path("workspace")).unwrap()
     }
 
-    fn exec(&self) -> ToolExecutor {
+    fn exec(&self, gate: Arc<dyn ApprovalGate>) -> ToolExecutor {
         let audit = AuditLog::open(self.path("approvals.jsonl"), "s-test").unwrap();
         ToolExecutor::new(
             Arc::new(ToolRegistry::standard()),
-            Arc::new(ReadOnlyGate),
+            gate,
             Arc::new(ApprovalPolicy::new(ApprovalMode::AutoWorkspace)),
             Arc::new(NoSandbox),
         )
@@ -69,6 +70,10 @@ impl Fake {
     }
 
     fn config(&self) -> GrokConfig {
+        self.config_with_gate(Arc::new(ReadOnlyGate))
+    }
+
+    fn config_with_gate(&self, gate: Arc<dyn ApprovalGate>) -> GrokConfig {
         let mut config = GrokConfig::new(
             self.path("grok"),
             self.workspace(),
@@ -80,7 +85,7 @@ impl Fake {
                 "--provider".into(),
                 "grok".into(),
             ],
-            self.exec(),
+            self.exec(gate),
         );
         config.env = vec![
             (
@@ -430,6 +435,89 @@ async fn use_tool_calls_reach_rozus_mcp_and_only_they_are_approved() {
     assert_eq!(audit[1]["decided_by"], "policy");
     assert_eq!(audit[1]["decision"], "deny");
     assert_eq!(audit[2]["tool"], "grok:fs/read_text_file");
+
+    // rozu answered all of Grok's requests itself: no prompt was ever open.
+    assert!(
+        !events.iter().any(|e| matches!(
+            e,
+            StreamEvent::ApprovalPending(_) | StreamEvent::ApprovalResolved { .. }
+        )),
+        "{events:?}"
+    );
+}
+
+/// Approves each question once released.
+#[derive(Default)]
+struct HeldUser {
+    release: tokio::sync::Notify,
+}
+
+#[async_trait::async_trait]
+impl ApprovalGate for HeldUser {
+    async fn decide(&self, _req: ApprovalRequest) -> Decision {
+        self.release.notified().await;
+        Decision::Approve
+    }
+}
+
+#[tokio::test]
+async fn prompts_from_rozu_mcp_serve_are_reported_while_open() {
+    let fake = Fake::new(&["handshake.script", "cancel.script"]);
+    let user = Arc::new(HeldUser::default());
+    let provider = GrokSession::new(fake.config_with_gate(user.clone())).unwrap();
+    let cancel = CancellationToken::new();
+    let mut stream = provider
+        .stream(
+            request("default", vec![Message::user("one")]),
+            cancel.clone(),
+        )
+        .await
+        .unwrap();
+    let _text = stream.next().await;
+
+    let gate = SocketGate::new(Some(provider.runtime_dir().join("approval.sock")));
+    let asking = tokio::spawn(async move {
+        gate.decide(ApprovalRequest {
+            call_id: "mcp-3".into(),
+            tool: "write_file".into(),
+            args: json!({"path": "notes.md"}),
+            risk: Risk::WriteWorkspace,
+            preview: "notes.md\n+hello".into(),
+            sandbox: SandboxMode::InProcess,
+            network: false,
+            extra_writes: Vec::new(),
+            outside_unknown: false,
+            blocked_retry: false,
+            allow_rule: None,
+        })
+        .await
+    });
+    let next = tokio::time::timeout(Duration::from_secs(10), stream.next())
+        .await
+        .unwrap();
+    assert_eq!(
+        next.unwrap(),
+        Ok(StreamEvent::ApprovalPending(PendingApproval {
+            request_id: "mcp-3".into(),
+            tool: "write_file".into(),
+            summary: "notes.md".into(),
+            provider: "grok".into(),
+        }))
+    );
+    user.release.notify_one();
+    let next = tokio::time::timeout(Duration::from_secs(10), stream.next())
+        .await
+        .unwrap();
+    assert_eq!(
+        next.unwrap(),
+        Ok(StreamEvent::ApprovalResolved {
+            request_id: "mcp-3".into(),
+            resolution: ApprovalResolution::Approved,
+        })
+    );
+    assert_eq!(asking.await.unwrap(), Decision::Approve);
+    cancel.cancel();
+    let _ = stream.next().await;
 }
 
 #[tokio::test]

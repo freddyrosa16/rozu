@@ -21,8 +21,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use rozu_core::{
-    ApprovalGate, ApprovalRecord, ChatRequest, EventStream, Provider, ProviderError, ProviderKind,
-    ProviderResult, StreamEvent,
+    ApprovalGate, ChatRequest, EventStream, Provider, ProviderError, ProviderKind, ProviderResult,
+    StreamEvent,
 };
 use rozu_mcp::claude::{DISALLOWED_BUILTIN_TOOLS, MCP_SERVER};
 use rozu_mcp::{APPROVAL_SOCKET_ENV, APPROVE_TOOL, ApprovalBridge};
@@ -90,8 +90,8 @@ struct State {
     model: Option<String>,
     /// Claude's session id, for `--resume` after a restart (cancel, model switch).
     session_id: Option<String>,
-    /// Decision-log entries from the MCP server.
-    records: mpsc::UnboundedReceiver<ApprovalRecord>,
+    /// Decision-log entries from the MCP server and the prompts the bridge opened.
+    records: mpsc::UnboundedReceiver<StreamEvent>,
 }
 
 pub struct ClaudeCliProvider {
@@ -118,13 +118,14 @@ impl ClaudeCliProvider {
             .tempdir_in(base)?;
         let (records_tx, records) = mpsc::unbounded_channel();
         let socket = runtime_dir.path().join("approval.sock");
-        let bridge = match ApprovalBridge::bind(&socket, config.gate.clone(), records_tx) {
-            Ok(bridge) => Some(bridge),
-            Err(err) => {
-                warn!(error = %err, "no approval bridge; prompts from Claude will be denied");
-                None
-            }
-        };
+        let bridge =
+            match ApprovalBridge::bind(&socket, PROVIDER_ID, config.gate.clone(), records_tx) {
+                Ok(bridge) => Some(bridge),
+                Err(err) => {
+                    warn!(error = %err, "no approval bridge; prompts from Claude will be denied");
+                    None
+                }
+            };
         let mut env = serde_json::Map::new();
         if let Some(bridge) = &bridge {
             env.insert(
@@ -266,7 +267,7 @@ impl Drop for TurnGuard {
 
 enum Next {
     Cancelled,
-    Record(ApprovalRecord),
+    Record(StreamEvent),
     Line(Result<Option<serde_json::Value>, ReadError>),
 }
 
@@ -324,7 +325,7 @@ impl Provider for ClaudeCliProvider {
                         yield Err(ProviderError::Cancelled);
                         break;
                     }
-                    Next::Record(record) => yield Ok(StreamEvent::Approval(record)),
+                    Next::Record(event) => yield Ok(event),
                     Next::Line(Ok(Some(line))) => match mapper.map(&line) {
                         Ok(step) => {
                             if let Some(id) = step.session_id {

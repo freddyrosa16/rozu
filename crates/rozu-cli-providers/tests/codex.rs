@@ -16,8 +16,9 @@ use rozu_cli_providers::codex::install::{
 use rozu_cli_providers::{CodexAppServerProvider, CodexConfig};
 use rozu_core::{
     Agent, AgentConfig, AgentEvent, ApprovalGate, ApprovalMode, ApprovalPolicy, ApprovalRecord,
-    ApprovalRequest, AuditLog, ChatRequest, Decision, DecisionSource, Message, ModelInfo, Provider,
-    ProviderError, SandboxMode, Session, StopReason, StreamEvent, ToolExecutor, TurnOutcome, Usage,
+    ApprovalRequest, ApprovalResolution, AuditLog, ChatRequest, Decision, DecisionSource, Message,
+    ModelInfo, Provider, ProviderError, SandboxMode, Session, StopReason, StreamEvent,
+    ToolExecutor, TurnOutcome, Usage,
 };
 use rozu_mcp::SocketGate;
 use rozu_tools::{NoSandbox, Risk, ToolRegistry, Workspace};
@@ -460,6 +461,51 @@ async fn command_approvals_go_through_rozu_policy() {
     assert_eq!(audit[2]["kind"], "approve");
     assert_eq!(audit[2]["sandboxed"], true);
 
+    // Only the four questions the user saw opened a prompt, each closed before its record.
+    let prompts: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            StreamEvent::ApprovalPending(p) => Some((p.request_id.clone(), None)),
+            StreamEvent::ApprovalResolved {
+                request_id,
+                resolution,
+            } => Some((request_id.clone(), Some(*resolution))),
+            _ => None,
+        })
+        .collect();
+    let mut expected = Vec::new();
+    for (req, resolution) in asked.iter().zip([
+        ApprovalResolution::Denied,
+        ApprovalResolution::Approved,
+        ApprovalResolution::Denied,
+        ApprovalResolution::Denied,
+    ]) {
+        expected.push((req.call_id.clone(), None));
+        expected.push((req.call_id.clone(), Some(resolution)));
+    }
+    assert_eq!(prompts, expected);
+    let pending = events
+        .iter()
+        .find_map(|e| match e {
+            StreamEvent::ApprovalPending(p) => Some(p),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        (pending.tool.as_str(), pending.provider.as_str()),
+        ("codex:shell", "codex")
+    );
+    assert_eq!(pending.summary, "$ git push --force origin main");
+    let resolved_at = events
+        .iter()
+        .position(|e| matches!(e, StreamEvent::ApprovalResolved { .. }))
+        .unwrap();
+    let record_at = events
+        .iter()
+        .position(|e| matches!(e, StreamEvent::Approval(r) if r.source == DecisionSource::Gate))
+        .unwrap();
+    assert!(resolved_at < record_at);
+
     // The commands themselves show up as tool calls with results.
     assert!(events.contains(&StreamEvent::ToolCallStart {
         id: "call_1".into(),
@@ -475,6 +521,58 @@ async fn command_approvals_go_through_rozu_policy() {
         output: "declined".into(),
         is_error: true
     }));
+}
+
+/// Denies each question once released.
+#[derive(Default)]
+struct HeldUser {
+    release: tokio::sync::Notify,
+}
+
+#[async_trait]
+impl ApprovalGate for HeldUser {
+    async fn decide(&self, _req: ApprovalRequest) -> Decision {
+        self.release.notified().await;
+        Decision::Deny {
+            reason: "later".into(),
+        }
+    }
+}
+
+/// The prompt is on the stream while the user is still thinking, not after the answer.
+#[tokio::test]
+async fn codex_prompts_are_reported_before_the_user_answers() {
+    let fake = Fake::new(&["handshake.script", "exec_approvals.script"]);
+    let user = Arc::new(HeldUser::default());
+    let provider = fake.provider_with(user.clone(), ApprovalMode::AutoWorkspace);
+    let mut stream = provider
+        .stream(
+            request("default", vec![Message::user("go")]),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let mut prompts = 0;
+    while let Some(item) = tokio::time::timeout(Duration::from_secs(10), stream.next())
+        .await
+        .expect("a prompt that only shows after the answer would deadlock here")
+    {
+        if let StreamEvent::ApprovalPending(pending) = item.unwrap() {
+            prompts += 1;
+            if prompts == 1 {
+                assert_eq!(pending.summary, "$ git push --force origin main");
+                // Codex is still waiting for rozu's answer to srv-2.
+                assert!(
+                    !fake
+                        .sent()
+                        .iter()
+                        .any(|m| m["id"] == "srv-2" && m.get("method").is_none())
+                );
+            }
+            user.release.notify_one();
+        }
+    }
+    assert_eq!(prompts, 4);
 }
 
 #[tokio::test]

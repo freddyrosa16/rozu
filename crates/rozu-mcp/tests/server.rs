@@ -8,8 +8,9 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use rozu_core::{
-    ApprovalGate, ApprovalMode, ApprovalPolicy, ApprovalRecord, ApprovalRequest, Decision,
-    DecisionSource, ToolExecutor,
+    ApprovalGate, ApprovalMode, ApprovalPolicy, ApprovalRecord, ApprovalRequest,
+    ApprovalResolution, Decision, DecisionSource, PendingApproval, SandboxMode, StreamEvent,
+    ToolExecutor,
 };
 use rozu_mcp::{ApprovalBridge, McpServer, SocketGate};
 use rozu_tools::{NoSandbox, Risk, ToolRegistry, Workspace};
@@ -36,7 +37,9 @@ struct FakeParent {
     _dir: tempfile::TempDir,
     bridge: ApprovalBridge,
     user: Arc<ScriptedUser>,
-    records: mpsc::UnboundedReceiver<ApprovalRecord>,
+    events: mpsc::UnboundedReceiver<StreamEvent>,
+    /// Approval prompts the bridge reported, in order.
+    prompts: Vec<StreamEvent>,
 }
 
 impl FakeParent {
@@ -49,14 +52,20 @@ impl FakeParent {
             answer,
             asked: Mutex::default(),
         });
-        let (tx, records) = mpsc::unbounded_channel();
-        let bridge = ApprovalBridge::bind(dir.path().join("approval.sock"), user.clone(), tx)
-            .expect("bind the approval socket");
+        let (tx, events) = mpsc::unbounded_channel();
+        let bridge = ApprovalBridge::bind(
+            dir.path().join("approval.sock"),
+            "test-cli",
+            user.clone(),
+            tx,
+        )
+        .expect("bind the approval socket");
         Self {
             _dir: dir,
             bridge,
             user,
-            records,
+            events,
+            prompts: Vec::new(),
         }
     }
 
@@ -68,12 +77,18 @@ impl FakeParent {
         self.user.asked.lock().unwrap().clone()
     }
 
-    /// The next decision-log entry the server forwarded.
+    /// The next decision-log entry the server forwarded; prompts before it go to `prompts`.
     async fn record(&mut self) -> ApprovalRecord {
-        tokio::time::timeout(std::time::Duration::from_secs(5), self.records.recv())
-            .await
-            .expect("a record within 5s")
-            .expect("bridge open")
+        loop {
+            let event = tokio::time::timeout(std::time::Duration::from_secs(5), self.events.recv())
+                .await
+                .expect("a record within 5s")
+                .expect("bridge open");
+            match event {
+                StreamEvent::Approval(record) => return record,
+                prompt => self.prompts.push(prompt),
+            }
+        }
     }
 }
 
@@ -405,13 +420,14 @@ async fn mcp_decisions_go_to_the_audit_log() {
 
 #[tokio::test]
 async fn rozu_write_tool_goes_through_the_parent_in_read_only_mode() {
-    for (answer, written) in [
-        (Decision::Approve, true),
+    for (answer, written, resolution) in [
+        (Decision::Approve, true, ApprovalResolution::Approved),
         (
             Decision::Deny {
                 reason: "no".into(),
             },
             false,
+            ApprovalResolution::Denied,
         ),
     ] {
         let mut parent = FakeParent::start(answer);
@@ -429,8 +445,89 @@ async fn rozu_write_tool_goes_through_the_parent_in_read_only_mode() {
         let record = parent.record().await;
         assert_eq!(record.tool, "write_file");
         assert_eq!(record.source, DecisionSource::Gate);
+        // The parent reported the forwarded prompt while it was open, then how it ended.
+        let id = asked[0].call_id.clone();
+        assert_eq!(
+            parent.prompts,
+            [
+                StreamEvent::ApprovalPending(PendingApproval {
+                    request_id: id.clone(),
+                    tool: "write_file".into(),
+                    summary: asked[0].preview.lines().next().unwrap().trim().into(),
+                    provider: "test-cli".into(),
+                }),
+                StreamEvent::ApprovalResolved {
+                    request_id: id,
+                    resolution,
+                },
+            ]
+        );
         client.close().await;
     }
+}
+
+/// A prompt withdrawn because `rozu mcp-serve` hung up (the CLI was cancelled) expires.
+#[tokio::test]
+async fn withdrawn_prompts_expire() {
+    struct NeverAnswers;
+    #[async_trait]
+    impl ApprovalGate for NeverAnswers {
+        async fn decide(&self, _req: ApprovalRequest) -> Decision {
+            std::future::pending().await
+        }
+    }
+    let dir = tempfile::Builder::new()
+        .prefix("rozu-test-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let (tx, mut events) = mpsc::unbounded_channel();
+    let bridge = ApprovalBridge::bind(
+        dir.path().join("approval.sock"),
+        "test-cli",
+        Arc::new(NeverAnswers),
+        tx,
+    )
+    .unwrap();
+    let gate = SocketGate::new(Some(bridge.path().to_path_buf()));
+    let call = tokio::spawn(async move {
+        gate.decide(ApprovalRequest {
+            call_id: "call-1".into(),
+            tool: "write_file".into(),
+            args: json!({"path": "x.txt"}),
+            risk: Risk::WriteWorkspace,
+            preview: "x.txt".into(),
+            sandbox: SandboxMode::InProcess,
+            network: false,
+            extra_writes: Vec::new(),
+            outside_unknown: false,
+            blocked_retry: false,
+            allow_rule: None,
+        })
+        .await
+    });
+    async fn next(events: &mut mpsc::UnboundedReceiver<StreamEvent>) -> StreamEvent {
+        tokio::time::timeout(std::time::Duration::from_secs(5), events.recv())
+            .await
+            .unwrap()
+            .unwrap()
+    }
+    let StreamEvent::ApprovalPending(pending) = next(&mut events).await else {
+        panic!("expected a pending prompt");
+    };
+    assert_eq!(
+        (pending.tool.as_str(), pending.summary.as_str()),
+        ("write_file", "x.txt")
+    );
+    // `rozu mcp-serve` goes away with the question still open.
+    call.abort();
+    let _ = call.await;
+    assert_eq!(
+        next(&mut events).await,
+        StreamEvent::ApprovalResolved {
+            request_id: pending.request_id,
+            resolution: ApprovalResolution::Expired,
+        }
+    );
 }
 
 #[tokio::test]
@@ -449,6 +546,7 @@ async fn auto_mode_writes_in_the_workspace_without_asking() {
         record.source,
         DecisionSource::Mode(ApprovalMode::AutoWorkspace)
     );
+    assert!(parent.prompts.is_empty(), "auto-decisions open no prompt");
     client.close().await;
 }
 
