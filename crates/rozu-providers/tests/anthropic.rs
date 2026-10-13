@@ -22,7 +22,7 @@ const AFTER_TOOL: &str = include_str!("fixtures/anthropic/after_tool.sse");
 const OVERLOADED: &str = include_str!("fixtures/anthropic/overloaded.sse");
 
 const API_KEY: &str = "sk-ant-test-0123456789abcdef";
-const MODEL: &str = "claude-sonnet-4-5";
+const MODEL: &str = "claude-sonnet-4-6";
 
 fn provider(base_url: &str) -> Arc<AnthropicProvider> {
     let config = AnthropicConfig::new(SecretString::from(API_KEY))
@@ -97,7 +97,7 @@ async fn tool_use_round_trip_through_agent() {
         .mount(&server)
         .await;
 
-    let info = registry::lookup("anthropic/claude-sonnet-4-5");
+    let info = registry::lookup("anthropic/claude-sonnet-4-6");
     let mut h = AgentHarness::new(provider(&server.uri()), MODEL, info.clone());
     let (result, events) = h.run("what is the answer?").await;
 

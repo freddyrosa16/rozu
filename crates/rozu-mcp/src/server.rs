@@ -9,7 +9,7 @@ use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use rozu_core::{AgentEvent, Decision, DecisionSource, ToolExecutor, log_decision};
+use rozu_core::{AgentEvent, Decision, DecisionSource, ToolExecutor};
 use rozu_tools::{MAX_OUTPUT_BYTES, ToolOutput, Workspace, truncate_head_tail};
 use serde_json::{Value, json};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
@@ -238,7 +238,7 @@ impl McpServer {
             .and_then(Value::as_str)
             .map_or_else(|| self.call_id(), str::to_owned);
         let ctx = self.exec.ctx(self.workspace.clone(), self.cancel.clone());
-        let mapped = map_permission_request(tool_name, &input, &call_id, &ctx, &self.exec.policy);
+        let mapped = map_permission_request(tool_name, &input, &call_id, &ctx);
 
         let (decision, request, source) = match mapped {
             PermissionRequest::RozuTool(name) => {
@@ -270,7 +270,7 @@ impl McpServer {
             }
         };
         self.bridge
-            .send_record(log_decision(&request, &decision, &source))
+            .send_record(self.exec.record_decision(&request, &decision, &source))
             .await;
         Ok(match decision {
             Decision::Deny { reason } => {

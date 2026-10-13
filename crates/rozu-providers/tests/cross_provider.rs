@@ -31,7 +31,7 @@ const CASES: [Case; 3] = [
         call_id: "call_abc123",
     },
     Case {
-        spec: "anthropic/claude-sonnet-4-5",
+        spec: "anthropic/claude-sonnet-4-6",
         base_suffix: "",
         endpoint: "/v1/messages",
         tool_call: include_str!("fixtures/anthropic/tool_use.sse"),

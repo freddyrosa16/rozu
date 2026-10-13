@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use rozu_tools::{
-    MAX_OUTPUT_BYTES, Sandbox, ToolOutput, ToolRegistry, Workspace, platform_sandbox,
+    MAX_OUTPUT_BYTES, Sandbox, SessionTemp, ToolOutput, ToolRegistry, Workspace, platform_sandbox,
     truncate_head_tail,
 };
 use tokio::sync::mpsc;
@@ -15,6 +15,7 @@ use tracing::{Instrument, debug, info_span, warn};
 
 pub use crate::approval::ApprovalRecord;
 use crate::approval::{ApprovalGate, ApprovalMode, ApprovalPolicy, ReadOnlyGate};
+use crate::audit::AuditLog;
 use crate::exec::ToolExecutor;
 use crate::model::{
     ChatRequest, ContentPart, Message, ModelInfo, Role, StreamEvent, ToolSpec, Usage,
@@ -213,6 +214,18 @@ impl Agent {
 
     pub fn with_sandbox(mut self, sandbox: Arc<dyn Sandbox>) -> Self {
         self.exec.sandbox = sandbox;
+        self
+    }
+
+    /// Appends every approval decision to `audit`.
+    pub fn with_audit(mut self, audit: Option<Arc<AuditLog>>) -> Self {
+        self.exec.audit = audit;
+        self
+    }
+
+    /// Shares one session temp dir across agents (e.g. after a `/model` switch).
+    pub fn with_session_temp(mut self, temp: Option<Arc<SessionTemp>>) -> Self {
+        self.exec.temp = temp;
         self
     }
 

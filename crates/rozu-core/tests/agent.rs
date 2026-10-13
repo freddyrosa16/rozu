@@ -14,7 +14,9 @@ use rozu_core::{
     ProviderError, ProviderKind, ProviderResult, Role, SandboxMode, Session, StopReason,
     StreamEvent, TurnOutcome, Usage, approvals_path,
 };
-use rozu_tools::{NoSandbox, Risk, Shell, Tool, ToolCtx, ToolOutput, ToolRegistry, Workspace};
+use rozu_tools::{
+    AllowRule, NoSandbox, Risk, Shell, Tool, ToolCtx, ToolOutput, ToolRegistry, Workspace,
+};
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -786,7 +788,7 @@ async fn destructive_commands_prompt_even_in_full_access() {
     assert_eq!(asked.len(), 1);
     assert_eq!(asked[0].risk, Risk::Destructive);
     assert_eq!(asked[0].preview, "$ touch keep && rm -rf keep");
-    assert_eq!(asked[0].allow_prefix, None);
+    assert_eq!(asked[0].allow_rule, None);
     // The reason goes back to the model, and the command never ran.
     let (_, output, is_error) = &h.tool_results()[0];
     assert!(is_error);
@@ -804,7 +806,7 @@ async fn network_commands_prompt_in_auto_mode() {
     let mut h = shell_harness(
         vec![
             tool_step(&[
-                ("c1", "shell", r#"{"command":"echo local > out.txt"}"#),
+                ("c1", "shell", r#"{"command":"touch out.txt"}"#),
                 ("c2", "shell", r#"{"command":"curl https://example.com"}"#),
             ]),
             done(),
@@ -825,7 +827,11 @@ async fn network_commands_prompt_in_auto_mode() {
     );
     assert_eq!(asked[1].risk, Risk::Network);
     assert!(asked[1].network, "the prompt says the network would be on");
-    assert_eq!(asked[1].allow_prefix.as_deref(), Some("curl"));
+    // "Always allow" for a network client names its host.
+    assert_eq!(
+        asked[1].allow_rule,
+        Some(AllowRule::with_host("curl", "example.com"))
+    );
 }
 
 #[tokio::test]
@@ -860,7 +866,8 @@ async fn always_allow_is_persisted_and_reused() {
         saved.rules,
         [PrefixRule {
             tool: "shell".into(),
-            prefix: "touch".into()
+            prefix: "touch".into(),
+            host: None,
         }]
     );
     assert!(root.join("one.txt").exists() && root.join("two.txt").exists());
@@ -953,6 +960,8 @@ async fn agent_backend_turn_forwards_tool_events_without_executing() {
         preview: "x".into(),
         sandbox: SandboxMode::InProcess,
         network: false,
+        extra_writes: Vec::new(),
+        blocked_retry: false,
         decision: Decision::Approve,
         source: DecisionSource::Mode(ApprovalMode::AutoWorkspace),
     };

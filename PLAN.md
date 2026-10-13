@@ -106,8 +106,8 @@ pub trait SecretStore { fn get(&self, p: ProviderId) -> Result<Option<Credential
 ### Components
 - **Core agent loop:** `loop { stream; render deltas; if no tool calls break; for each call: policy → approval → execute (timeout, cancel) → append truncated tool_result }`. Independent read-only calls run in parallel. There are turn and token caps. Compaction kicks in at about 80% of the context window (summarize older turns, keep recent turns and pinned items).
 - **Providers:** see [Providers](#providers-http-adapters-and-cli-backed-providers) below for the CLI-backed path. HTTP adapters: one internal message and tool-schema model with an adapter per provider. OpenAI uses `/v1/responses` SSE. Anthropic uses Messages SSE (`content_block_*`, `input_json_delta`, with `cache_control` for prompt caching). xAI reuses the OpenAI adapter with base URL `https://api.x.ai/v1`. Built on `reqwest` + `eventsource-stream`. Partial tool JSON is accumulated until the block ends. 429/5xx get exponential backoff with jitter and respect `retry-after`, and errors are typed.
-- **Tools & sandbox:** `read_file`, `list_dir`, `grep`, `apply_patch`/`write_file`, `shell` (one-shot, `tokio::process`), `terminal` (PTY). On macOS, shell commands run under a `sandbox-exec` Seatbelt profile: writes only in the workspace and tmp, network denied unless approved. On timeout or cancel the whole process group is killed.
-- **Approvals:** three modes: read-only, auto-in-workspace (default) and full access. Destructive commands (`rm -rf`, `git push --force`, `git reset --hard`, branch deletion) always prompt. The approval card shows the exact command, and "always allow this prefix" is saved per project. Every decision goes to the session log.
+- **Tools & sandbox:** `read_file`, `list_dir`, `grep`, `apply_patch`/`write_file`, `shell` (one-shot, `tokio::process`), `terminal` (PTY). On macOS, shell commands run under a `sandbox-exec` Seatbelt profile **in every approval mode**: writes only in the workspace, a per-session temp dir (the command's `$TMPDIR`) and the outside paths an approved call names, network denied unless approved. The sandbox is the boundary; the classifier only decides when to ask. Running without it takes the user's explicit "unsandboxed, this command only" (`u`) on a prompt. On timeout or cancel the whole process group is killed.
+- **Approvals:** three modes: read-only, auto-in-workspace (default) and full access. Destructive commands (`rm -rf`, `git push --force`, `git reset --hard`, branch deletion), interpreter code (`python -c`, `eval`, …) and output redirects always prompt. The approval card shows the exact command, and "always allow this prefix" is saved per project (per host for network clients). Every decision goes to the approval audit log (`approvals.jsonl`).
 - **Terminal/PTY:** `portable-pty` (MIT) spawns the user's shell, and the `alacritty_terminal` (Apache-2.0) parser keeps the grid model. The GUI renders the grid (GPUI) or forwards bytes to xterm.js (Tauri). The agent can read the terminal buffer and, with approval, write to it. **Do not copy Zed's terminal code** (`crates/terminal`, `terminal_view`): it is GPL-3.0 and rozu is MIT. Zed may be read for ideas only; the pane is written from scratch on alacritty_terminal + portable-pty.
 - **Secrets:** the `keyring` crate (macOS Keychain, service `dev.rozu`) for the optional API keys. Keys are wrapped in `secrecy::SecretString`, so they never reach Debug or logs. A redaction filter on `tracing` output adds a second layer of protection. Logs go to a file (`~/Library/Logs/rozu/rozu.log` on macOS), not the terminal.
 - **Sign in with ChatGPT:** done by the official Codex CLI (`codex login` / app-server account APIs), not by rozu. rozu never reads `~/.codex/auth.json` or any other credential file.
@@ -242,7 +242,7 @@ adapter flags against the fixtures; add one to `OpenAiConfig` if the live check 
 - [x] PTY session crate (`portable-pty` + `alacritty_terminal`) driven from the CLI
 
 **Done when:** writing outside the workspace is blocked by the sandbox (test), network access triggers an approval prompt, a destructive command always prompts, and an eval task "fix a failing test in a temp repo" passes.
-- [x] Sandbox tests (macOS only): writes outside the workspace and into `.rozu/` are blocked, `$TMPDIR` stays writable, `curl` to 1.1.1.1 fails without network approval
+- [x] Sandbox tests (macOS only): writes outside the workspace and into `.rozu/` are blocked, the session `$TMPDIR` stays writable (`/tmp` and the user's temp dir don't), approved outside paths are writable for that call only, `curl` to 1.1.1.1 fails without network approval
 - [x] Network commands prompt in auto mode; destructive commands prompt in every mode (also with a matching rule); approval matrix and persisted-rule tests
 - [x] Eval: scripted provider fixes a failing shell test in a temp repo via `shell` → `read_file` → `apply_patch` → `shell`
 - [x] Timeout/cancel/drop kill the whole process group (background `sleep`s are gone); classifier table + proptest
@@ -256,20 +256,38 @@ Notes:
   `network: true` request), captures stdout/stderr head+tail, and kills the group with `killpg` on timeout,
   cancel, drop and when the command finishes (so background children don't outlive the call).
 - **Sandbox:** `Sandbox` trait in `rozu-tools`. `Seatbelt` runs `/usr/bin/sandbox-exec -p <profile>`; the profile is
-  `allow default` + `deny file-write*` + writes re-allowed under the workspace, `$TMPDIR`, `/tmp` and `/dev`, with
-  `<workspace>/.rozu` denied again and `(deny network*)` unless the call was approved with network. `NoSandbox`
-  elsewhere. **Linux Landlock is deferred**; without a sandbox, auto mode asks before shell commands that write.
-  Known Seatbelt limits: `allow default` still permits mach/XPC services; tools that write to `~/.cargo` or
-  similar caches outside the workspace fail under the sandbox (approve with network, or use full access).
+  `allow default` + `deny file-write*` + writes re-allowed under the workspace, the session temp dir
+  (`SessionTemp`: `$TMPDIR/rozu-<session>-<random>`, 0700, removed at exit, exported to commands as
+  `TMPDIR`/`TMP`/`TEMP`), `/dev` and the call's approved extra paths, with `<workspace>/.rozu` denied again and
+  `(deny network*)` unless the call was approved with network. `/tmp` and the user's `$TMPDIR` are **not**
+  writable. `NoSandbox` elsewhere. **Linux Landlock is deferred**; without a sandbox, auto mode asks before shell
+  commands that write. Known Seatbelt limits: `allow default` still permits mach/XPC services; tools that write
+  to `~/.cargo` or similar caches outside the workspace fail under the sandbox (the output says
+  "blocked by rozu sandbox: writes outside workspace…" and the user is offered `u`).
 - **Risk classifier** (`classify_command`): splits on `&&`, `||`, `;`, `|`, `&`, newlines, parentheses and
   backticks, recurses into `sh -c`/`bash -c`/`eval`/`xargs`/`find -exec`, takes the max. Unknown commands are
-  `WriteWorkspace`; redirects or `tee` to paths outside the workspace/temp are `Destructive`.
-- **Approvals** (`rozu-core::approval`): `ApprovalMode::{ReadOnly, AutoWorkspace (default), FullAccess}`.
-  Full access runs shell unsandboxed; an approved `WriteOutside` shell call also runs unsandboxed (it couldn't work
-  otherwise). "Always allow" stores `{tool, prefix}` in `.rozu/approvals.json` (shell prefix = program plus
-  subcommand, e.g. `cargo test`; every segment of a compound command must match a rule; rules never apply to
-  destructive calls or in read-only mode). Every decision is an `AgentEvent::Approval` and a `tracing` event
-  (target `rozu::approval`); M4 writes them to the session log.
+  `WriteWorkspace`. `Opaque` (asks in every mode): language interpreters (`python`, `perl`, `ruby`, `node`,
+  `osascript`, …), `sh -c`/`bash -c`/`zsh -c`, scripts on a shell's stdin, `eval`, `source`/`.`, `exec`, those
+  behind `xargs`/`find -exec`, and any output redirect or `tee` to a file. Redirects or `tee` to paths outside
+  the workspace/session tmp are `Destructive`. It also collects the outside paths a command writes (`~`, `$HOME`,
+  `$TMPDIR` expanded; other variables, `~user` and globs are "unknown").
+- **Approvals** (`rozu-core::approval`): `ApprovalMode::{ReadOnly, AutoWorkspace (default), FullAccess}`. Every
+  mode runs shell commands sandboxed. An approved call may also write the outside paths it names (canonicalized,
+  shown on the card; `/`, top-level dirs and `$HOME` itself are too broad and never granted). The prompt's `u`
+  (`Decision::ApproveUnsandboxed`) runs one command without the sandbox; it is never automatic and never stored.
+  When the sandbox blocks an approved call, the gate is asked once whether to rerun it unsandboxed. "Always
+  allow" stores `{tool, prefix, host?}` in `.rozu/approvals.json` (shell prefix = program plus subcommand, e.g.
+  `cargo test`, or interpreter plus script, e.g. `python3 -m pytest`; network clients like `curl` get program +
+  host, never a blanket rule; every segment of a compound command must match; rules never apply to destructive
+  calls, inline interpreter code, output redirects, or in read-only mode). Every decision is an
+  `AgentEvent::Approval`, a `tracing` event (target `rozu::approval`, now in `rozu.log` by default) and a line in
+  the audit log (below).
+- **Audit log** (`rozu-core::audit`): `~/Library/Logs/rozu/approvals.jsonl` on macOS (`approvals.jsonl` in the
+  data dir elsewhere; `ROZU_AUDIT_LOG` overrides), 0600, one JSON line per decision: timestamp, session id (shared
+  with the `rozu mcp-serve` the chat starts), call id, tool, allow/deny, kind (approve, always allow, approve
+  unsandboxed, deny), decided by (mode, rule + which rule, user, policy, cancelled), mode, risk, sandboxed?,
+  network, extra writable paths, retry-after-block flag, SHA-256 of the preview and the preview/reason redacted
+  and cut to 300 chars.
 - **PTY:** `rozu_pty::PtySession` (spawn, write, resize, raw byte subscription, `snapshot()`/`screen_text()` of the
   visible grid, exit status). `rozu term` proxies `$SHELL` through it in raw mode (crossterm). The agent-facing
   `terminal_read`/`terminal_write` tools come with the GUI terminal pane.
@@ -279,6 +297,33 @@ Notes:
   elsewhere) instead of the terminal, `ROZU_LOG_STDERR=1` brings stderr logging back; `--max-steps` must be
   1..=200; the model table was refreshed from the official pricing pages and models gained long-context price
   tiers.
+- **Boundary change + QA fixes for f6289f2 (2026-10-13, report `research/qa-f6289f2.md`).** The sandbox, not the
+  classifier, is now the boundary in every mode (full access included); see the notes above.
+  - BUG-5 (High): in full mode, `python -c os.remove`, `perl -e unlink`, `eval "$(… | base64 -d)…"`,
+    `shutil.rmtree` and bare `> file` ran unprompted and unsandboxed. Now they're `Opaque` (prompt in auto/full,
+    no rule may cover them) and run under Seatbelt like everything else. Tests: `rozu-core/tests/approvals.rs`
+    (each QA variant prompts in full mode; denied → nothing changes; approved → canaries outside the workspace
+    survive under real Seatbelt; `u` runs once, isn't persisted, and is never chosen by a mode or rule),
+    `classification_table`, `approval_matrix`, CLI `full_mode_prompts_before_interpreter_code`, MCP
+    `interpreter_code_prompts_the_parent_even_in_full_access` (REG-4).
+  - BUG-6 (Med): an approved outside write in auto mode failed with EPERM. Now the named outside targets are added
+    as extra writable paths for that call only; undeterminable targets get a card note, an explicit
+    "blocked by rozu sandbox: writes outside workspace" note in the output and a one-time `u` re-prompt. Tests:
+    `approved_outside_write_runs_in_auto_mode` (real Seatbelt, REG-5), `approved_outside_paths_are_writable_for_that_call_only`,
+    `sandbox_block_*`.
+  - BUG-7 (Med): decisions weren't logged (filter dropped `rozu::approval`). Now the default filter is `info`
+    and every decision, including `rozu mcp-serve`'s, goes to the audit log. Tests: `every_decision_lands_in_the_audit_log`
+    (REG-6), `mcp_decisions_go_to_the_audit_log`, CLI `chat_decisions_go_to_the_audit_log`, audit unit tests.
+  - BUG-8 (Low): denial lines printed 2–3 times; now once (test `denial_is_printed_once`).
+  - BUG-9 (Low): `gpt-6-astra`/`gpt-6-luna` gained their >272K tiers; `claude-sonnet-4-5` (deprecated) was
+    removed from the registry (it still resolves, unpriced).
+  - BUG-1 (Low): two `^C` bytes in one write merged into one SIGINT. While a turn runs on a TTY, `ISIG` is off
+    and `^C` is a `VEOL` line delimiter, so the stdin reader counts each byte; termios is restored at turn end,
+    on exit (incl. the signal path) and on panic. Signals stay the path at the prompt and without a TTY. Test:
+    PTY `double_ctrl_c_in_one_write_on_a_terminal_exits` (fails with the turn mode disabled).
+  - Tightened auto mode: per-session temp dir instead of `/tmp`/`$TMPDIR` (OBS-2); "always allow" for network
+    clients is per host (OBS-3). Claude's built-in `Bash` is denied by policy (it would run outside rozu's
+    sandbox); `mcp__rozu__shell` is the way in.
 
 ### M3.5: CLI-backed providers (≈2–3 weeks) — Claude CLI first, then Codex app-server
 See [Providers](#providers-http-adapters-and-cli-backed-providers).
@@ -330,8 +375,8 @@ Notes (part 1, Claude, 2026-10-13):
   `ApprovalPolicy`; prompts go over the socket to the parent's gate (the normal approval card), decision records
   come back for display, and every decision is logged (`rozu::approval`) in both processes' log. Socket
   missing/unreachable → deny. `approve` mapping: `mcp__rozu__*` → allow (gated when the tool runs); Read/Glob/
-  Grep/LS → read (outside the workspace always asks); Bash → rozu's shell classifier, unsandboxed (destructive
-  always asks); Write/Edit/… → write in/outside workspace, `.rozu/` denied; WebFetch/WebSearch → network;
+  Grep/LS → read (outside the workspace always asks); Bash → denied (it would run outside rozu's sandbox; use
+  `mcp__rozu__shell`); Write/Edit/… → write in/outside workspace, `.rozu/` denied; WebFetch/WebSearch → network;
   anything else → denied without asking (`DecisionSource::Policy`).
 - **Usage:** `input_tokens = input + cache_creation + cache_read` (rozu's convention: all prompt tokens), with
   reads/writes also carried separately; the raw `usage` and the notional `total_cost_usd` are logged under
@@ -387,7 +432,8 @@ Web search tool, MCP client, Linux/Windows, auto-update.
 | GPUI API churn / sparse docs | M | M | Pin version, keep core UI-agnostic, use gpui-component, read Zed source |
 | Provider SSE format drift | M | M | Adapter per provider, fixture tests, typed errors |
 | Seatbelt (`sandbox-exec`) is deprecated by Apple | L | M | It's what Codex uses today; isolated behind the `Sandbox` trait (M3) |
-| No shell sandbox on Linux yet (Landlock deferred) | M | M | Auto mode asks before unsandboxed shell writes; add a Landlock `Sandbox` impl before Linux builds |
+| No shell sandbox on Linux yet (Landlock deferred) | M | M | Auto mode asks before unsandboxed shell writes; full mode there has no boundary beyond the classifier (interpreters/redirects/destructive still ask). Add a Landlock `Sandbox` impl before Linux builds |
+| Always-on sandbox breaks tools that write caches outside the workspace (`~/.cargo`, `~/.npm`) | M | L | Explicit "blocked by rozu sandbox" note and a one-time `u` re-prompt; consider read-write cache allowlists if it's frequent in dogfooding |
 | Subscription-auth terms change | M | H | Only official vendor CLIs touch subscription auth; API-key path kept; re-check terms before each release |
 | Vendor CLI protocol churn (claude stream-json, codex app-server) or ToS changes for driving the CLIs from another app | H | H | Pin and check CLI versions at startup, fixture tests per protocol version, typed protocol errors with a clear "unsupported CLI version" message; keep the HTTP adapters working as the fallback; re-read each vendor's terms before each release |
 | GPL code leaking into the MIT codebase (Zed terminal) | L | H | Terminal pane built only on alacritty_terminal (Apache-2.0) + portable-pty (MIT); no Zed code copied; `cargo deny` license check |

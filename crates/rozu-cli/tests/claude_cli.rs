@@ -23,6 +23,11 @@ fn rozu() -> Command {
         "ROZU_LOG_FILE",
         Path::new(env!("CARGO_TARGET_TMPDIR")).join("rozu-cli-tests.log"),
     )
+    // Keep test decisions out of the developer's audit log.
+    .env(
+        "ROZU_AUDIT_LOG",
+        Path::new(env!("CARGO_TARGET_TMPDIR")).join("rozu-cli-tests-approvals.jsonl"),
+    )
     .env_remove("ROZU_LOG_STDERR")
     .env_remove("RUST_LOG")
     .env_remove("ROZU_PROVIDER")
@@ -102,8 +107,9 @@ fn chat_with_claude_cli_streams_text_tools_and_usage_without_cost() {
 #[test]
 fn claude_requests_go_through_rozu_mcp_and_its_approval_prompt() {
     // The fake claude runs the real `rozu mcp-serve` from the generated --mcp-config: one
-    // workspace write (auto-approved) and a force push (destructive: always asks the user,
-    // here denied because stdin isn't a terminal).
+    // workspace write (auto-approved), a force push through rozu's shell (destructive: always
+    // asks the user, here denied because stdin isn't a terminal), and a permission prompt for
+    // Claude's own Bash (denied by policy: it would run outside rozu's sandbox).
     let fake = Fake::new();
     fake.scenario(
         "turn1.jsonl",
@@ -121,9 +127,12 @@ fn claude_requests_go_through_rozu_mcp_and_its_approval_prompt() {
         .success()
         .stdout("Hello again!\n")
         .stderr(contains("auto-approved (write in workspace, auto mode)"))
-        .stderr(contains("approve Bash? · risk: destructive"))
+        .stderr(contains("approve shell? · risk: destructive"))
         .stderr(contains("$ git push --force origin main"))
-        .stderr(contains("✗ denied"));
+        .stderr(contains("✗ denied: no terminal to ask on"))
+        .stderr(contains(
+            "✗ denied: rozu runs shell commands only in its sandbox",
+        ));
 
     assert_eq!(
         std::fs::read_to_string(fake.path("workspace/notes.md")).unwrap(),
@@ -137,14 +146,23 @@ fn claude_requests_go_through_rozu_mcp_and_its_approval_prompt() {
     let by_id = |id: u64| responses.iter().find(|r| r["id"] == id).unwrap();
     assert_eq!(by_id(0)["result"]["serverInfo"]["name"], "rozu");
     assert_eq!(by_id(1)["result"]["isError"], false);
+    let push = &by_id(2)["result"];
+    assert_eq!(push["isError"], true, "{push}");
+    assert!(
+        push["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("non-interactively"),
+        "{push}"
+    );
     let verdict: Value =
-        serde_json::from_str(by_id(2)["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        serde_json::from_str(by_id(3)["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
     assert_eq!(verdict["behavior"], "deny", "{verdict}");
     assert!(
         verdict["message"]
             .as_str()
             .unwrap()
-            .contains("non-interactively"),
+            .contains("mcp__rozu__shell"),
         "{verdict}"
     );
 }

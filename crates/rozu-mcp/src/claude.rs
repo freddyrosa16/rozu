@@ -5,7 +5,7 @@
 //! |---|---|---|
 //! | `mcp__rozu__*` (rozu's own tools) | — | allowed here; gated when the tool runs |
 //! | `Read`, `Glob`, `Grep`, `LS`, `NotebookRead`, `TodoWrite`, `ExitPlanMode` | read | policy; paths outside the workspace always ask |
-//! | `Bash` | rozu's shell classifier (unsandboxed: Claude runs it) | policy; destructive always asks |
+//! | `Bash` | — | denied: Claude would run it outside rozu's sandbox; `mcp__rozu__shell` is the sandboxed equivalent |
 //! | `Write`, `Edit`, `MultiEdit`, `NotebookEdit` | write in / outside workspace (unsandboxed) | policy; `.rozu/` is denied |
 //! | `WebFetch`, `WebSearch` | network | policy |
 //! | anything else | — | denied (default-deny) |
@@ -16,8 +16,8 @@
 use std::path::Path;
 
 use async_trait::async_trait;
-use rozu_core::{ApprovalPolicy, ApprovalRequest, SandboxMode};
-use rozu_tools::{PathError, Risk, Shell, Tool, ToolCtx, ToolOutput};
+use rozu_core::{ApprovalRequest, SandboxMode};
+use rozu_tools::{PathError, Risk, Tool, ToolCtx, ToolOutput};
 use serde_json::{Value, json};
 
 /// MCP server name rozu registers in the `--mcp-config`; Claude prefixes tool names with
@@ -70,7 +70,6 @@ pub fn map_permission_request(
     input: &Value,
     call_id: &str,
     ctx: &ToolCtx,
-    policy: &ApprovalPolicy,
 ) -> PermissionRequest {
     if let Some(name) = tool_name.strip_prefix(ROZU_TOOL_PREFIX) {
         return PermissionRequest::RozuTool(name.to_owned());
@@ -83,7 +82,10 @@ pub fn map_permission_request(
         preview,
         sandbox,
         network,
-        allow_prefix: None,
+        extra_writes: Vec::new(),
+        outside_unknown: false,
+        blocked_retry: false,
+        allow_rule: None,
     };
     let deny = |reason: String| PermissionRequest::Deny {
         request: request(
@@ -129,20 +131,12 @@ pub fn map_permission_request(
                 }
             }
         }
-        "Bash" => {
-            let Some(command) = str_field("command") else {
-                return deny("Bash without a command".into());
-            };
-            let args = json!({ "command": command });
-            let risk = Shell.risk(&args, ctx);
-            let network = Shell.wants_network(&args, ctx);
-            let mut req = request(risk, SandboxMode::Off, network, Shell.preview(&args), args);
-            req.allow_prefix = policy.allow_prefix(&Shell, &req.args, risk);
-            PermissionRequest::Policy {
-                request: req,
-                rule_tool: &Shell,
-            }
-        }
+        // Claude would run it itself, outside rozu's sandbox; shell commands only run through
+        // rozu's sandboxed `shell` tool.
+        "Bash" => deny(format!(
+            "rozu runs shell commands only in its sandbox: use {ROZU_TOOL_PREFIX}shell instead \
+             of Bash"
+        )),
         "Write" | "Edit" | "MultiEdit" | "NotebookEdit" => {
             let Some(path) = str_field("file_path").or_else(|| str_field("notebook_path")) else {
                 return deny(format!("{tool_name} without a file path"));
@@ -233,7 +227,6 @@ impl Tool for NoRules {
 
 #[cfg(test)]
 mod tests {
-    use rozu_core::ApprovalMode;
     use rozu_tools::Workspace;
     use tokio_util::sync::CancellationToken;
 
@@ -250,8 +243,7 @@ mod tests {
 
     fn map(tool: &str, input: Value) -> PermissionRequest {
         let (_dir, ctx) = ctx();
-        let policy = ApprovalPolicy::new(ApprovalMode::AutoWorkspace);
-        map_permission_request(tool, &input, "c1", &ctx, &policy)
+        map_permission_request(tool, &input, "c1", &ctx)
     }
 
     fn risk_of(mapped: &PermissionRequest) -> Option<Risk> {
@@ -279,14 +271,13 @@ mod tests {
             map("Glob", json!({"pattern": "../**/*.rs"})),
             PermissionRequest::AskAlways(_)
         ));
-        assert_eq!(
-            risk_of(&map("Bash", json!({"command": "rm -rf build"}))),
-            Some(Risk::Destructive)
-        );
-        assert_eq!(
-            risk_of(&map("Bash", json!({"command": "curl https://x"}))),
-            Some(Risk::Network)
-        );
+        // Claude's own Bash would run unsandboxed: always denied, in favor of rozu's shell.
+        for command in ["ls", "rm -rf build", "python3 -c 'import os'"] {
+            assert!(matches!(
+                map("Bash", json!({ "command": command })),
+                PermissionRequest::Deny { reason, .. } if reason.contains("mcp__rozu__shell")
+            ));
+        }
         assert_eq!(
             risk_of(&map("Write", json!({"file_path": "a.txt", "content": "x"}))),
             Some(Risk::WriteWorkspace)

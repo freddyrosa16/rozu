@@ -10,10 +10,17 @@
 //! | write workspace | prompt    | auto if sandboxed, else rule/prompt | auto |
 //! | write outside   | prompt    | rule or prompt             | auto        |
 //! | network         | prompt    | rule or prompt             | auto        |
+//! | opaque          | prompt    | rule or prompt             | rule or prompt |
 //! | destructive     | prompt    | prompt                     | prompt      |
 //!
-//! Destructive calls always prompt and can never be covered by a rule. Rules are stored in
-//! `<workspace>/.rozu/approvals.json`, which the tools themselves can't write.
+//! The sandbox is the boundary, not the mode: shell commands run under the OS sandbox in every
+//! mode (writes: workspace, session temp dir, and the outside paths an approved call names).
+//! Only the user's explicit [`Decision::ApproveUnsandboxed`] on a prompt runs one command
+//! without it; that is never automatic and never remembered.
+//!
+//! Destructive calls always prompt and can never be covered by a rule; neither can inline
+//! interpreter code or output redirects. Rules are stored in `<workspace>/.rozu/approvals.json`,
+//! which the tools themselves can't write.
 
 use std::fmt;
 use std::io;
@@ -21,7 +28,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use async_trait::async_trait;
-use rozu_tools::{ExecPermissions, PROTECTED_DIR, Risk, Sandbox, Tool};
+use rozu_tools::{
+    AllowRule, ExecPermissions, OutsideWrites, PROTECTED_DIR, Risk, Sandbox, Tool, resolve_lenient,
+    too_broad_to_grant,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -34,7 +44,7 @@ pub enum ApprovalMode {
     /// outside the workspace ask, unless an "always allow" rule covers them.
     #[default]
     AutoWorkspace,
-    /// Everything runs without asking, unsandboxed, except destructive calls.
+    /// Everything runs without asking, still sandboxed, except destructive and opaque calls.
     FullAccess,
 }
 
@@ -51,9 +61,10 @@ impl fmt::Display for ApprovalMode {
 /// How an approved call is confined.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SandboxMode {
-    /// A subprocess under the named OS sandbox: writes only in the workspace and temp dirs.
+    /// A subprocess under the named OS sandbox: writes only in the workspace, the session temp
+    /// dir and the call's approved outside paths.
     Enforced(&'static str),
-    /// A subprocess with no OS sandbox.
+    /// A subprocess with no OS sandbox (none on this platform).
     Off,
     /// Runs inside rozu; the tool itself only touches workspace paths.
     InProcess,
@@ -62,8 +73,8 @@ pub enum SandboxMode {
 impl fmt::Display for SandboxMode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            SandboxMode::Enforced(name) => write!(f, "{name} (writes: workspace + tmp)"),
-            SandboxMode::Off => f.write_str("off"),
+            SandboxMode::Enforced(name) => write!(f, "{name} (writes: workspace + session tmp)"),
+            SandboxMode::Off => f.write_str("off (no OS sandbox here)"),
             SandboxMode::InProcess => f.write_str("n/a (in-process, workspace paths only)"),
         }
     }
@@ -82,9 +93,25 @@ pub struct ApprovalRequest {
     pub sandbox: SandboxMode,
     /// Whether the call will have network access if approved.
     pub network: bool,
+    /// Outside paths (canonical) the sandbox will also let this one call write, if approved.
+    pub extra_writes: Vec<PathBuf>,
+    /// The call may write outside the workspace somewhere rozu can't name, so under the
+    /// sandbox those writes will fail (the prompt says so and offers the unsandboxed escape).
+    pub outside_unknown: bool,
+    /// The call already ran sandboxed and the sandbox blocked it; the question is whether to
+    /// rerun it unsandboxed.
+    pub blocked_retry: bool,
     /// What "always allow" would remember; `None` when it isn't offered (always for
-    /// destructive calls).
-    pub allow_prefix: Option<String>,
+    /// destructive calls, inline code and redirects).
+    pub allow_rule: Option<AllowRule>,
+}
+
+impl ApprovalRequest {
+    /// Whether the prompt may offer [`Decision::ApproveUnsandboxed`]: only for calls that would
+    /// otherwise run under an OS sandbox.
+    pub fn can_run_unsandboxed(&self) -> bool {
+        matches!(self.sandbox, SandboxMode::Enforced(_))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -94,9 +121,18 @@ pub enum Decision {
     Deny {
         reason: String,
     },
-    /// Approve, and auto-approve calls with [`ApprovalRequest::allow_prefix`] in this project
-    /// from now on.
+    /// Approve, and auto-approve calls covered by [`ApprovalRequest::allow_rule`] in this
+    /// project from now on.
     AlwaysAllowPrefix,
+    /// Approve this one call to run without the OS sandbox. Only the user can choose it (never
+    /// a mode or a rule), and it is never remembered.
+    ApproveUnsandboxed,
+}
+
+impl Decision {
+    pub fn is_approval(&self) -> bool {
+        !matches!(self, Decision::Deny { .. })
+    }
 }
 
 /// Who made a decision.
@@ -136,8 +172,30 @@ pub struct ApprovalRecord {
     pub preview: String,
     pub sandbox: SandboxMode,
     pub network: bool,
+    pub extra_writes: Vec<PathBuf>,
+    /// A decision on rerunning a sandbox-blocked call unsandboxed.
+    pub blocked_retry: bool,
     pub decision: Decision,
     pub source: DecisionSource,
+}
+
+impl ApprovalRecord {
+    /// Whether the call runs (ran) under the OS sandbox.
+    pub fn sandboxed(&self) -> bool {
+        matches!(self.sandbox, SandboxMode::Enforced(_))
+            && self.decision != Decision::ApproveUnsandboxed
+    }
+}
+
+/// How a call would be confined if it runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Confinement {
+    /// What the prompt shows.
+    pub mode: SandboxMode,
+    /// What the tool gets.
+    pub permissions: ExecPermissions,
+    /// Some outside write can't be granted (unknown, or too broad to scope).
+    pub outside_unknown: bool,
 }
 
 /// Asks someone (usually the user) about a call the policy didn't auto-approve.
@@ -170,11 +228,23 @@ pub fn approvals_path(workspace_root: &Path) -> PathBuf {
     workspace_root.join(PROTECTED_DIR).join("approvals.json")
 }
 
-/// One "always allow" rule: calls to `tool` covered by `prefix` (see [`Tool::prefix_allows`]).
+/// One "always allow" rule: calls to `tool` covered by `prefix` and, for network clients such
+/// as `curl`, only to `host` (see [`Tool::rules_allow`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PrefixRule {
     pub tool: String,
     pub prefix: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+}
+
+impl PrefixRule {
+    fn allow_rule(&self) -> AllowRule {
+        AllowRule {
+            prefix: self.prefix.clone(),
+            host: self.host.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -220,11 +290,11 @@ impl ApprovalRules {
         std::fs::rename(&tmp, path)
     }
 
-    fn prefixes_for(&self, tool: &str) -> Vec<String> {
+    fn rules_for(&self, tool: &str) -> Vec<AllowRule> {
         self.rules
             .iter()
             .filter(|r| r.tool == tool)
-            .map(|r| r.prefix.clone())
+            .map(PrefixRule::allow_rule)
             .collect()
     }
 }
@@ -270,62 +340,81 @@ impl ApprovalPolicy {
         self.rules.lock().expect("rules lock").clone()
     }
 
-    /// How a call would be confined if it runs: (what the prompt shows, what the tool gets).
+    /// How a call would be confined if it runs.
+    ///
+    /// Sandboxed tools run under the OS sandbox in every mode. The outside paths the call names
+    /// are granted to it (for that call only, and only if it is approved); a path that can't be
+    /// named or is too broad to scope (`/`, `/etc`, the home dir) isn't, and is reported as
+    /// [`Confinement::outside_unknown`]. Platforms without a sandbox run unconfined.
     pub fn confinement(
         &self,
         tool: &dyn Tool,
-        risk: Risk,
         wants_network: bool,
+        outside: &OutsideWrites,
         sandbox: &dyn Sandbox,
-    ) -> (SandboxMode, ExecPermissions) {
+    ) -> Confinement {
         if !tool.sandboxed() {
-            return (
-                SandboxMode::InProcess,
-                ExecPermissions {
+            return Confinement {
+                mode: SandboxMode::InProcess,
+                permissions: ExecPermissions {
                     sandbox: false,
                     network: false,
+                    extra_writable: Vec::new(),
                 },
-            );
+                outside_unknown: false,
+            };
         }
-        let unconfined = (
-            SandboxMode::Off,
-            ExecPermissions {
-                sandbox: false,
-                network: true,
-            },
-        );
-        // Full access runs unsandboxed; an approved write outside the workspace can't work
-        // inside the sandbox; and some platforms have no sandbox at all.
-        if self.mode == ApprovalMode::FullAccess
-            || risk == Risk::WriteOutside
-            || !sandbox.enforced()
-        {
-            return unconfined;
+        if !sandbox.enforced() {
+            return Confinement {
+                mode: SandboxMode::Off,
+                permissions: ExecPermissions::unsandboxed(),
+                outside_unknown: false,
+            };
         }
-        (
-            SandboxMode::Enforced(sandbox.name()),
-            ExecPermissions {
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let mut outside_unknown = outside.unknown;
+        let mut extra_writable: Vec<PathBuf> = Vec::new();
+        for path in &outside.paths {
+            let resolved = resolve_lenient(path);
+            // Both forms: `/etc` resolves to the deeper-looking `/private/etc`.
+            if too_broad_to_grant(path, home.as_deref())
+                || too_broad_to_grant(&resolved, home.as_deref())
+            {
+                outside_unknown = true;
+            } else if !extra_writable.contains(&resolved) {
+                extra_writable.push(resolved);
+            }
+        }
+        Confinement {
+            mode: SandboxMode::Enforced(sandbox.name()),
+            permissions: ExecPermissions {
                 sandbox: true,
                 network: wants_network,
+                extra_writable,
             },
-        )
+            outside_unknown,
+        }
     }
 
-    /// The prefix "always allow" would store for this call, if it may be offered.
-    pub fn allow_prefix(&self, tool: &dyn Tool, args: &Value, risk: Risk) -> Option<String> {
+    /// The rule "always allow" would store for this call, if it may be offered.
+    pub fn allow_rule(&self, tool: &dyn Tool, args: &Value, risk: Risk) -> Option<AllowRule> {
         if risk == Risk::Destructive || self.mode == ApprovalMode::ReadOnly {
             return None;
         }
-        tool.allow_prefix(args)
+        tool.allow_rule(args)
     }
 
-    /// Who auto-approves `req`, or `None` if the gate must be asked.
+    /// Who auto-approves `req`, or `None` if the gate must be asked. Never yields
+    /// [`Decision::ApproveUnsandboxed`]: auto-approved calls keep their sandbox.
     pub fn auto_approval(&self, req: &ApprovalRequest, tool: &dyn Tool) -> Option<DecisionSource> {
         let by_mode = Some(DecisionSource::Mode(self.mode));
         match (req.risk, self.mode) {
             (Risk::Destructive, _) => None,
             (Risk::Read, _) => by_mode,
             (_, ApprovalMode::ReadOnly) => None,
+            // Interpreter code and redirects ask even in full access, unless the user's own
+            // rule covers them (which inline code and redirects never are).
+            (Risk::Opaque, _) => self.matching_rule(req, tool),
             (_, ApprovalMode::FullAccess) => by_mode,
             (Risk::WriteWorkspace, ApprovalMode::AutoWorkspace)
                 if req.sandbox != SandboxMode::Off =>
@@ -337,23 +426,19 @@ impl ApprovalPolicy {
     }
 
     fn matching_rule(&self, req: &ApprovalRequest, tool: &dyn Tool) -> Option<DecisionSource> {
-        let prefixes = self
-            .rules
-            .lock()
-            .expect("rules lock")
-            .prefixes_for(&req.tool);
-        prefixes
+        let rules = self.rules.lock().expect("rules lock").rules_for(&req.tool);
+        rules
             .iter()
-            .find(|prefix| tool.prefix_allows(&req.args, std::slice::from_ref(prefix)))
-            .map(|prefix| DecisionSource::Rule {
-                prefix: prefix.clone(),
+            .find(|rule| tool.rules_allow(&req.args, std::slice::from_ref(rule)))
+            .map(|rule| DecisionSource::Rule {
+                prefix: rule.to_string(),
             })
     }
 
     /// Stores an "always allow" rule for `req` (and persists it, if this policy has a store).
-    /// Ignored for destructive calls and calls without a prefix.
+    /// Ignored for destructive calls and calls without a rule.
     pub fn remember(&self, req: &ApprovalRequest) -> io::Result<()> {
-        let Some(prefix) = req.allow_prefix.clone() else {
+        let Some(allow) = req.allow_rule.clone() else {
             return Ok(());
         };
         if req.risk == Risk::Destructive {
@@ -362,7 +447,8 @@ impl ApprovalPolicy {
         let mut rules = self.rules.lock().expect("rules lock");
         let rule = PrefixRule {
             tool: req.tool.clone(),
-            prefix,
+            prefix: allow.prefix,
+            host: allow.host,
         };
         if !rules.rules.contains(&rule) {
             rules.rules.push(rule);
@@ -406,16 +492,20 @@ mod tests {
         ) -> ApprovalRequest {
             let risk = tool.risk(&args, &self.ctx);
             let network = tool.wants_network(&args, &self.ctx);
-            let (sandbox, perms) = policy.confinement(tool, risk, network, sandbox);
+            let outside = tool.outside_writes(&args, &self.ctx);
+            let confinement = policy.confinement(tool, network, &outside, sandbox);
             ApprovalRequest {
                 call_id: "c1".into(),
                 tool: tool.name().into(),
-                allow_prefix: policy.allow_prefix(tool, &args, risk),
+                allow_rule: policy.allow_rule(tool, &args, risk),
                 args,
                 risk,
                 preview: String::new(),
-                sandbox,
-                network: perms.network,
+                sandbox: confinement.mode,
+                network: confinement.permissions.network,
+                extra_writes: confinement.permissions.extra_writable,
+                outside_unknown: confinement.outside_unknown,
+                blocked_retry: false,
             }
         }
     }
@@ -437,6 +527,24 @@ mod tests {
             ("curl https://x", Risk::Network, [false, false, true]),
             ("rm -rf build", Risk::Destructive, [false, false, false]),
             ("git push --force", Risk::Destructive, [false, false, false]),
+            // BUG-5: interpreter code and redirects ask even in full access.
+            (
+                "python3 -c 'import os'",
+                Risk::Opaque,
+                [false, false, false],
+            ),
+            (
+                "perl -e 'unlink \"x\"'",
+                Risk::Opaque,
+                [false, false, false],
+            ),
+            (
+                "eval \"$(echo cm0gLWYg | base64 -d)x\"",
+                Risk::Opaque,
+                [false, false, false],
+            ),
+            ("> out.txt", Risk::Opaque, [false, false, false]),
+            ("python3 script.py", Risk::Opaque, [false, false, false]),
         ];
         for (command, risk, expected) in cases {
             for (mode, auto) in [ReadOnly, AutoWorkspace, FullAccess]
@@ -474,22 +582,66 @@ mod tests {
     }
 
     #[test]
-    fn confinement_per_mode() {
+    fn every_mode_runs_shell_commands_in_the_sandbox() {
         let f = Fixture::new();
-        let auto = ApprovalPolicy::new(ApprovalMode::AutoWorkspace);
-        let req = f.request(&auto, &Shell, shell("cargo test"), &Seatbelt);
-        assert_eq!(req.sandbox, SandboxMode::Enforced("seatbelt"));
-        assert!(!req.network);
-        let req = f.request(&auto, &Shell, shell("curl x"), &Seatbelt);
-        assert_eq!(req.sandbox, SandboxMode::Enforced("seatbelt"));
-        assert!(req.network, "approved network calls get the network");
-        let req = f.request(&auto, &Shell, shell("cp a /etc/a"), &Seatbelt);
-        assert_eq!(req.sandbox, SandboxMode::Off);
-
+        for mode in [
+            ApprovalMode::ReadOnly,
+            ApprovalMode::AutoWorkspace,
+            ApprovalMode::FullAccess,
+        ] {
+            let policy = ApprovalPolicy::new(mode);
+            for command in [
+                "cargo test",
+                "cp a /etc/a",
+                "python3 -c 'pass'",
+                "rm -rf build",
+            ] {
+                let req = f.request(&policy, &Shell, shell(command), &Seatbelt);
+                assert_eq!(
+                    req.sandbox,
+                    SandboxMode::Enforced("seatbelt"),
+                    "{command} {mode}"
+                );
+                assert!(req.can_run_unsandboxed());
+            }
+            let req = f.request(&policy, &Shell, shell("cargo test"), &Seatbelt);
+            assert!(!req.network, "{mode}");
+            let req = f.request(&policy, &Shell, shell("curl x"), &Seatbelt);
+            assert!(
+                req.network,
+                "approved network calls get the network ({mode})"
+            );
+        }
+        // Only a platform without a sandbox runs unconfined, and then `u` isn't offered.
         let full = ApprovalPolicy::new(ApprovalMode::FullAccess);
-        let req = f.request(&full, &Shell, shell("cargo test"), &Seatbelt);
+        let req = f.request(&full, &Shell, shell("cargo test"), &NoSandbox);
         assert_eq!(req.sandbox, SandboxMode::Off);
-        assert!(req.network);
+        assert!(!req.can_run_unsandboxed());
+    }
+
+    #[test]
+    fn approved_outside_targets_are_granted_to_that_call() {
+        let f = Fixture::new();
+        let outside = tempfile::tempdir().unwrap();
+        let target = outside.path().join("scratch/approved_canary.txt");
+        let policy = ApprovalPolicy::new(ApprovalMode::AutoWorkspace);
+        let command = format!("echo approved > {}", target.display());
+        let req = f.request(&policy, &Shell, shell(&command), &Seatbelt);
+        assert_eq!(req.risk, Risk::Destructive);
+        assert_eq!(
+            req.extra_writes,
+            [outside
+                .path()
+                .canonicalize()
+                .unwrap()
+                .join("scratch/approved_canary.txt")]
+        );
+        assert!(!req.outside_unknown);
+        // Unknown and too-broad targets aren't granted.
+        let req = f.request(&policy, &Shell, shell("echo x > $NOWHERE/f"), &Seatbelt);
+        assert!(req.extra_writes.is_empty() && req.outside_unknown);
+        let req = f.request(&policy, &Shell, shell("rm -rf /etc"), &Seatbelt);
+        assert!(req.extra_writes.is_empty() && req.outside_unknown);
     }
 
     #[test]
@@ -504,32 +656,56 @@ mod tests {
             policy.rules.lock().unwrap().rules.push(PrefixRule {
                 tool: "shell".into(),
                 prefix: "rm".into(),
+                host: None,
             });
             let req = f.request(&policy, &Shell, shell("rm -rf build"), &Seatbelt);
             assert_eq!(req.risk, Risk::Destructive);
-            assert_eq!(req.allow_prefix, None, "{mode}");
+            assert_eq!(req.allow_rule, None, "{mode}");
             assert_eq!(policy.auto_approval(&req, &Shell), None, "{mode}");
             // Even a forged "always allow" doesn't store a destructive rule.
             let mut forged = req.clone();
-            forged.allow_prefix = Some("rm -rf".into());
+            forged.allow_rule = Some(AllowRule::prefix("rm -rf"));
             policy.remember(&forged).unwrap();
             assert!(!policy.rules().rules.iter().any(|r| r.prefix == "rm -rf"));
         }
     }
 
     #[test]
-    fn prefix_rules_persist_per_project() {
+    fn inline_code_is_never_covered_by_a_rule() {
+        let f = Fixture::new();
+        for mode in [ApprovalMode::AutoWorkspace, ApprovalMode::FullAccess] {
+            let policy = ApprovalPolicy::new(mode);
+            policy.rules.lock().unwrap().rules.push(PrefixRule {
+                tool: "shell".into(),
+                prefix: "python3".into(),
+                host: None,
+            });
+            let req = f.request(&policy, &Shell, shell("python3 -c 'import os'"), &Seatbelt);
+            assert_eq!(req.allow_rule, None);
+            assert_eq!(policy.auto_approval(&req, &Shell), None, "{mode}");
+            // A named script may be.
+            let req = f.request(&policy, &Shell, shell("python3 gen.py"), &Seatbelt);
+            assert_eq!(req.allow_rule, Some(AllowRule::prefix("python3 gen.py")));
+            assert!(policy.auto_approval(&req, &Shell).is_some(), "{mode}");
+        }
+    }
+
+    #[test]
+    fn network_rules_persist_per_project_and_host() {
         let f = Fixture::new();
         let root = f.ctx.workspace.root();
         let policy = ApprovalPolicy::for_project(ApprovalMode::AutoWorkspace, root).unwrap();
         let req = f.request(
             &policy,
             &Shell,
-            shell("curl -s https://example.com"),
+            shell("curl -s https://example.com/a"),
             &Seatbelt,
         );
         assert_eq!(policy.auto_approval(&req, &Shell), None);
-        assert_eq!(req.allow_prefix.as_deref(), Some("curl"));
+        assert_eq!(
+            req.allow_rule,
+            Some(AllowRule::with_host("curl", "example.com"))
+        );
 
         policy.remember(&req).unwrap();
         policy.remember(&req).unwrap(); // no duplicates
@@ -539,28 +715,51 @@ mod tests {
             parsed.rules,
             [PrefixRule {
                 tool: "shell".into(),
-                prefix: "curl".into()
+                prefix: "curl".into(),
+                host: Some("example.com".into()),
             }]
         );
 
-        // A fresh policy for the same project picks the rule up.
+        // A fresh policy for the same project picks the rule up, for that host only.
         let reloaded = ApprovalPolicy::for_project(ApprovalMode::AutoWorkspace, root).unwrap();
-        let req = f.request(&reloaded, &Shell, shell("curl https://other"), &Seatbelt);
+        let req = f.request(
+            &reloaded,
+            &Shell,
+            shell("curl https://example.com/b"),
+            &Seatbelt,
+        );
         assert_eq!(
             reloaded.auto_approval(&req, &Shell),
             Some(DecisionSource::Rule {
-                prefix: "curl".into()
+                prefix: "curl (host example.com)".into()
             })
         );
-        // ...but not for other commands, compound commands that sneak something else in, or
-        // in read-only mode.
-        let req = f.request(&reloaded, &Shell, shell("wget https://other"), &Seatbelt);
-        assert_eq!(reloaded.auto_approval(&req, &Shell), None);
-        let req = f.request(&reloaded, &Shell, shell("curl x && cp a /etc/a"), &Seatbelt);
-        assert_eq!(reloaded.auto_approval(&req, &Shell), None);
+        for other in [
+            "curl https://other.example",
+            "wget https://example.com",
+            "curl https://example.com && cp a /etc/a",
+            "curl https://example.com > page.html",
+        ] {
+            let req = f.request(&reloaded, &Shell, shell(other), &Seatbelt);
+            assert_eq!(reloaded.auto_approval(&req, &Shell), None, "{other}");
+        }
         let read_only = ApprovalPolicy::for_project(ApprovalMode::ReadOnly, root).unwrap();
-        let req = f.request(&read_only, &Shell, shell("curl x"), &Seatbelt);
+        let req = f.request(
+            &read_only,
+            &Shell,
+            shell("curl https://example.com"),
+            &Seatbelt,
+        );
         assert_eq!(read_only.auto_approval(&req, &Shell), None);
+    }
+
+    #[test]
+    fn rules_without_a_host_still_load() {
+        let rules: ApprovalRules = serde_json::from_str(
+            r#"{"version":1,"rules":[{"tool":"shell","prefix":"cargo test"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(rules.rules[0].host, None);
     }
 
     #[test]

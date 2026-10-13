@@ -366,8 +366,7 @@ impl SseState {
 /// Models without a billed cache write use the input price for it.
 // Prices as of 2026-10-13, standard tier, from https://platform.openai.com/docs/pricing; context
 // windows from https://developers.openai.com/api/docs/models (gpt-5.x and gpt-4.1 carried over).
-// Long context is a prompt over 272K tokens; the page only gives a long-context row for
-// gpt-6.1-sol. TODO: add the tiers for gpt-6-astra/gpt-6-luna once their rows are confirmed.
+// Long context is a prompt over 272K tokens; the gpt-6 family bills it at its long-context rows.
 // Not listed because their context windows weren't on the models page: gpt-6-sol, gpt-5.6-*,
 // gpt-5.5, gpt-5.4*, gpt-5.3-codex, gpt-5.2 (they still work, just without cost estimates).
 pub fn models() -> Vec<ModelInfo> {
@@ -385,13 +384,13 @@ pub fn models() -> Vec<ModelInfo> {
                 "gpt-6-astra",
                 1_050_000,
                 prices(10.0, 1.0, 12.50, 50.0),
-                None,
+                Some((272_001, prices(20.0, 2.0, 25.0, 75.0))),
             ),
             (
                 "gpt-6-luna",
                 1_050_000,
                 prices(0.10, 0.01, 0.125, 0.50),
-                None,
+                Some((272_001, prices(0.20, 0.02, 0.25, 0.75))),
             ),
             ("gpt-5.1", 400_000, prices(1.25, 0.125, 1.25, 10.0), None),
             ("gpt-5", 400_000, prices(1.25, 0.125, 1.25, 10.0), None),
