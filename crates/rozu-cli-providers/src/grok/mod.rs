@@ -515,7 +515,7 @@ async fn exited(state: &mut State) -> ProviderError {
         return ProviderError::UnexpectedEof;
     };
     let status = process.exit_status(Duration::from_secs(2)).await;
-    let stderr = process.stderr_tail().join("\n").to_lowercase();
+    let stderr = process.stderr_tail().await.join("\n").to_lowercase();
     if protocol::looks_logged_out(&stderr) {
         return ProviderError::NotLoggedIn {
             cli: "grok".into(),
