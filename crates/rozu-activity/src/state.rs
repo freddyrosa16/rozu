@@ -88,7 +88,7 @@ impl ActivityState {
             ActivityState::Notes => 2.6,
             ActivityState::Reading => 2.2,
             ActivityState::Searching => 2.4,
-            ActivityState::Editing => 2.4,
+            ActivityState::Editing => 2.6,
             ActivityState::Running => 0.9,
             ActivityState::Waiting => 1.8,
             ActivityState::Done | ActivityState::Error => 0.0,

@@ -21,6 +21,9 @@ pub const CAMERA: f64 = 3.2;
 pub const R: f64 = 0.9;
 /// The globe's tilt toward the camera (rad).
 const TILT: f64 = 0.3;
+/// Notes and Editing look down on the globe at this tilt, so a line of latitude reads as a
+/// whole ellipse.
+const PAGE_TILT: f64 = 0.8;
 /// The plane Done's and Error's flat symbols sit on (toward the camera).
 pub const GLYPH_Z: f64 = 0.3;
 
@@ -173,8 +176,25 @@ fn dir(size: OrbSize, i: usize) -> Vec3 {
 
 /// Dot `i` on the globe of radius `r`, spun by `yaw` radians and tilted toward the camera.
 fn globe(size: OrbSize, i: usize, yaw: f64, r: f64) -> Vec3 {
+    globe_tilted(size, i, yaw, r, TILT)
+}
+
+fn globe_tilted(size: OrbSize, i: usize, yaw: f64, r: f64, tilt: f64) -> Vec3 {
     let d = dir(size, i);
-    rot_x(rot_y([d[0] * r, d[1] * r, d[2] * r], yaw), TILT)
+    rot_x(rot_y([d[0] * r, d[1] * r, d[2] * r], yaw), tilt)
+}
+
+/// Fraction `0..1` round a ring, starting at the front and going round the back (writing order).
+fn round_from(size: OrbSize, i: usize) -> f64 {
+    ((-front(size, i, 0.0)) % TAU + TAU) % TAU / TAU
+}
+
+/// Geodesic angle (rad) between dot `i` and the surface point `(phi0, lam0)`.
+fn geo(size: OrbSize, i: usize, phi0: f64, lam0: f64) -> f64 {
+    let (phi, lam, _) = size.grid(i);
+    (phi.sin() * phi0.sin() + phi.cos() * phi0.cos() * (lam - lam0).cos())
+        .clamp(-1.0, 1.0)
+        .acos()
 }
 
 /// Where dot `i` faces the camera: 0 at the front, ±π at the back, after a spin of `yaw`.
@@ -250,18 +270,38 @@ fn symbol(
 pub fn generate(size: OrbSize, state: ActivityState, i: usize, t: f64) -> Dot {
     let k = size.dot();
     match state {
-        // Thought weather: patches of light drift over a slowly turning globe.
+        // Two sparks take turns: each flashes at a point on the front of the slowly turning
+        // globe, and a ripple spreads out from it and fades.
         ActivityState::Thinking => {
-            let (phi, lam, _) = size.grid(i);
-            let p = globe(size, i, 0.5 * t * size.speed(), R);
-            let n = vnoise(lam * 1.4 + 0.4 * t, phi * 1.3 + 0.2 * t + 7.0 + lam * 0.3);
-            let lit = cl(n * 2.2 - 0.9);
-            dot(p, lit * 0.7, (0.9 + 0.3 * lit) * k, 0.5 + 0.5 * lit)
+            let yaw = 0.35 * t * size.speed();
+            let p = globe(size, i, yaw, R);
+            let mut lit: f64 = 0.0;
+            for s in 0..2 {
+                const T: f64 = 1.6;
+                let off = s as f64 * T / 2.0;
+                let age = (t + off) % T;
+                let cycle = ((t + off) / T).floor();
+                let (h1, h2) = (hash2(cycle, s as f64 + 1.0), hash2(s as f64 + 1.0, cycle));
+                let d = geo(
+                    size,
+                    i,
+                    (2.0 * h1 - 1.0) * 0.6,
+                    yaw + PI / 2.0 + (2.0 * h2 - 1.0) * 1.1,
+                );
+                let ring = (-((d - age * 1.1) / 0.3).powi(2)).exp() * (1.0 - age / T).powf(1.5);
+                let spark = if d < 0.25 {
+                    (1.0 - age / 0.4).max(0.0)
+                } else {
+                    0.0
+                };
+                lit = lit.max(ring).max(spark);
+            }
+            dot(p, lit, (0.85 + 0.45 * lit) * k, 0.45 + 0.55 * lit)
         }
         // Three lines of text write themselves round the globe, hold, then start over.
         ActivityState::Notes => {
-            let (_, lam, j) = size.grid(i);
-            let p = globe(size, i, 0.0, R);
+            let (_, _, j) = size.grid(i);
+            let p = globe_tilted(size, i, 0.0, R, PAGE_TILT);
             let mid = (size.rings() - 1) as f64 / 2.0;
             let lines = [mid - 2.0, mid, mid + 2.0].map(|l| l.round() as usize);
             let Some(li) = lines.iter().position(|&l| l == j) else {
@@ -269,7 +309,7 @@ pub fn generate(size: OrbSize, state: ActivityState, i: usize, t: f64) -> Dot {
             };
             let ph = (t % 2.6) / 1.9;
             let w = cl(ph * 3.0 - li as f64);
-            let u = ((lam + PI / 2.0) % TAU) / TAU;
+            let u = round_from(size, i);
             let on = u <= w;
             let head = on && w < 1.0 && u > w - 0.06;
             let s = if head {
@@ -283,7 +323,7 @@ pub fn generate(size: OrbSize, state: ActivityState, i: usize, t: f64) -> Dot {
                 p,
                 if on { 1.0 } else { 0.0 },
                 s * k,
-                if on { 1.0 } else { 0.3 },
+                if on { 1.0 } else { 0.35 },
             )
         }
         // A lit band reads down the globe, line by line.
@@ -306,43 +346,56 @@ pub fn generate(size: OrbSize, state: ActivityState, i: usize, t: f64) -> Dot {
             let lit = cl((0.42 - d) / 0.12);
             dot(p, lit, (0.85 + 0.55 * lit) * k, 0.4 + 0.6 * lit)
         }
-        // A caret moves along the equator, retyping the dots behind it.
+        // One line of a page is edited: the caret types it, deletes the last third, retypes
+        // it, then blinks.
         ActivityState::Editing => {
             let (_, _, j) = size.grid(i);
-            let p = globe(size, i, 0.0, R);
-            let eq = ((size.rings() - 1) as f64 / 2.0).round() as usize;
-            if j != eq {
-                return dot(p, 0.0, 0.8 * k, 0.4);
+            let p = globe_tilted(size, i, 0.0, R, PAGE_TILT);
+            let line = ((size.rings() - 1) as f64 / 2.0).round() as usize - 1;
+            if j != line {
+                return dot(p, 0.0, 0.75 * k, 0.35);
             }
-            let ph = t % 2.4;
-            let w = cl(ph / 1.6);
-            let cx = -PI * 0.78 + 1.56 * PI * w;
-            let f = front(size, i, 0.0);
-            let blink = w >= 1.0 && ((ph - 1.6) / 0.2).floor() % 2.0 == 1.0;
-            if (f - cx).abs() < PI / size.lon() as f64 {
+            let ph = t % 2.6;
+            let u = round_from(size, i);
+            let cx = if ph < 1.2 {
+                ph / 1.2
+            } else if ph < 1.5 {
+                1.0 - 0.4 * ((ph - 1.2) / 0.3)
+            } else if ph < 2.1 {
+                0.6 + 0.4 * ((ph - 1.5) / 0.6)
+            } else {
+                1.0
+            };
+            let blink = ph >= 2.1 && ((ph - 2.1) / 0.25).floor() % 2.0 == 1.0;
+            let du = (u - cx).abs();
+            if du.min(1.0 - du) < 0.5 / size.lon() as f64 {
                 return if blink {
                     dot(p, 0.0, 0.6 * k, 0.3)
                 } else {
                     dot(p, 1.0, 1.7 * k, 1.0)
                 };
             }
-            let behind = cx - f;
-            let fresh = if behind > 0.0 && behind < 1.2 {
-                1.0 - behind / 1.2
+            let on = u < cx;
+            let fresh = if on && cx - u < 0.12 {
+                1.0 - (cx - u) / 0.12
             } else {
                 0.0
             };
-            let typed = f < cx;
-            dot(
-                p,
-                if typed {
-                    0.5 + 0.5 * fresh * fresh
-                } else {
-                    0.0
-                },
-                (1.0 + 0.4 * fresh) * k,
-                if typed { 1.0 } else { 0.35 },
-            )
+            let redone = on && u > 0.6 && ph >= 1.5;
+            // The deleted dots flare for a moment as the caret backs over them.
+            let gone = !on && u > 0.6 && (1.2..1.5).contains(&ph) && u - cx < 0.1;
+            let (lit, s, a) = if on {
+                (
+                    0.85 + 0.15 * fresh,
+                    1.3 + 0.4 * fresh + if redone { 0.2 } else { 0.0 },
+                    1.0,
+                )
+            } else if gone {
+                (0.6, 1.1, 0.7)
+            } else {
+                (0.0, 0.8, 0.3)
+            };
+            dot(p, lit, s * k, a)
         }
         // The globe spins fast with a helical stripe racing round it.
         ActivityState::Running => {
@@ -502,14 +555,14 @@ mod tests {
     fn matches_the_reference() {
         #[rustfmt::skip]
         let sums: [(OrbSize, ActivityState, f64, [f64; 6]); 80] = [
-            (Large, Thinking, 0.0, [-14.3261699283, 1680.3413729625, 400.0591006128, 909.7388813570, 5812.2595205816, 3662.2420581122]),
-            (Large, Thinking, 0.37, [-35.1222103230, 1678.9858024669, 404.4412915049, 904.0098259692, 5809.8042111296, 3658.1498756923]),
-            (Large, Thinking, 1.1, [-72.0003486077, 1673.1434145716, 423.3281432808, 848.9334757905, 5786.2000610531, 3618.8096255646]),
-            (Large, Thinking, 2.9, [-115.2766007478, 1646.4091557123, 509.7527342979, 750.9813733423, 5744.2205885753, 3548.8438381016]),
-            (Large, Notes, 0.0, [-14.3261699283, 1680.3413729625, 400.0591006128, 0.0000000000, 4518.6428571429, 1807.4571428571]),
-            (Large, Notes, 0.37, [-14.3261699283, 1680.3413729625, 400.0591006128, 204.8571428571, 4611.7071428571, 1950.8571428571]),
-            (Large, Notes, 1.1, [-14.3261699283, 1680.3413729625, 400.0591006128, 813.1428571429, 4862.8642857143, 2376.6571428571]),
-            (Large, Notes, 2.9, [-14.3261699283, 1680.3413729625, 400.0591006128, 168.0000000000, 4596.5785714286, 1925.0571428571]),
+            (Large, Thinking, 0.0, [-14.3261699283, 1680.3413729625, 400.0591006128, 387.4496292860, 5295.4809046073, 2924.2830103930]),
+            (Large, Thinking, 0.37, [-28.9775422074, 1679.5115993655, 402.7415330729, 439.0638579348, 5318.7073074992, 2952.6708361499]),
+            (Large, Thinking, 1.1, [-56.2353429481, 1676.2769666866, 413.1982211685, 400.7733464505, 5301.4765773313, 2931.6110548335]),
+            (Large, Thinking, 2.9, [-104.7255635489, 1660.7772209091, 463.3046855648, 499.6818797709, 5345.9854173255, 2986.0107481597]),
+            (Large, Notes, 0.0, [-14.3261699283, 1282.8397371500, 1156.6834581948, 0.0000000000, 4518.6428571429, 1896.5571428571]),
+            (Large, Notes, 0.37, [-14.3261699283, 1282.8397371500, 1156.6834581948, 209.5714285714, 4614.8785714286, 2032.7785714286]),
+            (Large, Notes, 1.1, [-14.3261699283, 1282.8397371500, 1156.6834581948, 821.1428571429, 4866.4500000000, 2430.3000000000]),
+            (Large, Notes, 2.9, [-14.3261699283, 1282.8397371500, 1156.6834581948, 168.0000000000, 4598.6357142857, 2005.7571428571]),
             (Large, Reading, 0.0, [-14.3261699283, 1680.3413729625, 400.0591006128, 45.2770853182, 4842.5242569448, 2138.1301054568]),
             (Large, Reading, 0.37, [-24.8303417106, 1679.8058072945, 401.7904388206, 837.5500181440, 5238.6607233577, 2653.1075117936]),
             (Large, Reading, 1.1, [-44.8484301683, 1677.9216017252, 407.8815631932, 751.6159917159, 5195.6937101437, 2597.2503946153]),
@@ -518,10 +571,10 @@ mod tests {
             (Large, Searching, 0.37, [-26.9085465527, 1679.6643718063, 402.2476613038, 210.9734411250, 5237.1639640473, 2536.5269218178]),
             (Large, Searching, 1.1, [-50.6184276323, 1677.1455654870, 410.3902773810, 240.0116248777, 5253.1349651113, 2553.9498320695]),
             (Large, Searching, 2.9, [-96.6647224556, 1665.0996269529, 449.3315218981, 152.9210072179, 5205.2351253984, 2501.6954614736]),
-            (Large, Editing, 0.0, [-14.3261699283, 1680.3413729625, 400.0591006128, 73.3616899232, 4981.7678613754, 2436.9928571429]),
-            (Large, Editing, 0.37, [-14.3261699283, 1680.3413729625, 400.0591006128, 122.3362640011, 4979.7632940585, 2507.1000000000]),
-            (Large, Editing, 1.1, [-14.3261699283, 1680.3413729625, 400.0591006128, 236.2299203962, 4982.1377826783, 2651.1214285714]),
-            (Large, Editing, 2.9, [-14.3261699283, 1680.3413729625, 400.0591006128, 141.7097525559, 4979.1272424752, 2532.4500000000]),
+            (Large, Editing, 0.0, [-14.3261699283, 1282.8397371500, 1156.6834581948, 16.0000000000, 4557.6928571429, 2095.2500000000]),
+            (Large, Editing, 0.37, [-14.3261699283, 1282.8397371500, 1156.6834581948, 144.3614942529, 4642.3092227696, 2197.3500000000]),
+            (Large, Editing, 1.1, [-14.3261699283, 1282.8397371500, 1156.6834581948, 396.4160098522, 4786.7260262726, 2406.4500000000]),
+            (Large, Editing, 2.9, [-14.3261699283, 1282.8397371500, 1156.6834581948, 110.5630541872, 4619.0610016420, 2170.8500000000]),
             (Large, Running, 0.0, [-14.3261699283, 1680.3413729625, 400.0591006128, 1750.9560271176, 6006.0234376106, 4179.7325895069]),
             (Large, Running, 0.37, [-97.7795423163, 1664.5824531054, 451.0034043503, 1810.0277819481, 6025.7140225541, 4219.1137593940]),
             (Large, Running, 1.1, [-42.4368628374, 1614.8641847116, 611.7290498463, 1771.2386231926, 6012.7843029690, 4193.2543202237]),
@@ -542,14 +595,14 @@ mod tests {
             (Large, Offline, 0.37, [-17.8379005017, 1545.7105347446, 368.7123244887, 0.0000000000, 2909.0642857143, 1540.0928571429]),
             (Large, Offline, 1.1, [-26.9158798983, 1545.1308807063, 370.5861884121, 0.0000000000, 3659.2500000000, 1937.2500000000]),
             (Large, Offline, 2.9, [-48.2764293725, 1542.7216548927, 378.3745605044, 0.0000000000, 2682.6000000000, 1420.2000000000]),
-            (Small, Thinking, 0.0, [-4.2882595841, 162.1070954325, 32.5981228788, 99.9436538847, 678.6858008432, 375.4597527748]),
-            (Small, Thinking, 0.37, [-7.7312193585, 161.7278198871, 33.8242176086, 99.7714695252, 678.6009385517, 375.3367639466]),
-            (Small, Thinking, 1.1, [-13.3688110190, 160.3995881238, 38.1180298113, 92.1817931741, 674.8603123501, 369.9155665529]),
-            (Small, Thinking, 2.9, [-16.2713787995, 155.4133970910, 54.2370298932, 74.4539171791, 666.1230020383, 357.2527979851]),
-            (Small, Notes, 0.0, [-4.2882595841, 162.1070954325, 32.5981228788, 0.0000000000, 524.5232142857, 182.4428571429]),
-            (Small, Notes, 0.37, [-4.2882595841, 162.1070954325, 32.5981228788, 18.1428571429, 532.8689285714, 195.1428571429]),
-            (Small, Notes, 1.1, [-4.2882595841, 162.1070954325, 32.5981228788, 110.1428571429, 578.8114285714, 259.5428571429]),
-            (Small, Notes, 2.9, [-4.2882595841, 162.1070954325, 32.5981228788, 15.2857142857, 532.9592857143, 193.1428571429]),
+            (Small, Thinking, 0.0, [-4.2882595841, 162.1070954325, 32.5981228788, 41.7526745056, 616.0666519138, 296.6282566924]),
+            (Small, Thinking, 0.37, [-6.7281162861, 161.8642291347, 33.3832435949, 44.5541251019, 617.5164025974, 298.1690545203]),
+            (Small, Thinking, 1.1, [-11.0567956552, 161.0864827844, 35.8974861102, 41.2319266019, 615.7971648736, 296.3418453453]),
+            (Small, Thinking, 2.9, [-17.1011082795, 157.9329546918, 46.0919851275, 50.6259354995, 620.6585644782, 301.5085502390]),
+            (Small, Notes, 0.0, [-4.2882595841, 126.6339874916, 106.3258257281, 0.0000000000, 524.5232142857, 195.3928571429]),
+            (Small, Notes, 0.37, [-4.2882595841, 126.6339874916, 106.3258257281, 18.8571428571, 533.1975000000, 207.6500000000]),
+            (Small, Notes, 1.1, [-4.2882595841, 126.6339874916, 106.3258257281, 112.4285714286, 579.9367857143, 268.4714285714]),
+            (Small, Notes, 2.9, [-4.2882595841, 126.6339874916, 106.3258257281, 15.2857142857, 533.4767857143, 205.3285714286]),
             (Small, Reading, 0.0, [-4.2882595841, 162.1070954325, 32.5981228788, 4.9262807383, 562.3240399959, 216.0520824799]),
             (Small, Reading, 0.37, [-6.0439025529, 161.9445413919, 33.1236159007, 99.9153680539, 616.9427652024, 277.7949892350]),
             (Small, Reading, 1.1, [-9.2892020114, 161.4672910655, 34.6664364627, 62.1929187029, 595.2523568256, 253.2753971569]),
@@ -558,10 +611,10 @@ mod tests {
             (Small, Searching, 0.37, [-6.3874549279, 161.9054607497, 33.2499529926, 25.6880152250, 610.7073124869, 258.6699519921]),
             (Small, Searching, 1.1, [-10.1933816669, 161.2851494915, 35.2552506550, 19.9693798627, 607.0902756203, 255.2387707748]),
             (Small, Searching, 2.9, [-16.4258849341, 158.7609456372, 43.4153154953, 17.5052710003, 605.5317267648, 253.7603054573]),
-            (Small, Editing, 0.0, [-4.2882595841, 162.1070954325, 32.5981228788, 13.5285989798, 592.4001834069, 248.1285714286]),
-            (Small, Editing, 0.37, [-4.2882595841, 162.1070954325, 32.5981228788, 23.5991289012, 592.7073983037, 261.2214285714]),
-            (Small, Editing, 1.1, [-4.2882595841, 162.1070954325, 32.5981228788, 39.5634940785, 592.2043875516, 282.5785714286]),
-            (Small, Editing, 2.9, [-4.2882595841, 162.1070954325, 32.5981228788, 26.8096404054, 592.6354923582, 265.3071428571]),
+            (Small, Editing, 0.0, [-4.2882595841, 126.6339874916, 106.3258257281, 0.0000000000, 528.4907142857, 209.4000000000]),
+            (Small, Editing, 0.37, [-4.2882595841, 126.6339874916, 106.3258257281, 20.4940476190, 545.1912698413, 225.3000000000]),
+            (Small, Editing, 1.1, [-4.2882595841, 126.6339874916, 106.3258257281, 55.6217687075, 568.1667573696, 254.5000000000]),
+            (Small, Editing, 2.9, [-4.2882595841, 126.6339874916, 106.3258257281, 15.1801020408, 540.7949319728, 221.2000000000]),
             (Small, Running, 0.0, [-4.2882595841, 162.1070954325, 32.5981228788, 175.9923256273, 696.8915819667, 421.3996456563]),
             (Small, Running, 0.37, [-16.5349830834, 158.6601268010, 43.7412353845, 184.5160627863, 700.1590145443, 427.0821370956]),
             (Small, Running, 1.1, [2.4975343182, 152.0930709925, 64.9707415183, 178.6768810017, 697.9206615269, 423.1893492393]),
@@ -652,17 +705,38 @@ mod tests {
     }
 
     #[test]
-    fn thinking_turns_with_drifting_patches() {
+    fn thinking_sparks_ripple_on_the_front() {
         let a = frame(Large, Thinking, 0.3);
         let b = frame(Large, Thinking, 0.9);
         assert_ne!(a[10].p, b[10].p, "the globe turns");
-        let lit = |f: &[Dot]| f.iter().filter(|d| d.lit > 0.3).count();
-        assert!(lit(&a) > 10 && lit(&a) < a.len() / 2, "{}", lit(&a));
-        assert_ne!(
-            a.iter().map(|d| d.lit).collect::<Vec<_>>(),
-            b.iter().map(|d| d.lit).collect::<Vec<_>>(),
-            "the patches drift"
-        );
+        for t in [0.05, 0.3, 0.6, 1.0, 1.4] {
+            let f = frame(Large, Thinking, t);
+            let lit: Vec<&Dot> = f.iter().filter(|d| d.lit > 0.35).collect();
+            assert!(
+                lit.len() >= 3 && lit.len() < f.len() / 3,
+                "t={t}: {}",
+                lit.len()
+            );
+            let front = lit.iter().filter(|d| d.p[2] > 0.0).count();
+            assert!(
+                front * 3 > lit.len() * 2,
+                "t={t}: the ripples are on the front"
+            );
+        }
+        // A ripple's radius grows with its age.
+        let spread = |t: f64| {
+            let f = frame(Large, Thinking, t);
+            let lit: Vec<&Dot> = f.iter().filter(|d| d.lit > 0.35).collect();
+            let n = lit.len() as f64;
+            let (cx, cy) = lit
+                .iter()
+                .fold((0.0, 0.0), |(x, y), d| (x + d.p[0] / n, y + d.p[1] / n));
+            lit.iter()
+                .map(|d| (d.p[0] - cx).hypot(d.p[1] - cy))
+                .sum::<f64>()
+                / n
+        };
+        assert!(spread(0.5) > spread(0.1));
     }
 
     #[test]
@@ -676,9 +750,18 @@ mod tests {
         let rings: usize = [5, 7, 9].iter().map(|&j| Large.ring_len(j)).sum();
         assert!(lit(0.3) < lit(1.0));
         assert!(lit(1.0) < lit(1.9));
-        assert_eq!(lit(1.95), rings);
+        assert_eq!(lit(1.95), rings, "every line goes all the way round");
         assert_eq!(lit(2.5), rings);
         assert!(lit(2.7) < rings, "starts over");
+        // Looked at from above, so no line dot hides at the back of the globe.
+        let f = frame(Large, Notes, 2.5);
+        assert!(f.iter().filter(|d| d.lit > 0.0).all(|d| d.p[2] > -0.9));
+        // The first dot written is at the front.
+        let first = (0..Large.dots())
+            .filter(|&i| Large.grid(i).2 == 7)
+            .min_by(|&a, &b| round_from(Large, a).total_cmp(&round_from(Large, b)))
+            .unwrap();
+        assert!(f[first].p[2] > 0.0);
     }
 
     #[test]
@@ -716,25 +799,32 @@ mod tests {
     }
 
     #[test]
-    fn editing_types_along_the_equator_then_blinks() {
-        let eq = 7;
+    fn editing_types_deletes_retypes_then_blinks() {
+        let line = 6;
         let typed = |t: f64| {
             frame(Large, Editing, t)
                 .iter()
                 .enumerate()
-                .filter(|(i, d)| Large.grid(*i).2 == eq && d.a == 1.0)
+                .filter(|(i, d)| Large.grid(*i).2 == line && d.a == 1.0)
                 .count()
         };
-        assert!(typed(0.3) < typed(0.9));
-        assert!(typed(0.9) < typed(1.6));
-        let caret_on = |t: f64| frame(Large, Editing, t).iter().any(|d| d.s > 1.6);
-        assert!(caret_on(1.0));
-        assert!(caret_on(1.7));
-        assert!(!caret_on(1.9), "the caret blinks off");
-        assert!(caret_on(2.1));
+        assert!(typed(0.3) < typed(0.9), "types");
+        assert!(typed(0.9) < typed(1.15), "types");
+        assert!(typed(1.45) < typed(1.15), "deletes the last third");
+        assert!(typed(2.0) > typed(1.45), "retypes it");
+        // At the end of the line the caret is the front dot (u = 0 ≡ 1).
+        let front = (0..Large.dots())
+            .filter(|&i| Large.grid(i).2 == line)
+            .min_by(|&a, &b| round_from(Large, a).total_cmp(&round_from(Large, b)))
+            .unwrap();
+        let caret_on = |t: f64| frame(Large, Editing, t)[front].s > 1.6;
+        assert!(frame(Large, Editing, 1.0).iter().any(|d| d.s == 1.7));
+        assert!(caret_on(2.2));
+        assert!(!caret_on(2.4), "the caret blinks off");
+        assert!(caret_on(2.3));
         for (i, d) in frame(Large, Editing, 0.5).iter().enumerate() {
-            if Large.grid(i).2 != eq {
-                assert_eq!((d.lit, d.a), (0.0, 0.4));
+            if Large.grid(i).2 != line {
+                assert_eq!((d.lit, d.a), (0.0, 0.35));
             }
         }
     }
