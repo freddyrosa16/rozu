@@ -308,7 +308,8 @@ async fn plain_text_turn_completes() {
     let usage = Usage {
         input_tokens: 10,
         output_tokens: 2,
-        cached_input_tokens: 0,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
     };
     let mut h = Harness::new([ok(vec![
         text("Hel"),
@@ -343,19 +344,21 @@ async fn plain_text_turn_completes() {
 
 #[tokio::test]
 async fn usage_and_cost_aggregate_per_turn() {
-    let usage = |input, output, cached| {
+    let usage = |input, output, read, write| {
         StreamEvent::Usage(Usage {
             input_tokens: input,
             output_tokens: output,
-            cached_input_tokens: cached,
+            cache_read_tokens: read,
+            cache_write_tokens: write,
         })
     };
     let done = StreamEvent::Done(StopReason::EndTurn);
     let mut h = Harness::with_config(
         [
             tool_step(&[("call_1", "echo", r#"{"path":"a"}"#)]),
-            ok(vec![usage(1_000_000, 0, 0), done.clone()]),
-            ok(vec![usage(1_000_000, 100_000, 1_000_000), done.clone()]),
+            ok(vec![usage(1_000_000, 0, 0, 0), done.clone()]),
+            ok(vec![usage(1_000_000, 100_000, 1_000_000, 0), done.clone()]),
+            ok(vec![usage(1_000_000, 0, 0, 1_000_000), done.clone()]),
         ],
         |config| {
             config.model_info = Some(ModelInfo {
@@ -366,6 +369,7 @@ async fn usage_and_cost_aggregate_per_turn() {
                 price_in_per_mtok: 2.0,
                 price_out_per_mtok: 10.0,
                 price_cached_in_per_mtok: 0.5,
+                price_cache_write_per_mtok: 2.5,
             });
         },
         |_| {},
@@ -384,12 +388,20 @@ async fn usage_and_cost_aggregate_per_turn() {
         Usage {
             input_tokens: 1_000_000,
             output_tokens: 100_000,
-            cached_input_tokens: 1_000_000
+            cache_read_tokens: 1_000_000,
+            cache_write_tokens: 0
         }
     );
     assert!((last.cost_usd.unwrap() - 1.5).abs() < 1e-9);
     assert_eq!(h.session.usage.input_tokens, 2_000_000);
     assert!((h.session.cost_usd - 3.5).abs() < 1e-9);
+
+    // Turn 3: 1M input written to the cache, at the cache-write price.
+    h.run("third").await.0.unwrap();
+    assert_eq!(h.session.last_turn.usage.cache_write_tokens, 1_000_000);
+    assert!((h.session.last_turn.cost_usd.unwrap() - 2.5).abs() < 1e-9);
+    assert_eq!(h.session.usage.cache_read_tokens, 1_000_000);
+    assert!((h.session.cost_usd - 6.0).abs() < 1e-9);
 }
 
 #[tokio::test]
@@ -398,7 +410,8 @@ async fn unknown_prices_leave_cost_empty() {
         StreamEvent::Usage(Usage {
             input_tokens: 5,
             output_tokens: 1,
-            cached_input_tokens: 0,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
         }),
         StreamEvent::Done(StopReason::EndTurn),
     ])]);

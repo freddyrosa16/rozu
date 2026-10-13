@@ -244,12 +244,13 @@ impl RawUsage {
         set(&mut self.output, "output_tokens");
     }
 
-    /// The normalized form, where `input_tokens` includes cached input.
+    /// The normalized form, where `input_tokens` includes cache reads and writes.
     fn normalized(&self) -> Usage {
         Usage {
             input_tokens: self.input + self.cache_read + self.cache_write,
             output_tokens: self.output,
-            cached_input_tokens: self.cache_read,
+            cache_read_tokens: self.cache_read,
+            cache_write_tokens: self.cache_write,
         }
     }
 }
@@ -370,12 +371,13 @@ impl Decoder for SseState {
 }
 
 /// Known Anthropic models: (id, context window, USD per 1M input / output / cache-read tokens).
+/// Cache writes cost 1.25x input (the 5-minute TTL price).
 // Prices NEED VERIFICATION against https://www.anthropic.com/pricing before relying on cost
-// totals; they are list prices as last checked by hand and change without notice. Cache writes
-// cost 1.25x input and are not modeled separately (see `ModelInfo::cost_usd`).
+// totals; they are list prices as last checked by hand and change without notice.
 pub fn models() -> Vec<ModelInfo> {
     crate::registry::model_table(
         PROVIDER_ID,
+        1.25,
         &[
             ("claude-sonnet-4-5", 200_000, 3.0, 15.0, 0.30),
             ("claude-opus-4-1", 200_000, 15.0, 75.0, 1.50),
@@ -527,7 +529,8 @@ mod tests {
                 StreamEvent::Usage(Usage {
                     input_tokens: 105,
                     output_tokens: 30,
-                    cached_input_tokens: 90
+                    cache_read_tokens: 90,
+                    cache_write_tokens: 5
                 }),
                 StreamEvent::Done(StopReason::ToolUse),
             ]
