@@ -7,6 +7,7 @@
 
 pub mod agent;
 pub mod approval;
+pub mod audit;
 pub mod exec;
 pub mod model;
 pub mod provider;
@@ -18,8 +19,9 @@ pub use agent::{
 };
 pub use approval::{
     ApprovalGate, ApprovalMode, ApprovalPolicy, ApprovalRecord, ApprovalRequest, ApprovalRules,
-    Decision, DecisionSource, PrefixRule, ReadOnlyGate, SandboxMode, approvals_path,
+    Confinement, Decision, DecisionSource, PrefixRule, ReadOnlyGate, SandboxMode, approvals_path,
 };
+pub use audit::{AUDIT_LOG_ENV, AuditLog, audit_path_from_env, default_audit_path, new_session_id};
 pub use exec::{ToolExecutor, log_decision};
 pub use model::{
     Billing, ChatRequest, ContentPart, LongContextPrices, Message, ModelInfo, Role, StopReason,

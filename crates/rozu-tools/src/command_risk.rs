@@ -3,49 +3,109 @@
 //! Deliberately simple: the command is split into segments on `&&`, `||`, `;`, `|`, `&`,
 //! newlines, parentheses and backticks (ignoring quotes, which can only add segments), each
 //! segment is classified on its own, and the highest risk wins. Unknown commands count as
-//! [`Risk::WriteWorkspace`]; the sandbox, not this classifier, is what actually confines them.
+//! [`Risk::WriteWorkspace`].
+//!
+//! The classifier only decides when to ask; the sandbox is the boundary. Whatever can't be read
+//! off the command line is [`Risk::Opaque`] and asks in every mode (unless the user's own rule
+//! covers a named script): language interpreters (`python`, `perl`, `ruby`, `node`,
+//! `osascript`, …), `sh -c` / `bash -c` / `zsh -c`, scripts fed to a shell on stdin, `eval`,
+//! `source`, `exec`, those behind `xargs` or `find -exec`, and every output redirect to a file
+//! (`>`, `>>`, `tee`). A shell running a named script file counts like `make`: a sandboxed
+//! workspace write.
 
+use std::collections::BTreeSet;
+use std::fmt;
 use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
 
 use crate::Risk;
 use crate::workspace::normalize;
 
 /// The classification of one command line.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandRisk {
     pub risk: Risk,
     /// Some segment talks to the network (even if another one is riskier).
     pub network: bool,
+    /// Paths outside the scope that the command writes, as far as the command line says
+    /// (absolute and normalized, not canonicalized).
+    pub outside_writes: Vec<PathBuf>,
+    /// Some write goes outside the scope to a place that can't be read off the command line
+    /// (`$VAR` paths, globs, `sudo`, `launchctl`, …).
+    pub outside_unknown: bool,
+    /// Runs code or writes files in a way an "always allow" rule must never cover: inline
+    /// interpreter code (`python -c`, `eval`, `source`, a script on a shell's stdin) or an output
+    /// redirect to a file.
+    pub unrulable: bool,
 }
 
 impl CommandRisk {
-    const READ: Self = Self {
-        risk: Risk::Read,
-        network: false,
-    };
-    const WRITE: Self = Self {
-        risk: Risk::WriteWorkspace,
-        network: false,
-    };
-    const OUTSIDE: Self = Self {
-        risk: Risk::WriteOutside,
-        network: false,
-    };
-    const NETWORK: Self = Self {
-        risk: Risk::Network,
-        network: true,
-    };
-    const DESTRUCTIVE: Self = Self {
-        risk: Risk::Destructive,
-        network: false,
-    };
-
-    fn max(self, other: Self) -> Self {
+    const fn new(risk: Risk, network: bool, unrulable: bool) -> Self {
         Self {
-            risk: self.risk.max(other.risk),
-            network: self.network || other.network,
+            risk,
+            network,
+            outside_writes: Vec::new(),
+            outside_unknown: false,
+            unrulable,
         }
     }
+
+    const READ: Self = Self::new(Risk::Read, false, false);
+    const WRITE: Self = Self::new(Risk::WriteWorkspace, false, false);
+    const OUTSIDE: Self = Self::new(Risk::WriteOutside, false, false);
+    const NETWORK: Self = Self::new(Risk::Network, true, false);
+    /// Runs code rozu can't classify (a named script): asks unless a rule covers it.
+    const OPAQUE: Self = Self::new(Risk::Opaque, false, false);
+    /// Inline code or a redirect: opaque, and never covered by a rule.
+    const OPAQUE_INLINE: Self = Self::new(Risk::Opaque, false, true);
+    const DESTRUCTIVE: Self = Self::new(Risk::Destructive, false, false);
+
+    fn max(mut self, other: Self) -> Self {
+        self.risk = self.risk.max(other.risk);
+        self.network |= other.network;
+        for path in other.outside_writes {
+            if !self.outside_writes.contains(&path) {
+                self.outside_writes.push(path);
+            }
+        }
+        self.outside_unknown |= other.outside_unknown;
+        self.unrulable |= other.unrulable;
+        self
+    }
+
+    /// `self` plus a write to `target` (outside: also recorded as an outside write).
+    fn writing(self, target: Target) -> Self {
+        match target {
+            Target::Inside => self,
+            Target::Outside(path) => Self {
+                outside_writes: vec![path],
+                ..self
+            },
+            Target::Unknown => Self {
+                outside_unknown: true,
+                ..self
+            },
+        }
+    }
+
+    /// Writes somewhere outside that the command line doesn't name.
+    fn unknown_outside(self) -> Self {
+        Self {
+            outside_unknown: true,
+            ..self
+        }
+    }
+}
+
+/// Where a path argument points.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Target {
+    Inside,
+    /// Outside, at this absolute (normalized) path.
+    Outside(PathBuf),
+    /// Outside or undeterminable: `$VAR`s rozu doesn't know, `~user`, globs reaching out.
+    Unknown,
 }
 
 /// Where relative paths start and which directories count as "inside".
@@ -53,8 +113,11 @@ impl CommandRisk {
 pub struct PathScope {
     /// Directory relative paths are resolved against.
     pub cwd: PathBuf,
-    /// Directories writes may go to without counting as outside (workspace, temp dirs).
+    /// Directories writes may go to without counting as outside (workspace, session temp dir).
     pub inside: Vec<PathBuf>,
+    /// Variables expanded at the start of a path (`HOME` also for `~`), e.g. `TMPDIR`, which
+    /// shell commands get set to the session temp dir.
+    pub vars: Vec<(String, PathBuf)>,
 }
 
 impl PathScope {
@@ -62,22 +125,80 @@ impl PathScope {
         Self {
             cwd: cwd.into(),
             inside,
+            vars: Vec::new(),
         }
     }
 
-    /// Whether a path argument stays inside. `~` and `$VAR` paths are unknown, so outside.
-    fn contains(&self, arg: &str) -> bool {
-        if arg.starts_with('~') || arg.contains('$') {
-            return false;
+    /// Expands `$name` / `${name}` (and `~` for `HOME`) at the start of paths.
+    pub fn with_var(mut self, name: &str, value: impl Into<PathBuf>) -> Self {
+        self.vars.push((name.to_owned(), value.into()));
+        self
+    }
+
+    fn var(&self, name: &str) -> Option<&Path> {
+        self.vars
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, v)| v.as_path())
+    }
+
+    /// `arg` with a leading `~` or `$VAR` expanded; `None` if it uses anything else of the
+    /// shell's (other variables, `~user`, command substitution).
+    fn expand(&self, arg: &str) -> Option<PathBuf> {
+        let (base, rest) = if let Some(rest) = arg.strip_prefix('~') {
+            if !(rest.is_empty() || rest.starts_with('/')) {
+                return None; // ~user
+            }
+            (self.var("HOME")?, rest)
+        } else if let Some(after) = arg.strip_prefix('$') {
+            let (name, rest) = match after.strip_prefix('{') {
+                Some(braced) => braced.split_once('}')?,
+                None => {
+                    let end = after
+                        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                        .unwrap_or(after.len());
+                    after.split_at(end)
+                }
+            };
+            if !(rest.is_empty() || rest.starts_with('/')) {
+                return None;
+            }
+            (self.var(name)?, rest)
+        } else {
+            return Some(PathBuf::from(arg));
+        };
+        if rest.contains('$') {
+            return None;
         }
-        let path = Path::new(arg);
+        Some(base.join(rest.trim_start_matches('/')))
+    }
+
+    fn target(&self, arg: &str) -> Target {
+        let Some(path) = self.expand(arg) else {
+            return Target::Unknown;
+        };
+        if path.as_os_str().to_string_lossy().contains('$') {
+            return Target::Unknown;
+        }
         let joined = if path.is_absolute() {
-            path.to_path_buf()
+            path
         } else {
             self.cwd.join(path)
         };
         let normalized = normalize(&joined);
-        self.inside.iter().any(|root| normalized.starts_with(root))
+        if self.inside.iter().any(|root| normalized.starts_with(root)) {
+            Target::Inside
+        } else if arg.contains(['*', '?', '[', '{']) {
+            Target::Unknown
+        } else {
+            Target::Outside(normalized)
+        }
+    }
+
+    /// Whether a path argument stays inside.
+    #[cfg(test)]
+    fn contains(&self, arg: &str) -> bool {
+        self.target(arg) == Target::Inside
     }
 }
 
@@ -91,7 +212,7 @@ const MAX_DEPTH: usize = 4;
 
 fn classify_depth(command: &str, scope: &PathScope, depth: usize) -> CommandRisk {
     if depth > MAX_DEPTH {
-        return CommandRisk::DESTRUCTIVE;
+        return CommandRisk::DESTRUCTIVE.unknown_outside();
     }
     split_segments(command)
         .into_iter()
@@ -269,6 +390,16 @@ fn classify_segment(segment: &str, scope: &PathScope, depth: usize) -> CommandRi
     result.max(classify_words(&words, scope, depth))
 }
 
+/// Special files writing to which changes nothing on disk.
+fn is_harmless_sink(path: &str) -> bool {
+    matches!(
+        path,
+        "/dev/null" | "/dev/stdout" | "/dev/stderr" | "/dev/tty"
+    )
+}
+
+/// An output redirect to a file is opaque (it can truncate anything, e.g. a bare `> file`);
+/// one leaving the scope is destructive.
 fn classify_redirect(op: &str, target: Option<&str>, scope: &PathScope) -> CommandRisk {
     if !op.contains('>') {
         return CommandRisk::READ; // input redirection or heredoc
@@ -279,18 +410,67 @@ fn classify_redirect(op: &str, target: Option<&str>, scope: &PathScope) -> Comma
     if op.ends_with('&') && (target == "-" || target.chars().all(|c| c.is_ascii_digit())) {
         return CommandRisk::READ; // fd duplication
     }
-    if matches!(
-        target,
-        "/dev/null" | "/dev/stdout" | "/dev/stderr" | "/dev/tty"
-    ) {
+    if is_harmless_sink(target) {
         return CommandRisk::READ;
     }
-    if scope.contains(target) {
-        CommandRisk::WRITE
-    } else {
-        CommandRisk::DESTRUCTIVE
+    match scope.target(target) {
+        Target::Inside => CommandRisk::OPAQUE_INLINE,
+        outside => CommandRisk {
+            unrulable: true,
+            ..CommandRisk::DESTRUCTIVE
+        }
+        .writing(outside),
     }
 }
+
+/// Whether `name` runs a program text: language interpreters and AppleScript.
+fn is_interpreter(name: &str) -> bool {
+    const INTERPRETERS: &[&str] = &[
+        "perl",
+        "ruby",
+        "irb",
+        "node",
+        "nodejs",
+        "deno",
+        "php",
+        "lua",
+        "luajit",
+        "tclsh",
+        "wish",
+        "osascript",
+        "Rscript",
+        "pwsh",
+        "powershell",
+        "jshell",
+        "groovy",
+        "scala",
+        "julia",
+    ];
+    INTERPRETERS.contains(&name)
+        || ["python", "pypy", "perl", "ruby", "lua", "php"]
+            .iter()
+            .any(|base| {
+                name.strip_prefix(base).is_some_and(|v| {
+                    !v.is_empty() && v.chars().all(|c| c.is_ascii_digit() || c == '.')
+                })
+            })
+        || name == "python"
+}
+
+/// `<interpreter> <script file>` or `python -m <module>`: opaque, but stable enough for an
+/// "always allow" rule naming that script. Everything else (`-c`/`-e` code, flags first, code on
+/// stdin) is inline code.
+fn runs_named_script(name: &str, args: &[String]) -> bool {
+    match args.first().map(String::as_str) {
+        Some("-m") if name.starts_with("python") || name.starts_with("pypy") => {
+            args.get(1).is_some_and(|m| !m.starts_with('-'))
+        }
+        Some(first) => !first.starts_with('-') && !first.starts_with('+'),
+        None => false,
+    }
+}
+
+const SHELLS: &[&str] = &["sh", "bash", "zsh", "dash", "ksh", "fish", "csh", "tcsh"];
 
 /// Program name without its directory (`/bin/rm` → `rm`).
 fn program_name(word: &str) -> &str {
@@ -459,11 +639,16 @@ const ALWAYS_DESTRUCTIVE: &[&str] = &[
 const PATH_WRITERS: &[&str] = &["cp", "mv", "touch", "mkdir", "ln", "install", "truncate"];
 
 fn classify_words(words: &[String], scope: &PathScope, depth: usize) -> CommandRisk {
-    // Skip `FOO=bar`, shell keywords and transparent wrappers.
+    // Skip `FOO=bar`, shell keywords and transparent wrappers. `exec` replaces the shell with
+    // whatever follows, so it makes the segment opaque too.
     let mut i = 0;
+    let mut prefix = CommandRisk::READ;
     while i < words.len() {
         let w = words[i].as_str();
-        if is_assignment(w)
+        if w == "exec" {
+            prefix = CommandRisk::OPAQUE_INLINE;
+            i += 1;
+        } else if is_assignment(w)
             || matches!(
                 w,
                 "!" | "{"
@@ -481,7 +666,6 @@ fn classify_words(words: &[String], scope: &PathScope, depth: usize) -> CommandR
                     | "nohup"
                     | "command"
                     | "builtin"
-                    | "exec"
             )
         {
             i += 1;
@@ -499,33 +683,57 @@ fn classify_words(words: &[String], scope: &PathScope, depth: usize) -> CommandR
             break;
         }
     }
-    let Some(first) = words.get(i) else {
+    prefix.max(classify_program(&words[i..], scope, depth))
+}
+
+/// Classifies `words` once wrappers and keywords are skipped: the program and its arguments.
+fn classify_program(words: &[String], scope: &PathScope, depth: usize) -> CommandRisk {
+    let Some(first) = words.first() else {
         return CommandRisk::READ;
     };
-    let args = &words[i + 1..];
+    let args = &words[1..];
     let name = program_name(first);
 
     if ALWAYS_DESTRUCTIVE.contains(&name) || name.starts_with("mkfs") {
-        return CommandRisk::DESTRUCTIVE;
+        return CommandRisk::DESTRUCTIVE.unknown_outside();
     }
     if NETWORK_COMMANDS.contains(&name) {
         return CommandRisk::NETWORK;
     }
+    if is_interpreter(name) {
+        if (name.starts_with("python") || name.starts_with("pypy"))
+            && args.first().is_some_and(|a| a == "-m")
+            && args.get(1).is_some_and(|m| m == "pip" || m == "pip3")
+        {
+            return pip_risk(&args[2..]).max(CommandRisk::OPAQUE);
+        }
+        return if runs_named_script(name, args) {
+            CommandRisk::OPAQUE
+        } else {
+            CommandRisk::OPAQUE_INLINE
+        };
+    }
     match name {
-        "sh" | "bash" | "zsh" | "dash" | "ksh" | "fish" => {
+        name if SHELLS.contains(&name) => {
             match args
                 .iter()
                 .position(|a| a.starts_with('-') && !a.starts_with("--") && a.contains('c'))
             {
+                // The script is classified too, so `sh -c 'rm -rf x'` stays destructive.
                 Some(pos) => match args.get(pos + 1) {
-                    Some(script) => classify_depth(script, scope, depth + 1),
-                    None => CommandRisk::WRITE,
+                    Some(script) => {
+                        classify_depth(script, scope, depth + 1).max(CommandRisk::OPAQUE_INLINE)
+                    }
+                    None => CommandRisk::OPAQUE_INLINE,
                 },
-                // Running a script file (or stdin): could do anything the sandbox allows.
-                None => CommandRisk::WRITE,
+                // A script file runs like `make` (sandboxed workspace code); a script on stdin
+                // (`… | sh`) is inline code.
+                None if runs_named_script(name, args) => CommandRisk::WRITE,
+                None => CommandRisk::OPAQUE_INLINE,
             }
         }
-        "eval" => classify_depth(&args.join(" "), scope, depth + 1),
+        "eval" => classify_depth(&args.join(" "), scope, depth + 1).max(CommandRisk::OPAQUE_INLINE),
+        "source" | "." => CommandRisk::OPAQUE_INLINE,
         "xargs" => {
             let mut j = 0;
             while j < args.len() && args[j].starts_with('-') {
@@ -556,36 +764,42 @@ fn classify_words(words: &[String], scope: &PathScope, depth: usize) -> CommandR
             let recursive = has_short_flag(args, 'r')
                 || has_short_flag(args, 'R')
                 || has_arg(args, &["--recursive"]);
-            if recursive || operands(args).iter().any(|p| !scope.contains(p)) {
+            let base = if recursive {
                 CommandRisk::DESTRUCTIVE
             } else {
                 CommandRisk::WRITE
-            }
+            };
+            writes_to(base, operands(args), scope, CommandRisk::DESTRUCTIVE)
         }
         "chmod" | "chown" | "chgrp" => {
-            if has_short_flag(args, 'R') || has_arg(args, &["--recursive"]) {
-                return CommandRisk::DESTRUCTIVE;
-            }
-            // The first operand is the mode / owner.
-            if operands(args).iter().skip(1).any(|p| !scope.contains(p)) {
+            let base = if has_short_flag(args, 'R') || has_arg(args, &["--recursive"]) {
                 CommandRisk::DESTRUCTIVE
             } else {
                 CommandRisk::WRITE
-            }
+            };
+            // The first operand is the mode / owner.
+            let paths = operands(args).into_iter().skip(1).collect();
+            writes_to(base, paths, scope, CommandRisk::DESTRUCTIVE)
         }
         "tee" => {
-            if operands(args)
-                .iter()
-                .any(|p| !scope.contains(p) && *p != "/dev/null")
-            {
-                CommandRisk::DESTRUCTIVE
+            let paths: Vec<&str> = operands(args)
+                .into_iter()
+                .filter(|p| !is_harmless_sink(p))
+                .collect();
+            if paths.is_empty() {
+                CommandRisk::READ
             } else {
-                CommandRisk::WRITE
+                // Like a redirect: opaque inside the scope, destructive outside.
+                writes_to(
+                    CommandRisk::OPAQUE_INLINE,
+                    paths,
+                    scope,
+                    CommandRisk::DESTRUCTIVE,
+                )
             }
         }
-        "kill" | "killall" | "pkill" | "launchctl" | "systemctl" | "crontab" => {
-            CommandRisk::OUTSIDE
-        }
+        "kill" | "killall" | "pkill" => CommandRisk::OUTSIDE,
+        "launchctl" | "systemctl" | "crontab" => CommandRisk::OUTSIDE.unknown_outside(),
         "rsync" => {
             let ops = operands(args);
             if ops
@@ -593,19 +807,22 @@ fn classify_words(words: &[String], scope: &PathScope, depth: usize) -> CommandR
                 .any(|p| p.contains("::") || p.starts_with("rsync://") || is_remote(p))
             {
                 CommandRisk::NETWORK
-            } else if ops.last().is_some_and(|dest| !scope.contains(dest)) {
-                CommandRisk::OUTSIDE
             } else {
-                CommandRisk::WRITE
+                let dest = ops.last().copied().into_iter().collect();
+                writes_to(CommandRisk::WRITE, dest, scope, CommandRisk::OUTSIDE)
             }
         }
-        name if PATH_WRITERS.contains(&name) => {
-            if operands(args).iter().any(|p| !scope.contains(p)) {
-                CommandRisk::OUTSIDE
-            } else {
-                CommandRisk::WRITE
-            }
+        // These write only their destination (the last operand), unless `-t <dir>` names it.
+        "cp" | "ln" | "install" if !has_arg(args, &["-t", "--target-directory"]) => {
+            let dest = operands(args).last().copied().into_iter().collect();
+            writes_to(CommandRisk::WRITE, dest, scope, CommandRisk::OUTSIDE)
         }
+        name if PATH_WRITERS.contains(&name) => writes_to(
+            CommandRisk::WRITE,
+            operands(args),
+            scope,
+            CommandRisk::OUTSIDE,
+        ),
         name if READ_COMMANDS.contains(&name) => CommandRisk::READ,
         "npm" | "pnpm" | "yarn" | "bun" => {
             let sub = operands(args).first().copied();
@@ -620,15 +837,6 @@ fn classify_words(words: &[String], scope: &PathScope, depth: usize) -> CommandR
             }
         }
         "pip" | "pip3" => pip_risk(args),
-        "python" | "python3" => {
-            if args.first().is_some_and(|a| a == "-m")
-                && args.get(1).is_some_and(|m| m == "pip" || m == "pip3")
-            {
-                pip_risk(&args[2..])
-            } else {
-                CommandRisk::WRITE
-            }
-        }
         "uv" => match operands(args).as_slice() {
             ["pip", "install" | "download" | "sync", ..]
             | ["add" | "sync" | "lock" | "tool", ..]
@@ -684,6 +892,21 @@ fn is_remote(arg: &str) -> bool {
         Some(colon) => !arg[..colon].contains('/'),
         None => false,
     }
+}
+
+/// `base`, raised to `outside` (recording where) for every path that leaves the scope.
+fn writes_to(
+    base: CommandRisk,
+    paths: Vec<&str>,
+    scope: &PathScope,
+    outside: CommandRisk,
+) -> CommandRisk {
+    paths
+        .into_iter()
+        .fold(base, |acc, path| match scope.target(path) {
+            Target::Inside => acc,
+            target => acc.max(outside.clone().writing(target)),
+        })
 }
 
 fn pip_risk(args: &[String]) -> CommandRisk {
@@ -846,7 +1069,7 @@ fn classify_git(args: &[String]) -> CommandRisk {
             ) {
                 CommandRisk::READ
             } else if has_arg(rest, &["--global", "--system"]) {
-                CommandRisk::OUTSIDE
+                CommandRisk::OUTSIDE.unknown_outside()
             } else {
                 CommandRisk::WRITE
             }
@@ -883,44 +1106,206 @@ const SUBCOMMAND_TOOLS: &[&str] = &[
     "kubectl", "brew", "make", "just", "poetry", "gh", "swift", "dotnet", "mvn", "gradle",
 ];
 
-/// The prefix an "always allow" rule would store for `command`: the program, plus its
-/// subcommand for tools like `git` or `cargo`. `None` for compound commands, where one prefix
-/// can't describe everything that would run.
-pub fn suggest_prefix(command: &str) -> Option<String> {
+/// Network clients whose "always allow" rules are scoped to one host (never a blanket `curl`).
+const HOST_SCOPED: &[&str] = &[
+    "curl",
+    "wget",
+    "http",
+    "https",
+    "aria2c",
+    "ssh",
+    "scp",
+    "sftp",
+    "ftp",
+    "telnet",
+    "nc",
+    "ncat",
+    "netcat",
+    "ping",
+    "dig",
+    "nslookup",
+    "host",
+    "traceroute",
+];
+
+/// Clients that name the host in `user@host` / `host:path` form.
+const SSH_LIKE: &[&str] = &["ssh", "scp", "sftp"];
+/// Clients that only reach URLs (a bare word is a file or an option value).
+const URL_CLIENTS: &[&str] = &["curl", "wget", "http", "https", "aria2c"];
+
+/// An "always allow" rule: commands whose every segment starts with `prefix` (word by word).
+/// For network clients like `curl` the rule also names the one `host` it may talk to.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct AllowRule {
+    pub prefix: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+}
+
+impl AllowRule {
+    pub fn prefix(prefix: impl Into<String>) -> Self {
+        Self {
+            prefix: prefix.into(),
+            host: None,
+        }
+    }
+
+    pub fn with_host(prefix: impl Into<String>, host: impl Into<String>) -> Self {
+        Self {
+            prefix: prefix.into(),
+            host: Some(host.into()),
+        }
+    }
+}
+
+impl fmt::Display for AllowRule {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.host {
+            Some(host) => write!(f, "{} (host {host})", self.prefix),
+            None => f.write_str(&self.prefix),
+        }
+    }
+}
+
+/// The hosts a network client segment would reach, as far as its arguments say (lowercase).
+fn segment_hosts(name: &str, args: &[String]) -> BTreeSet<String> {
+    let mut hosts = BTreeSet::new();
+    let mut push = |host: &str| {
+        let host = host.trim_matches(['[', ']']).to_ascii_lowercase();
+        if !host.is_empty() {
+            hosts.insert(host);
+        }
+    };
+    for arg in args {
+        if let Some(pos) = arg.find("://") {
+            let authority = arg[pos + 3..]
+                .split(['/', '?', '#'])
+                .next()
+                .unwrap_or_default();
+            let authority = authority.rsplit('@').next().unwrap_or_default();
+            let host = if authority.starts_with('[') {
+                authority.split(']').next().unwrap_or_default()
+            } else {
+                authority.split(':').next().unwrap_or_default()
+            };
+            push(host);
+        } else if arg.starts_with(['-', '+', '@']) || URL_CLIENTS.contains(&name) {
+            // Options, `dig +short`/`@server`; URL clients only count URLs.
+        } else if SSH_LIKE.contains(&name) {
+            if let Some((_, rest)) = arg.split_once('@') {
+                push(rest.split(':').next().unwrap_or_default());
+            } else if is_remote(arg) {
+                push(arg.split(':').next().unwrap_or_default());
+            }
+        } else if arg == "localhost"
+            || (arg.contains('.')
+                && arg
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-'))
+        {
+            push(arg);
+        }
+    }
+    hosts
+}
+
+/// The rule "always allow" would store for `command`: the program, plus its subcommand for
+/// tools like `git` or `cargo`, its script for interpreters, and its host for network clients.
+/// `None` when no rule may cover it: compound commands (one prefix can't describe everything
+/// that would run), wrappers and assignments, inline interpreter code or output redirects, and
+/// network clients without exactly one host.
+pub fn suggest_rule(command: &str) -> Option<AllowRule> {
     let segments = split_segments(command);
     let [segment] = segments.as_slice() else {
         return None;
     };
-    let words = words(segment);
-    let first = words.first()?;
-    if is_assignment(first) {
+    if rule_scope_check(segment) {
         return None;
     }
-    match words.get(1) {
+    let words = words(segment);
+    let first = words.first()?;
+    let name = program_name(first);
+    if is_assignment(first)
+        || matches!(
+            name,
+            "env"
+                | "nice"
+                | "timeout"
+                | "stdbuf"
+                | "nohup"
+                | "command"
+                | "builtin"
+                | "exec"
+                | "time"
+                | "xargs"
+                | "sudo"
+                | "doas"
+        )
+    {
+        return None;
+    }
+    let args = &words[1..];
+    if HOST_SCOPED.contains(&name) {
+        let hosts = segment_hosts(name, args);
+        let [host] = hosts.into_iter().collect::<Vec<_>>().try_into().ok()?;
+        return Some(AllowRule::with_host(first.clone(), host));
+    }
+    if is_interpreter(name) || SHELLS.contains(&name) {
+        // `runs_named_script` holds (inline code was refused above).
+        let script = match args.first().map(String::as_str) {
+            Some("-m") => format!("-m {}", args.get(1)?),
+            Some(file) => file.to_owned(),
+            None => return None,
+        };
+        return Some(AllowRule::prefix(format!("{first} {script}")));
+    }
+    match args.first() {
         Some(sub)
-            if SUBCOMMAND_TOOLS.contains(&program_name(first))
+            if SUBCOMMAND_TOOLS.contains(&name)
                 && sub
                     .chars()
                     .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
                 && !sub.starts_with('-') =>
         {
-            Some(format!("{first} {sub}"))
+            Some(AllowRule::prefix(format!("{first} {sub}")))
         }
-        _ => Some(first.clone()),
+        _ => Some(AllowRule::prefix(first.clone())),
     }
 }
 
-/// Whether every segment of `command` starts with one of `prefixes` (compared word by word).
-pub fn prefixes_allow(command: &str, prefixes: &[String]) -> bool {
+/// Whether `segment` has something no rule may cover (inline code, a redirect to a file). Paths
+/// don't matter here, so it's classified against an empty scope.
+fn rule_scope_check(segment: &str) -> bool {
+    classify_segment(segment, &PathScope::new("/", Vec::new()), 0).unrulable
+}
+
+/// Whether `rules` cover every segment of `command`: the segment starts with the rule's prefix
+/// (word by word), a network client reaches only the rule's host, and nothing in it is inline
+/// code or an output redirect to a file.
+pub fn rules_allow(command: &str, rules: &[AllowRule]) -> bool {
     let segments = split_segments(command);
     !segments.is_empty()
         && segments.iter().all(|segment| {
+            if rule_scope_check(segment) {
+                return false;
+            }
             let words = words(segment);
-            prefixes.iter().any(|prefix| {
-                let prefix_words: Vec<&str> = prefix.split_whitespace().collect();
-                !prefix_words.is_empty()
+            let name = words.first().map(|w| program_name(w)).unwrap_or_default();
+            let scoped = HOST_SCOPED.contains(&name);
+            rules.iter().any(|rule| {
+                let prefix_words: Vec<&str> = rule.prefix.split_whitespace().collect();
+                let prefix_matches = !prefix_words.is_empty()
                     && words.len() >= prefix_words.len()
-                    && words.iter().zip(&prefix_words).all(|(w, p)| w == p)
+                    && words.iter().zip(&prefix_words).all(|(w, p)| w == p);
+                let host_matches = match (&rule.host, scoped) {
+                    (Some(host), true) => {
+                        let hosts = segment_hosts(name, &words[1..]);
+                        hosts.len() == 1 && hosts.contains(host)
+                    }
+                    (None, false) => true,
+                    _ => false,
+                };
+                prefix_matches && host_matches
             })
         })
 }
@@ -961,12 +1346,10 @@ mod tests {
             ("ls 2>/dev/null", Read),
             ("FOO=1 env BAR=2 grep x y", Read),
             ("", Read),
+            ("cp /etc/hosts hosts.bak", WriteWorkspace),
             // Workspace writes (the default)
             ("cargo test", WriteWorkspace),
             ("make", WriteWorkspace),
-            ("python3 script.py", WriteWorkspace),
-            ("echo hi > out.txt", WriteWorkspace),
-            ("echo hi >> /tmp/log", WriteWorkspace),
             ("sed -i 's/a/b/' file", WriteWorkspace),
             ("mkdir -p build/out", WriteWorkspace),
             ("rm file.o", WriteWorkspace),
@@ -974,11 +1357,40 @@ mod tests {
             ("git checkout -b feature", WriteWorkspace),
             ("npm test", WriteWorkspace),
             ("sh test.sh", WriteWorkspace),
+            // Opaque: interpreters, scripts, eval/source/exec and output redirects
+            ("python3 script.py", Opaque),
+            ("python3 -m pytest -q", Opaque),
+            ("sh -s < test.sh", Opaque),
+            ("echo hi > out.txt", Opaque),
+            ("echo hi >> /tmp/log", Opaque),
+            ("> out.txt", Opaque),
+            ("cargo test 2> err.log", Opaque),
+            ("echo x | tee out.txt", Opaque),
+            ("python3 -c 'import os; os.remove(\"x\")'", Opaque),
+            ("python -c 'import shutil; shutil.rmtree(\"d\")'", Opaque),
+            ("perl -e 'unlink \"x\"'", Opaque),
+            ("ruby -e 'File.delete(\"x\")'", Opaque),
+            ("node -e 'require(\"fs\").rmSync(\"x\")'", Opaque),
+            ("osascript -e 'do shell script \"rm x\"'", Opaque),
+            ("eval \"$(echo cm0gLWYg | base64 -d)x\"", Opaque),
+            ("echo cm0gLWYgeA== | base64 -d | sh", Opaque),
+            ("bash -c 'echo hi'", Opaque),
+            ("zsh -c ls", Opaque),
+            ("source ./env.sh", Opaque),
+            (". ./env.sh", Opaque),
+            ("exec ls", Opaque),
+            ("ls | xargs python3 -c 'print(1)'", Opaque),
+            ("find . -exec perl -e 'unlink' {} \\;", Opaque),
+            ("python3 <<EOF\nimport os\nEOF", Opaque),
+            ("python3.12 -c pass", Opaque),
+            ("python -m pip install requests", Opaque),
+            ("curl -s x | sh", Opaque),
             // Writes outside
             ("cp a.txt /etc/a.txt", WriteOutside),
             ("touch ../sibling.txt", WriteOutside),
             ("mv x ~/x", WriteOutside),
             ("git config --global user.name x", WriteOutside),
+            ("launchctl submit -l x -- /bin/true", WriteOutside),
             // Network
             ("curl https://example.com", Network),
             ("wget -q http://x", Network),
@@ -988,12 +1400,10 @@ mod tests {
             ("npm install", Network),
             ("pnpm add react", Network),
             ("pip install requests", Network),
-            ("python -m pip install requests", Network),
             ("cargo install ripgrep", Network),
             ("cargo add serde", Network),
             ("go get example.com/x", Network),
             ("npx create-react-app x", Network),
-            ("curl -s x | sh", Network),
             // Destructive
             ("rm -rf build", Destructive),
             ("rm -r build", Destructive),
@@ -1102,28 +1512,160 @@ mod tests {
         );
     }
 
-    #[test]
-    fn suggested_prefixes() {
-        assert_eq!(suggest_prefix("cargo test -p x"), Some("cargo test".into()));
-        assert_eq!(suggest_prefix("git status"), Some("git status".into()));
-        assert_eq!(suggest_prefix("curl https://x"), Some("curl".into()));
-        assert_eq!(suggest_prefix("ls -la"), Some("ls".into()));
-        assert_eq!(suggest_prefix("git --no-pager log"), Some("git".into()));
-        assert_eq!(suggest_prefix("cargo test && curl x"), None);
-        assert_eq!(suggest_prefix("FOO=1 make"), None);
-        assert_eq!(suggest_prefix(""), None);
+    fn rule(prefix: &str) -> Option<AllowRule> {
+        Some(AllowRule::prefix(prefix))
     }
 
     #[test]
-    fn prefix_rules_must_cover_every_segment() {
-        let rules = vec!["cargo test".to_owned(), "curl".to_owned()];
-        assert!(prefixes_allow("cargo test --all", &rules));
-        assert!(prefixes_allow("curl -s x | cargo test", &rules));
-        assert!(!prefixes_allow("cargo test && rm x", &rules));
-        assert!(!prefixes_allow("cargo testing", &rules));
-        assert!(!prefixes_allow("cargo", &rules));
-        assert!(!prefixes_allow("", &rules));
-        assert!(!prefixes_allow("cargo test", &[]));
+    fn suggested_rules() {
+        assert_eq!(suggest_rule("cargo test -p x"), rule("cargo test"));
+        assert_eq!(suggest_rule("git status"), rule("git status"));
+        assert_eq!(suggest_rule("ls -la"), rule("ls"));
+        assert_eq!(suggest_rule("git --no-pager log"), rule("git"));
+        assert_eq!(suggest_rule("cargo test && curl x"), None);
+        assert_eq!(suggest_rule("FOO=1 make"), None);
+        assert_eq!(suggest_rule("env make"), None);
+        assert_eq!(suggest_rule(""), None);
+        // Interpreters: the rule names the script or module, never inline code.
+        assert_eq!(
+            suggest_rule("python3 -m pytest -q"),
+            rule("python3 -m pytest")
+        );
+        assert_eq!(
+            suggest_rule("python3 tools/gen.py --all"),
+            rule("python3 tools/gen.py")
+        );
+        assert_eq!(suggest_rule("sh test.sh"), rule("sh test.sh"));
+        assert_eq!(suggest_rule("python3 -c 'print(1)'"), None);
+        assert_eq!(suggest_rule("perl -e 'unlink \"x\"'"), None);
+        assert_eq!(suggest_rule("eval ls"), None);
+        assert_eq!(suggest_rule("sh"), None);
+        // Output redirects to files are never covered.
+        assert_eq!(suggest_rule("cargo test > log.txt"), None);
+        assert_eq!(suggest_rule("ls 2>/dev/null"), rule("ls"));
+    }
+
+    #[test]
+    fn network_rules_are_scoped_to_one_host() {
+        assert_eq!(
+            suggest_rule("curl -s https://Example.com/a?b=1"),
+            Some(AllowRule::with_host("curl", "example.com"))
+        );
+        assert_eq!(
+            suggest_rule("wget https://user:pw@dl.example.org:8443/x.tgz"),
+            Some(AllowRule::with_host("wget", "dl.example.org"))
+        );
+        assert_eq!(
+            suggest_rule("scp build.tgz deploy@build.example.net:/srv"),
+            Some(AllowRule::with_host("scp", "build.example.net"))
+        );
+        assert_eq!(
+            suggest_rule("nc -z localhost 8080"),
+            Some(AllowRule::with_host("nc", "localhost"))
+        );
+        // No blanket rule without exactly one host.
+        assert_eq!(suggest_rule("curl x"), None);
+        assert_eq!(suggest_rule("curl https://a.com https://b.com"), None);
+        assert_eq!(suggest_rule("ssh -i key.pem myhost"), None);
+
+        let rules = [AllowRule::with_host("curl", "example.com")];
+        assert!(rules_allow(
+            "curl -fsSL https://example.com/install",
+            &rules
+        ));
+        assert!(!rules_allow("curl https://evil.example/x", &rules));
+        assert!(!rules_allow(
+            "curl https://example.com -x http://proxy.evil",
+            &rules
+        ));
+        assert!(!rules_allow("curl x", &rules));
+        // A legacy blanket rule no longer covers a host-scoped client.
+        assert!(!rules_allow(
+            "curl https://example.com",
+            &[AllowRule::prefix("curl")]
+        ));
+    }
+
+    #[test]
+    fn rules_must_cover_every_segment() {
+        let rules = [
+            AllowRule::prefix("cargo test"),
+            AllowRule::prefix("jq"),
+            AllowRule::prefix("python3 -m pytest"),
+            AllowRule::with_host("curl", "x.dev"),
+        ];
+        assert!(rules_allow("cargo test --all", &rules));
+        assert!(rules_allow("curl -s https://x.dev | jq .", &rules));
+        assert!(rules_allow("python3 -m pytest -k slow", &rules));
+        assert!(!rules_allow("cargo test && rm x", &rules));
+        assert!(!rules_allow("cargo testing", &rules));
+        assert!(!rules_allow("cargo", &rules));
+        assert!(!rules_allow("", &rules));
+        assert!(!rules_allow("cargo test", &[]));
+        // A matching prefix doesn't cover a redirect or inline code.
+        assert!(!rules_allow("cargo test > out.txt", &rules));
+        assert!(!rules_allow(
+            "python3 -c 'x'",
+            &[AllowRule::prefix("python3")]
+        ));
+    }
+
+    #[test]
+    fn outside_writes_are_collected() {
+        let scope = scope().with_var("HOME", "/Users/me");
+        let classify = |c: &str| classify_command(c, &scope);
+
+        let r = classify("echo approved > ~/scratch/canary.txt");
+        assert_eq!(r.risk, Risk::Destructive);
+        assert_eq!(
+            r.outside_writes,
+            [PathBuf::from("/Users/me/scratch/canary.txt")]
+        );
+        assert!(!r.outside_unknown);
+
+        let r = classify("cp a.txt /etc/a.txt && mv b $HOME/b");
+        assert_eq!(
+            r.outside_writes,
+            [PathBuf::from("/etc/a.txt"), PathBuf::from("/Users/me/b")]
+        );
+        // Sources are only read.
+        let r = classify("cp /etc/hosts hosts.bak");
+        assert!(r.outside_writes.is_empty() && !r.outside_unknown);
+        // Relative paths resolve against the cwd.
+        assert_eq!(
+            classify("touch ../x").outside_writes,
+            [PathBuf::from("/work/x")]
+        );
+        // What can't be read off the command line is unknown.
+        for command in [
+            "echo x > $SOMEWHERE/f",
+            "cp a ~other/b",
+            "rm -f ../*.log",
+            "sudo touch /etc/x",
+            "git config --global user.name x",
+        ] {
+            let r = classify(command);
+            assert!(r.outside_unknown, "{command}");
+            assert!(r.outside_writes.is_empty(), "{command}");
+        }
+        // Interpreter code doesn't name its targets; the sandbox confines it.
+        let r = classify("python3 -c 'import os; os.remove(\"/etc/x\")'");
+        assert_eq!(r.risk, Risk::Opaque);
+        assert!(r.outside_writes.is_empty() && r.unrulable);
+    }
+
+    #[test]
+    fn variables_in_the_scope_are_inside() {
+        let scope = PathScope::new(
+            "/work/repo",
+            vec![PathBuf::from("/work/repo"), PathBuf::from("/s/tmp")],
+        )
+        .with_var("TMPDIR", "/s/tmp");
+        assert!(scope.contains("$TMPDIR/x"));
+        assert!(scope.contains("${TMPDIR}/x"));
+        assert!(!scope.contains("$TMPDIR/../x"));
+        assert!(!scope.contains("$HOME/x"));
+        assert!(!scope.contains("/tmp/x"));
     }
 
     fn segment_strategy() -> impl Strategy<Value = String> {
@@ -1171,7 +1713,8 @@ mod tests {
         #[test]
         fn classification_never_panics(command in "\\PC{0,64}") {
             let _ = classify_command(&command, &scope());
-            let _ = suggest_prefix(&command);
+            let _ = suggest_rule(&command);
+            let _ = rules_allow(&command, &[AllowRule::with_host("curl", "x.dev")]);
         }
     }
 }

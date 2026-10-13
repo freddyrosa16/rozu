@@ -1735,6 +1735,7 @@ dependencies = [
  "clap",
  "crossterm",
  "libc",
+ "portable-pty",
  "predicates",
  "rozu-cli-providers",
  "rozu-core",

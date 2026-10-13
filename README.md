@@ -70,32 +70,55 @@ subscription). `ROZU_CLAUDE_BIN` points rozu at a specific `claude` binary; othe
 `~/.local/bin`. `ANTHROPIC_API_KEY` is removed from the CLI's environment so it uses your subscription login.
 
 ### Approvals and sandbox
-Every tool call gets a risk class (read, write in workspace, write outside, network, destructive) and is either
-auto-approved or shown as an approval card with the exact command or diff, the sandbox and the network state:
+Every tool call gets a risk class (read, write in workspace, write outside, network, opaque, destructive) and is
+either auto-approved or shown as an approval card with the exact command or diff, the sandbox and the network state:
 
 | `--approval` | runs without asking | asks |
 |---|---|---|
 | `read-only` | reads | everything else |
-| `auto` (default) | reads, workspace writes (sandboxed) | network, writes outside the workspace |
-| `full` | everything, unsandboxed | destructive only |
+| `auto` (default) | reads, workspace writes | network, writes outside the workspace, opaque, destructive |
+| `full` | everything else | opaque, destructive |
+
+**The sandbox is the boundary, in every mode, `full` included.** On macOS, shell commands run under Seatbelt
+(`sandbox-exec`): they can read anywhere but only write inside the workspace, a private per-session temp dir (the
+command's `$TMPDIR`; `/tmp` and your own `$TMPDIR` are not writable) and `/dev`, and the network is blocked unless
+that call was approved with network access (the agent sets `network: true`, or the command is recognized as
+networked, e.g. `curl`, `git fetch`, `npm install`). When you approve a command that writes to named paths outside
+the workspace (`cp build.tgz ~/Downloads/`), the card lists them and the sandbox lets that one command write
+exactly those paths. If the sandbox blocks something anyway, the output says `blocked by rozu sandbox: writes
+outside workspace…` and rozu asks once whether to rerun it unsandboxed.
 
 Destructive commands (`rm -rf`, `git push --force`, `git reset --hard`, `git branch -D`, `git clean -fd`, `sudo`,
-redirects to paths outside the workspace, …) **always** ask, in every mode. At the prompt: `y` approves, `n` denies
-(`n <reason>` or a reason on the next line is passed to the agent), `a` approves and always allows that command
-prefix (e.g. `cargo test`) in this project. Rules live in `.rozu/approvals.json` in the workspace; tools and
-sandboxed commands can't write there, and rules never cover destructive commands. Without a terminal on stdin, every
-prompt is denied.
+redirects to paths outside the workspace, …) **always** ask, in every mode. So do **opaque** commands, whose effect
+rozu can't read off the command line: language interpreters (`python`, `perl`, `ruby`, `node`, `osascript`, …),
+`sh -c`/`bash -c`/`zsh -c`, `eval`, `source`, `exec`, scripts piped into a shell, and any output redirect or `tee` to
+a file (`> out.txt`).
 
-On macOS, shell commands run under Seatbelt (`sandbox-exec`): they can read anywhere but only write inside the
-workspace, `$TMPDIR`, `/tmp` and `/dev`, and the network is blocked unless that call was approved with network
-access (the agent sets `network: true`, or the command is recognized as networked, e.g. `curl`, `git fetch`,
-`npm install`). There is no sandbox on Linux yet, so in auto mode shell commands that write ask first. Commands
-time out after 120 s by default (max 600 s), and the whole process group is killed on timeout or Ctrl-C.
+Keys at the prompt:
+
+| key | does |
+|---|---|
+| `y` | approve; the command still runs in the sandbox |
+| `n` | deny; `n <reason>` (or a reason on the next line) is passed to the agent |
+| `a` | approve and always allow this rule in this project: the command prefix (`cargo test`), the interpreter and script (`python3 -m pytest`), or for network clients the program **and host** (`curl` to `example.com` only). Not offered for destructive commands, inline interpreter code or redirects |
+| `u` | run **unsandboxed, this command only**: no sandbox at all, full access to your files and the network. Never remembered, never chosen by a mode or rule. Only offered where there is a sandbox to lift |
+
+Rules live in `.rozu/approvals.json` in the workspace; tools and sandboxed commands can't write there. Without a
+terminal on stdin, every prompt is denied. There is no sandbox on Linux yet, so in auto mode shell commands that
+write ask first. Commands time out after 120 s by default (max 600 s), and the whole process group is killed on
+timeout or Ctrl-C.
+
+Every approval decision (automatic or yours, allowed or denied) is appended to the audit log
+`~/Library/Logs/rozu/approvals.jsonl` (owner-only; `approvals.jsonl` in the data directory on other systems;
+`ROZU_AUDIT_LOG` moves it): time, session id, tool, decision and who made it, rule, mode, risk, sandboxed or not,
+granted paths, a SHA-256 of the command or diff and a redacted, shortened copy of it.
+
+Ctrl-C during a turn is read straight from the terminal (each press counts, even two in one paste), so a second
+press always exits.
 
 Model selection: `--model` takes `provider/model` or a bare model id (the provider is inferred), and
-`--provider` alone picks that provider's default model. Defaults are `openai/gpt-5.1`,
-`anthropic/claude-sonnet-4-5` and `xai/grok-4`; models missing from `rozu models` still work, just without
-a cost estimate. Prices in the model list are copied by hand and need verifying against each provider's
+`--provider` alone picks that provider's default model (see `rozu models`, `*` marks the defaults); models missing
+from `rozu models` still work, just without a cost estimate. Prices in the model list are copied by hand and need verifying against each provider's
 pricing page.
 
 Environment variables:
@@ -104,9 +127,10 @@ Environment variables:
   `https://api.anthropic.com`, `https://api.x.ai/v1`), for proxies and tests.
 - `ROZU_PROVIDER`, `ROZU_MODEL`: defaults for `--provider` / `--model`.
 - `ROZU_CLAUDE_BIN`: the `claude` binary for `claude-cli`.
-- `RUST_LOG`: log filter (default `info`, logs go to stderr). API keys are redacted from logs. Approval decisions
-  are logged under the `rozu::approval` target (hidden by default since the CLI prints them; show them with
-  `RUST_LOG=info,rozu::approval=info`).
+- `RUST_LOG`: log filter (default `info`). Logs go to `~/Library/Logs/rozu/rozu.log` (`ROZU_LOG_FILE` moves it,
+  `ROZU_LOG_STDERR=1` sends them to stderr). API keys are redacted from logs. Approval decisions are logged under
+  the `rozu::approval` target and, structured, in the audit log.
+- `ROZU_AUDIT_LOG`: path of the approval audit log (default `~/Library/Logs/rozu/approvals.jsonl`).
 - `NO_COLOR`: disables the dim styling.
 
 ## Auth

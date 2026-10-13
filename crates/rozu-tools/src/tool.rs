@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -11,7 +12,7 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
-use crate::{NoSandbox, Sandbox, Workspace};
+use crate::{AllowRule, NoSandbox, Sandbox, Workspace};
 
 /// How risky a particular tool call is; drives the approval policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -24,6 +25,10 @@ pub enum Risk {
     WriteOutside,
     /// Talks to the network.
     Network,
+    /// Can't be read off the call: interpreter code (`python -c`, `eval`, …) or an output
+    /// redirect to a file. Prompts in every mode (an "always allow" rule may cover a named
+    /// script, never inline code).
+    Opaque,
     /// Hard to undo (`rm -rf`, force push, …). Always prompts.
     Destructive,
 }
@@ -35,9 +40,19 @@ impl fmt::Display for Risk {
             Risk::WriteWorkspace => "write in workspace",
             Risk::WriteOutside => "write outside workspace",
             Risk::Network => "network",
+            Risk::Opaque => "opaque (interpreter code or output redirect)",
             Risk::Destructive => "destructive",
         })
     }
+}
+
+/// Writes outside the workspace that a call would make, as far as its arguments say.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OutsideWrites {
+    /// Absolute paths, as written (not canonicalized).
+    pub paths: Vec<PathBuf>,
+    /// Some outside write can't be read off the arguments.
+    pub unknown: bool,
 }
 
 /// The result of a tool call, sent back to the model as text.
@@ -64,12 +79,16 @@ impl ToolOutput {
 }
 
 /// What an approved subprocess may do. Decided per call by the approval policy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecPermissions {
-    /// Run under [`ToolCtx::sandbox`]. When false the command runs unrestricted.
+    /// Run under [`ToolCtx::sandbox`]. False only for the user's explicit "run unsandboxed,
+    /// this command only" (or where the OS has no sandbox).
     pub sandbox: bool,
     /// Allow network access inside the sandbox.
     pub network: bool,
+    /// Extra paths (canonical) this one call may write inside the sandbox: the outside targets
+    /// the user approved.
+    pub extra_writable: Vec<PathBuf>,
 }
 
 impl Default for ExecPermissions {
@@ -77,6 +96,18 @@ impl Default for ExecPermissions {
         Self {
             sandbox: true,
             network: false,
+            extra_writable: Vec::new(),
+        }
+    }
+}
+
+impl ExecPermissions {
+    /// No sandbox at all.
+    pub fn unsandboxed() -> Self {
+        Self {
+            sandbox: false,
+            network: true,
+            extra_writable: Vec::new(),
         }
     }
 }
@@ -90,16 +121,21 @@ pub struct ToolCtx {
     /// Sandbox for subprocesses (see [`crate::platform_sandbox`]).
     pub sandbox: Arc<dyn Sandbox>,
     pub permissions: ExecPermissions,
+    /// The session's private temp dir (see [`crate::SessionTemp`]): subprocesses get it as
+    /// `$TMPDIR`, and it is the only temp location the sandbox lets them write.
+    pub temp_dir: Option<PathBuf>,
 }
 
 impl ToolCtx {
-    /// A context without an OS sandbox (subprocesses still get the default permissions).
+    /// A context without an OS sandbox or temp dir (subprocesses still get the default
+    /// permissions).
     pub fn new(workspace: Workspace, cancel: CancellationToken) -> Self {
         Self {
             workspace,
             cancel,
             sandbox: Arc::new(NoSandbox),
             permissions: ExecPermissions::default(),
+            temp_dir: None,
         }
     }
 
@@ -110,6 +146,11 @@ impl ToolCtx {
 
     pub fn with_permissions(mut self, permissions: ExecPermissions) -> Self {
         self.permissions = permissions;
+        self
+    }
+
+    pub fn with_temp_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.temp_dir = Some(dir.into());
         self
     }
 }
@@ -155,13 +196,19 @@ pub trait Tool: Send + Sync {
         None
     }
 
-    /// The prefix an "always allow" rule for this call would store, if the tool supports them.
-    fn allow_prefix(&self, _args: &Value) -> Option<String> {
+    /// Writes outside the workspace this call would make (only meaningful for sandboxed tools:
+    /// an approved call may write exactly these paths).
+    fn outside_writes(&self, _args: &Value, _ctx: &ToolCtx) -> OutsideWrites {
+        OutsideWrites::default()
+    }
+
+    /// The rule "always allow" would store for this call, if the tool supports them.
+    fn allow_rule(&self, _args: &Value) -> Option<AllowRule> {
         None
     }
 
-    /// Whether stored "always allow" `prefixes` cover this call.
-    fn prefix_allows(&self, _args: &Value, _prefixes: &[String]) -> bool {
+    /// Whether stored "always allow" `rules` cover this call.
+    fn rules_allow(&self, _args: &Value, _rules: &[AllowRule]) -> bool {
         false
     }
 

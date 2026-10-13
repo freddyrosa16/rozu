@@ -3,7 +3,8 @@
 //!
 //! Tool calls and permission prompts are decided by the project's approval policy; prompts go to
 //! the parent `rozu chat` over the socket in `ROZU_APPROVAL_SOCKET`, and are denied when it
-//! can't be reached.
+//! can't be reached. Every decision made here is appended to the approval audit log under the
+//! parent's session id.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -11,7 +12,9 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use clap::Args;
-use rozu_core::{ApprovalMode, ApprovalPolicy, ToolExecutor, approvals_path};
+use rozu_core::{
+    ApprovalMode, ApprovalPolicy, AuditLog, ToolExecutor, approvals_path, new_session_id,
+};
 use rozu_mcp::{McpServer, SocketGate};
 use rozu_tools::{ToolRegistry, Workspace, platform_sandbox};
 
@@ -25,6 +28,9 @@ pub struct McpServeArgs {
     /// Approval mode, as for `rozu chat`.
     #[arg(long, value_enum, default_value_t = ApprovalArg::Auto)]
     approval: ApprovalArg,
+    /// The parent `rozu chat`'s session id, so both processes' audit entries match.
+    #[arg(long)]
+    session_id: Option<String>,
 }
 
 pub fn run(args: McpServeArgs) -> anyhow::Result<ExitCode> {
@@ -49,12 +55,14 @@ async fn serve(args: McpServeArgs) -> anyhow::Result<ExitCode> {
             rozu_mcp::APPROVAL_SOCKET_ENV
         );
     }
+    let session_id = args.session_id.unwrap_or_else(new_session_id);
     let exec = ToolExecutor::new(
         Arc::new(ToolRegistry::standard()),
         Arc::new(gate.clone()),
         Arc::new(policy),
         platform_sandbox(),
-    );
+    )
+    .with_audit(AuditLog::from_env(session_id).map(Arc::new));
     let server = Arc::new(McpServer::new(exec, workspace, gate));
     server
         .serve(tokio::io::stdin(), tokio::io::stdout())

@@ -357,6 +357,8 @@ mod tests {
     fn retired_and_unlisted_models_are_gone() {
         for spec in [
             "anthropic/claude-opus-4-1",
+            // Deprecated on the pricing page and gone from the models overview.
+            "anthropic/claude-sonnet-4-5",
             "xai/grok-4",
             "xai/grok-4-fast-reasoning",
         ] {
@@ -390,6 +392,28 @@ mod tests {
         // gpt-6.1-sol: over 272K prompt tokens, 4.00 in / 15.00 out.
         assert!((cost("openai/gpt-6.1-sol", 272_000) - (0.544 + 10.0)).abs() < 1e-9);
         assert!((cost("openai/gpt-6.1-sol", 272_001) - (1.088_004 + 15.0)).abs() < 1e-9);
+        // gpt-6-astra: 10 / 50 up to 272K, then 20 in / 75 out.
+        assert!((cost("openai/gpt-6-astra", 272_000) - (2.72 + 50.0)).abs() < 1e-9);
+        assert!((cost("openai/gpt-6-astra", 272_001) - (5.440_02 + 75.0)).abs() < 1e-9);
+        // gpt-6-luna: 0.10 / 0.50 up to 272K, then 0.20 in / 0.75 out.
+        assert!((cost("openai/gpt-6-luna", 272_000) - (0.0272 + 0.5)).abs() < 1e-9);
+        assert!((cost("openai/gpt-6-luna", 272_001) - (0.054_400_2 + 0.75)).abs() < 1e-9);
+        // The cached and cache-write rows of those tiers.
+        for (spec, cached, write) in [
+            ("openai/gpt-6-astra", 2.0, 25.0),
+            ("openai/gpt-6-luna", 0.02, 0.25),
+        ] {
+            let long = lookup(spec).unwrap().long_context.unwrap();
+            assert_eq!(long.threshold_tokens, 272_001, "{spec}");
+            assert!(
+                (long.price_cached_in_per_mtok - cached).abs() < 1e-9,
+                "{spec}"
+            );
+            assert!(
+                (long.price_cache_write_per_mtok - write).abs() < 1e-9,
+                "{spec}"
+            );
+        }
         // Haiku 5.5: over 100,000 prompt tokens, 0.50 in / 2.50 out.
         assert!((cost("anthropic/claude-haiku-5-5", 100_000) - (0.01 + 0.5)).abs() < 1e-9);
         assert!((cost("anthropic/claude-haiku-5-5", 100_001) - (0.050_000_5 + 2.5)).abs() < 1e-9);
@@ -420,17 +444,17 @@ mod tests {
     #[test]
     fn lookup_by_spec_or_id() {
         assert_eq!(
-            lookup("anthropic/claude-sonnet-4-5").unwrap().provider,
+            lookup("anthropic/claude-sonnet-4-6").unwrap().provider,
             "anthropic"
         );
-        assert_eq!(lookup("claude-sonnet-4-5").unwrap().provider, "anthropic");
+        assert_eq!(lookup("claude-sonnet-4-6").unwrap().provider, "anthropic");
         assert_eq!(lookup("grok-4.7").unwrap().provider, "xai");
         assert_eq!(lookup("openai/gpt-5.1").unwrap().context_window, 400_000);
         assert_eq!(
             lookup("openai/gpt-6.1-sol").unwrap().context_window,
             1_050_000
         );
-        assert!(lookup("openai/claude-sonnet-4-5").is_none());
+        assert!(lookup("openai/claude-sonnet-4-6").is_none());
         assert!(lookup("nope/gpt-5.1").is_none());
         assert!(lookup("gpt-9000").is_none());
     }
@@ -480,14 +504,13 @@ mod tests {
             ("xai".into(), "my-finetune".into(), false)
         );
         assert_eq!(
-            choice(Some("anthropic"), Some("anthropic/claude-sonnet-4-5")),
-            ("anthropic".into(), "claude-sonnet-4-5".into(), true)
+            choice(Some("anthropic"), Some("anthropic/claude-sonnet-4-6")),
+            ("anthropic".into(), "claude-sonnet-4-6".into(), true)
         );
+        // A removed model still resolves, unpriced.
         assert_eq!(
-            resolve(None, Some("anthropic/claude-sonnet-4-5"))
-                .unwrap()
-                .spec(),
-            "anthropic/claude-sonnet-4-5"
+            choice(None, Some("anthropic/claude-sonnet-4-5")),
+            ("anthropic".into(), "claude-sonnet-4-5".into(), false)
         );
     }
 

@@ -426,6 +426,8 @@ async fn approval_records_from_the_mcp_server_join_the_stream() {
         preview: "$ rm -rf build".into(),
         sandbox: SandboxMode::Enforced("seatbelt"),
         network: false,
+        extra_writes: Vec::new(),
+        blocked_retry: false,
         decision: Decision::Deny {
             reason: "no".into(),
         },

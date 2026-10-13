@@ -20,17 +20,18 @@ mod workspace;
 mod write;
 
 pub use command_risk::{
-    CommandRisk, PathScope, classify_command, prefixes_allow, split_segments, suggest_prefix,
+    AllowRule, CommandRisk, PathScope, classify_command, rules_allow, split_segments, suggest_rule,
 };
 pub use fs::{Grep, ListDir, ReadFile};
 pub use patch::{PatchError, SearchReplace, apply_search_replace, apply_unified_diff};
 pub use sandbox::{
-    NoSandbox, SANDBOX_EXEC, Sandbox, SandboxPolicy, Seatbelt, platform_sandbox, seatbelt_profile,
-    temp_dirs,
+    NoSandbox, SANDBOX_BLOCKED, SANDBOX_EXEC, Sandbox, SandboxPolicy, Seatbelt, SessionTemp,
+    platform_sandbox, resolve_lenient, sandbox_blocked, seatbelt_profile, too_broad_to_grant,
 };
 pub use shell::{DEFAULT_SHELL_TIMEOUT_SECS, MAX_SHELL_TIMEOUT_SECS, Shell};
 pub use tool::{
-    ExecPermissions, Risk, Tool, ToolCtx, ToolOutput, ToolRegistry, parse_args, schema_for,
+    ExecPermissions, OutsideWrites, Risk, Tool, ToolCtx, ToolOutput, ToolRegistry, parse_args,
+    schema_for,
 };
 pub use truncate::{MAX_OUTPUT_BYTES, truncate_head_tail};
 pub use workspace::{PROTECTED_DIR, PathError, Workspace};

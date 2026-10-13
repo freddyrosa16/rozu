@@ -6,7 +6,8 @@
 //! [`SocketGate`] opens one connection per message and writes one JSON line:
 //!
 //! - `{"type":"ask","request":{…}}`: the parent asks its [`ApprovalGate`] (the user) and answers
-//!   with one line, `{"decision":{"kind":"approve"|"always_allow_prefix"|"deny","reason":…}}`.
+//!   with one line, `{"decision":{"kind":"approve"|"always_allow_prefix"|"approve_unsandboxed"|
+//!   "deny","reason":…}}`.
 //!   If the server hangs up first (the CLI was cancelled), the question is withdrawn.
 //! - `{"type":"record","record":{…}}`: a decision-log entry for the UI; no answer.
 //!
@@ -22,7 +23,7 @@ use rozu_core::{
     ApprovalGate, ApprovalMode, ApprovalRecord, ApprovalRequest, Decision, DecisionSource,
     SandboxMode,
 };
-use rozu_tools::Risk;
+use rozu_tools::{AllowRule, Risk};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::mpsc;
@@ -58,7 +59,13 @@ struct WireRequest {
     preview: String,
     sandbox: WireSandbox,
     network: bool,
-    allow_prefix: Option<String>,
+    #[serde(default)]
+    extra_writes: Vec<PathBuf>,
+    #[serde(default)]
+    outside_unknown: bool,
+    #[serde(default)]
+    blocked_retry: bool,
+    allow_rule: Option<AllowRule>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -69,6 +76,10 @@ struct WireRecord {
     preview: String,
     sandbox: WireSandbox,
     network: bool,
+    #[serde(default)]
+    extra_writes: Vec<PathBuf>,
+    #[serde(default)]
+    blocked_retry: bool,
     decision: WireDecision,
     source: WireSource,
 }
@@ -80,6 +91,7 @@ enum WireRisk {
     WriteWorkspace,
     WriteOutside,
     Network,
+    Opaque,
     Destructive,
 }
 
@@ -96,6 +108,7 @@ enum WireSandbox {
 enum WireDecision {
     Approve,
     AlwaysAllowPrefix,
+    ApproveUnsandboxed,
     Deny { reason: String },
 }
 
@@ -124,6 +137,7 @@ impl From<Risk> for WireRisk {
             Risk::WriteWorkspace => Self::WriteWorkspace,
             Risk::WriteOutside => Self::WriteOutside,
             Risk::Network => Self::Network,
+            Risk::Opaque => Self::Opaque,
             Risk::Destructive => Self::Destructive,
         }
     }
@@ -136,6 +150,7 @@ impl From<WireRisk> for Risk {
             WireRisk::WriteWorkspace => Self::WriteWorkspace,
             WireRisk::WriteOutside => Self::WriteOutside,
             WireRisk::Network => Self::Network,
+            WireRisk::Opaque => Self::Opaque,
             WireRisk::Destructive => Self::Destructive,
         }
     }
@@ -171,6 +186,7 @@ impl From<Decision> for WireDecision {
         match decision {
             Decision::Approve => Self::Approve,
             Decision::AlwaysAllowPrefix => Self::AlwaysAllowPrefix,
+            Decision::ApproveUnsandboxed => Self::ApproveUnsandboxed,
             Decision::Deny { reason } => Self::Deny { reason },
         }
     }
@@ -181,6 +197,7 @@ impl From<WireDecision> for Decision {
         match decision {
             WireDecision::Approve => Self::Approve,
             WireDecision::AlwaysAllowPrefix => Self::AlwaysAllowPrefix,
+            WireDecision::ApproveUnsandboxed => Self::ApproveUnsandboxed,
             WireDecision::Deny { reason } => Self::Deny { reason },
         }
     }
@@ -240,7 +257,10 @@ impl From<ApprovalRequest> for WireRequest {
             preview: req.preview,
             sandbox: req.sandbox.into(),
             network: req.network,
-            allow_prefix: req.allow_prefix,
+            extra_writes: req.extra_writes,
+            outside_unknown: req.outside_unknown,
+            blocked_retry: req.blocked_retry,
+            allow_rule: req.allow_rule,
         }
     }
 }
@@ -255,7 +275,10 @@ impl From<WireRequest> for ApprovalRequest {
             preview: req.preview,
             sandbox: req.sandbox.into(),
             network: req.network,
-            allow_prefix: req.allow_prefix,
+            extra_writes: req.extra_writes,
+            outside_unknown: req.outside_unknown,
+            blocked_retry: req.blocked_retry,
+            allow_rule: req.allow_rule,
         }
     }
 }
@@ -269,6 +292,8 @@ impl From<ApprovalRecord> for WireRecord {
             preview: record.preview,
             sandbox: record.sandbox.into(),
             network: record.network,
+            extra_writes: record.extra_writes,
+            blocked_retry: record.blocked_retry,
             decision: record.decision.into(),
             source: record.source.into(),
         }
@@ -284,6 +309,8 @@ impl From<WireRecord> for ApprovalRecord {
             preview: record.preview,
             sandbox: record.sandbox.into(),
             network: record.network,
+            extra_writes: record.extra_writes,
+            blocked_retry: record.blocked_retry,
             decision: record.decision.into(),
             source: record.source.into(),
         }

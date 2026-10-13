@@ -1,21 +1,33 @@
 //! OS sandboxes for shell commands.
 //!
-//! On macOS commands run under Seatbelt (`/usr/bin/sandbox-exec -p <profile>`): reads are allowed
-//! everywhere, writes only under the workspace, the temp directories and `/dev`, and the network
-//! is denied unless the call was approved with network access. Other platforms get
+//! On macOS commands run under Seatbelt (`/usr/bin/sandbox-exec -p <profile>`) in every approval
+//! mode: reads are allowed everywhere, writes only under the workspace, the session's private
+//! temp dir ([`SessionTemp`], which commands get as `$TMPDIR`), `/dev`, and the outside paths
+//! the user approved for that one call. `/tmp` and the user's `$TMPDIR` are *not* writable. The
+//! network is denied unless the call was approved with network access. Other platforms get
 //! [`NoSandbox`] for now (Linux Landlock is planned), so the approval policy treats them as
 //! unsandboxed.
 
 use std::fmt;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tokio::process::Command;
 
 use crate::Workspace;
+use crate::workspace::normalize;
 
 /// Path of the Seatbelt launcher on macOS.
 pub const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
+
+/// Starts the note added to tool output when the sandbox (probably) refused something.
+pub const SANDBOX_BLOCKED: &str = "blocked by rozu sandbox: writes outside workspace";
+
+/// Whether tool output carries the [`SANDBOX_BLOCKED`] note.
+pub fn sandbox_blocked(output: &str) -> bool {
+    output.contains(SANDBOX_BLOCKED)
+}
 
 /// What a sandboxed command may touch.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,17 +41,27 @@ pub struct SandboxPolicy {
 }
 
 impl SandboxPolicy {
-    /// Writes limited to the workspace, the temp directories and `/dev`; `.rozu` read-only.
-    pub fn for_workspace(workspace: &Workspace, network: bool) -> Self {
+    /// Writes limited to the workspace, `temp_dir` (the session's), `/dev` and `extra` (the
+    /// approved outside targets of one call); `.rozu` read-only.
+    pub fn for_workspace(
+        workspace: &Workspace,
+        temp_dir: Option<&Path>,
+        network: bool,
+        extra: &[PathBuf],
+    ) -> Self {
         let mut writable_roots = vec![workspace.root().to_path_buf()];
-        for dir in temp_dirs() {
-            if let Ok(canonical) = dir.canonicalize() {
-                if !writable_roots.contains(&canonical) {
-                    writable_roots.push(canonical);
-                }
+        let mut add = |path: PathBuf| {
+            if !writable_roots.contains(&path) {
+                writable_roots.push(path);
             }
+        };
+        if let Some(dir) = temp_dir {
+            add(dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf()));
         }
-        writable_roots.push(PathBuf::from("/dev"));
+        add(PathBuf::from("/dev"));
+        for path in extra {
+            add(path.clone());
+        }
         Self {
             writable_roots,
             read_only_subpaths: vec![workspace.protected_dir()],
@@ -48,16 +70,94 @@ impl SandboxPolicy {
     }
 }
 
-/// `$TMPDIR` (if set) and `/tmp`, as given (not canonicalized).
-pub fn temp_dirs() -> Vec<PathBuf> {
-    let mut dirs = Vec::new();
-    if let Some(tmp) = std::env::var_os("TMPDIR").filter(|v| !v.is_empty()) {
-        dirs.push(PathBuf::from(tmp));
+/// `path` with its deepest existing ancestor canonicalized (symlinks resolved, `/tmp` →
+/// `/private/tmp`) and the missing rest appended. Seatbelt matches real paths, so this is the
+/// form an approved outside target is granted in.
+pub fn resolve_lenient(path: &Path) -> PathBuf {
+    let normalized = normalize(path);
+    let mut existing = normalized.as_path();
+    let mut missing = Vec::new();
+    loop {
+        if let Ok(canonical) = existing.canonicalize() {
+            return missing
+                .iter()
+                .rev()
+                .fold(canonical, |acc: PathBuf, name| acc.join(name));
+        }
+        match (existing.parent(), existing.file_name()) {
+            (Some(parent), Some(name)) => {
+                missing.push(name.to_owned());
+                existing = parent;
+            }
+            _ => return normalized,
+        }
     }
-    if cfg!(unix) {
-        dirs.push(PathBuf::from("/tmp"));
+}
+
+/// Whether granting writes under `path` would open up too much to call it scoped: `/`, a
+/// top-level directory (`/etc`, `/Users`), or the home directory itself or one of its parents.
+pub fn too_broad_to_grant(path: &Path, home: Option<&Path>) -> bool {
+    path.components().count() <= 2 || home.is_some_and(|home| home.starts_with(path))
+}
+
+/// A private (0700) temp directory for one rozu session, removed when dropped. Shell commands
+/// get it as `$TMPDIR`; it is the only temp location the sandbox lets them write.
+#[derive(Debug)]
+pub struct SessionTemp {
+    path: PathBuf,
+}
+
+impl SessionTemp {
+    /// Creates `rozu-<label>-<random>` under the system temp dir.
+    pub fn create(label: &str) -> io::Result<Self> {
+        let base = std::env::temp_dir();
+        let label: String = label
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+            .take(40)
+            .collect();
+        let mut last_err = None;
+        for _ in 0..16 {
+            let dir = base.join(format!("rozu-{label}-{:08x}", random_u32()));
+            let mut builder = std::fs::DirBuilder::new();
+            #[cfg(unix)]
+            std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+            match builder.create(&dir) {
+                Ok(()) => {
+                    let path = dir.canonicalize()?;
+                    return Ok(Self { path });
+                }
+                Err(err) if err.kind() == io::ErrorKind::AlreadyExists => last_err = Some(err),
+                Err(err) => return Err(err),
+            }
+        }
+        Err(last_err.unwrap_or_else(|| io::Error::other("could not create a session temp dir")))
     }
-    dirs
+
+    /// The canonical path.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for SessionTemp {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+/// A random-enough number for unique names (std's per-process random hash keys, plus time).
+fn random_u32() -> u32 {
+    use std::hash::{BuildHasher, Hasher};
+    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+    hasher.write_u128(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default(),
+    );
+    hasher.write_u32(std::process::id());
+    hasher.finish() as u32
 }
 
 /// Runs shell command lines, possibly confined.
@@ -238,18 +338,80 @@ mod tests {
     }
 
     #[test]
-    fn workspace_policy_includes_tmp_and_protects_rozu_dir() {
+    fn workspace_policy_has_only_the_session_tmp_and_protects_rozu_dir() {
         let dir = tempfile::tempdir().unwrap();
         let ws = Workspace::new(dir.path()).unwrap();
-        let policy = SandboxPolicy::for_workspace(&ws, false);
-        assert_eq!(policy.writable_roots[0], ws.root());
-        assert!(policy.writable_roots.contains(&PathBuf::from("/dev")));
+        let session = SessionTemp::create("test").unwrap();
+        let extra = PathBuf::from("/Users/me/scratch/approved.txt");
+        let policy = SandboxPolicy::for_workspace(
+            &ws,
+            Some(session.path()),
+            false,
+            std::slice::from_ref(&extra),
+        );
+        assert_eq!(
+            policy.writable_roots,
+            [
+                ws.root().to_path_buf(),
+                session.path().to_path_buf(),
+                PathBuf::from("/dev"),
+                extra
+            ]
+        );
+        // Neither /tmp nor the user's $TMPDIR as a whole.
         if cfg!(unix) {
             let tmp = Path::new("/tmp").canonicalize().unwrap();
-            assert!(policy.writable_roots.contains(&tmp), "{policy:?}");
+            assert!(!policy.writable_roots.contains(&tmp), "{policy:?}");
         }
+        let user_tmp = std::env::temp_dir().canonicalize().unwrap();
+        assert!(!policy.writable_roots.contains(&user_tmp), "{policy:?}");
         assert_eq!(policy.read_only_subpaths, [ws.root().join(".rozu")]);
         assert!(!policy.network);
+    }
+
+    #[test]
+    fn session_temp_is_private_and_removed_on_drop() {
+        let session = SessionTemp::create("abc/../x").unwrap();
+        let path = session.path().to_path_buf();
+        assert!(path.is_dir());
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(name.starts_with("rozu-abcx-"), "{name}");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o700);
+        }
+        std::fs::write(path.join("f"), "x").unwrap();
+        drop(session);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn lenient_resolution_and_breadth() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().canonicalize().unwrap();
+        assert_eq!(
+            resolve_lenient(&dir.path().join("a/../missing/f.txt")),
+            real.join("missing/f.txt")
+        );
+        let home = Path::new("/Users/me");
+        assert!(too_broad_to_grant(Path::new("/"), Some(home)));
+        assert!(too_broad_to_grant(Path::new("/etc"), Some(home)));
+        assert!(too_broad_to_grant(Path::new("/Users/me"), Some(home)));
+        assert!(!too_broad_to_grant(
+            Path::new("/Users/me/scratch"),
+            Some(home)
+        ));
+        assert!(!too_broad_to_grant(Path::new("/etc/hosts"), Some(home)));
+    }
+
+    #[test]
+    fn blocked_marker() {
+        assert!(sandbox_blocked(&format!(
+            "exit code: 1\n[{SANDBOX_BLOCKED} …]"
+        )));
+        assert!(!sandbox_blocked("Operation not permitted"));
     }
 
     #[test]
