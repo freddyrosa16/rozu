@@ -144,6 +144,7 @@
       "$value": {
         "radius": 0.9,
         "tilt": 0.3,
+        "pageTilt": 0.8,
         "large": { "rings": 15, "lon": 30, "dots": 284, "dotMul": 1, "speedMul": 1 },
         "small": { "rings": 9, "lon": 15, "dots": 86, "dotMul": 1.15, "speedMul": 1.15 }
       },
@@ -180,12 +181,12 @@
       "thinking": {
         "$type": "duration",
         "$value": "1.6s",
-        "$description": "thought weather drifts; the globe turns at .5 rad/s"
+        "$description": "two sparks ripple out, offset by half a period; the globe turns at .35 rad/s"
       },
       "notes": {
         "$type": "duration",
         "$value": "2.6s",
-        "$description": "three lines write round the globe over 1.9s, hold, repeat"
+        "$description": "three lines write all the way round the globe over 1.9s, hold, repeat"
       },
       "reading": {
         "$type": "duration",
@@ -199,8 +200,8 @@
       },
       "editing": {
         "$type": "duration",
-        "$value": "2.4s",
-        "$description": "a caret retypes the equator over 1.6s, then blinks at 200ms"
+        "$value": "2.6s",
+        "$description": "a caret types a line (1.2s), deletes the last third (.3s), retypes it (.6s), then blinks at 250ms"
       },
       "running": {
         "$type": "duration",

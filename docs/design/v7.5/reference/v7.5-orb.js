@@ -29,7 +29,13 @@ const SMALL=profile(9,15,{dot:1.15,speed:1.15}); // 87 dots
 // Dot i's unit direction before the spin.
 const dir=(P,i)=>{const [phi,lam]=P.grid[i];const c=Math.cos(phi);return [c*Math.cos(lam),Math.sin(phi),c*Math.sin(lam)]};
 // Dot i on the globe, radius r, spun by `yaw` radians and tilted toward the camera.
-const globe=(P,i,yaw,r=R)=>{const d=dir(P,i);return rX(rY([d[0]*r,d[1]*r,d[2]*r],yaw),TILT)};
+const globe=(P,i,yaw,r=R,tilt=TILT)=>{const d=dir(P,i);return rX(rY([d[0]*r,d[1]*r,d[2]*r],yaw),tilt)};
+// Notes and Editing look down on the globe, so a line of latitude reads as a whole ellipse.
+const PAGE_TILT=.8;
+// Fraction 0..1 round a ring, starting at the front and going round the back (writing order).
+const roundFrom=(P,i)=>((-front(P,i,0))%TAU+TAU)%TAU/TAU;
+// Geodesic angle (rad) between dot i and a surface point (phi0, lam0).
+const geo=(P,i,phi0,lam0)=>{const [phi,lam]=P.grid[i];return Math.acos(cl(Math.sin(phi)*Math.sin(phi0)+Math.cos(phi)*Math.cos(phi0)*Math.cos(lam-lam0),-1,1))};
 // Where dot i faces the camera: 0 at the front, ±π at the back (after a spin of `yaw`).
 const front=(P,i,yaw)=>{const a=P.grid[i][1]-yaw-Math.PI/2;return Math.atan2(Math.sin(a),Math.cos(a))};
 // Point at arc-length fraction u along a set of polylines, as one path.
@@ -44,13 +50,17 @@ function symbol(P,i,strokes,share,dx,drawn,pop,litOff){const n=Math.round(P.N*sh
   const a=Math.PI/2-TAU*(i-n)/(P.N-n);return Q([R*Math.cos(a)+dx,R*Math.sin(a),GZ],0,.7*P.dot,.3)}
 const ORBS={
  thinking:{tone:"none",tempo:1.6,gen(i,t,P){ // thought weather: patches of light drift over a slowly turning globe
-   const [phi,lam]=P.grid[i],p=globe(P,i,.5*t*P.speed),n=vnoise(lam*1.4+.4*t,phi*1.3+.2*t+7+lam*.3),lit=cl(n*2.2-.9);
-   return Q(p,lit*.7,(.9+.3*lit)*P.dot,.5+.5*lit)}},
+   // Two sparks take turns: each flashes at a point on the surface, and a ripple spreads out from it and fades.
+   const yaw=.35*t*P.speed,p=globe(P,i,yaw);let lit=0;
+   for(let k=0;k<2;k++){const T=1.6,a=((t+k*T/2)%T),c=Math.floor((t+k*T/2)/T),h1=hash2(c,k+1),h2=hash2(k+1,c);
+     const d=geo(P,i,(2*h1-1)*.6,yaw+Math.PI/2+(2*h2-1)*1.1),ring=Math.exp(-Math.pow((d-a*1.1)/.3,2))*Math.pow(1-a/T,1.5),spark=d<.25?Math.max(0,1-a/.4):0;
+     lit=Math.max(lit,ring,spark)}
+   return Q(p,lit,(.85+.45*lit)*P.dot,.45+.55*lit)}},
  notes:{tone:"none",tempo:2.6,gen(i,t,P){ // three lines of text write themselves round the globe, hold, then start over
-   const [phi,lam,j]=P.grid[i],p=globe(P,i,0),mid=(P.rings-1)/2,lines=[mid-2,mid,mid+2].map(Math.round),li=lines.indexOf(j);
+   const [phi,lam,j]=P.grid[i],p=globe(P,i,0,R,PAGE_TILT),mid=(P.rings-1)/2,lines=[mid-2,mid,mid+2].map(Math.round),li=lines.indexOf(j);
    if(li<0)return Q(p,0,.75*P.dot,.3);
-   const ph=(t%2.6)/1.9,w=cl(ph*3-li),u=((lam+Math.PI/2)%TAU)/TAU,on=u<=w,head=on&&w<1&&u>w-.06;
-   return Q(p,on?1:0,(head?1.6:on?1.15:.75)*P.dot,on?1:.3)}},
+   const ph=(t%2.6)/1.9,w=cl(ph*3-li),u=roundFrom(P,i),on=u<=w,head=on&&w<1&&u>w-.06;
+   return Q(p,on?1:0,(head?1.6:on?1.15:.75)*P.dot,on?1:.35)}},
  reading:{tone:"none",tempo:2.2,gen(i,t,P){ // a lit band reads down the globe, line by line
    const [phi]=P.grid[i],p=globe(P,i,.25*t*P.speed),yb=Math.PI/2-Math.PI*((t%2.2)/2.2)*1.15+.07,on=Math.exp(-Math.pow((phi-yb)/.17,2));
    return Q(p,on,(.8+.5*on)*P.dot,.35+.65*on)}},
@@ -59,11 +69,15 @@ const ORBS={
    const d=Math.hypot(phi-cphi,clam*Math.cos(cphi)),inside=cl((.42-d)/.12),lit=inside;
    return Q(p,lit,(.85+.55*lit)*P.dot,.4+.6*lit)}},
  editing:{tone:"none",tempo:2.4,gen(i,t,P){ // a caret moves along the equator, retyping the dots behind it
-   const [phi,lam,j]=P.grid[i],p=globe(P,i,0),eq=Math.round((P.rings-1)/2);
-   if(j!==eq)return Q(p,0,.8*P.dot,.4);
-   const ph=(t%2.4),w=cl(ph/1.6),cx=-Math.PI*.78+1.56*Math.PI*w,f=front(P,i,0),blink=w>=1&&Math.floor((ph-1.6)/.2)%2===1;
-   const caret=Math.abs(f-cx)<Math.PI/P.lon;if(caret)return Q(p,blink?0:1,(blink?.6:1.7)*P.dot,blink?.3:1);
-   const behind=cx-f,fresh=behind>0&&behind<1.2?1-behind/1.2:0;return Q(p,f<cx?.5+.5*fresh*fresh:0,(1+.4*fresh)*P.dot,f<cx?1:.35)}},
+   // One line of a page is edited: the caret types it, deletes the last third, retypes it, then blinks.
+   const [phi,lam,j]=P.grid[i],p=globe(P,i,0,R,PAGE_TILT),line=Math.round((P.rings-1)/2)-1;
+   if(j!==line)return Q(p,0,.75*P.dot,.35);
+   const ph=t%2.6,u=roundFrom(P,i);
+   const cx=ph<1.2?ph/1.2:ph<1.5?1-.4*((ph-1.2)/.3):ph<2.1?.6+.4*((ph-1.5)/.6):1,retyping=ph>=1.5&&ph<2.1,blink=ph>=2.1&&Math.floor((ph-2.1)/.25)%2===1;
+   const du=Math.abs(u-cx),caret=Math.min(du,1-du)<.5/P.lon;if(caret)return Q(p,blink?0:1,(blink?.6:1.7)*P.dot,blink?.3:1);
+   const on=u<cx,fresh=on&&cx-u<.12?1-(cx-u)/.12:0,redone=on&&u>.6&&ph>=1.5;
+   const gone=!on&&u>.6&&ph>=1.2&&ph<1.5&&u-cx<.1; // the deleted dots flare for a moment as the caret backs over them
+   return Q(p,on?.85+.15*fresh:gone?.6:0,(on?1.3+.4*fresh+(redone?.2:0):gone?1.1:.8)*P.dot,on?1:gone?.7:.3)}},
  running:{tone:"none",tempo:.9,gen(i,t,P){ // the globe spins fast with a helical stripe racing round it
    const [phi,lam]=P.grid[i],yaw=2.4*t*P.speed,p=globe(P,i,yaw),s=.5+.5*Math.sin(2*phi+lam-TAU*t/.9),lit=cl(s*1.4-.4);
    return Q(p,lit*.75,(.9+.25*lit)*P.dot,.5+.5*lit)}},

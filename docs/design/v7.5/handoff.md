@@ -1,5 +1,5 @@
 # rozu: Handoff spec (CURRENT: v7.5, live activity, a dotted globe per state)
-**Status:** current spec as of 2026-10-13. **v7.5** replaces the v7.4 ring-and-symbol orbs with one object for all ten states: a globe of small matte dots on lines of latitude, and the state is what the globe is doing (thought weather, lines being written, a reading band, a roaming lens, a retyping caret, a fast helical spin, a breath, dropped rings). Done and Error gather the dots into the v7.4 check and cross, with the rest resting on a faint ring. The 22px pill draws its own smaller point set, tuned rather than scaled. The look is inspired by dotted-globe loading indicators (libraries.dev/orbs), with rozu's own motions, projection, light and morph. The pill itself (orb, label, timer, `3/5` step text, no progress bar) is unchanged from v7.2.
+**Status:** current spec as of 2026-10-13. **v7.5** replaces the v7.4 ring-and-symbol orbs with one object for all ten states: a globe of small matte dots on lines of latitude, and the state is what the globe is doing (sparks rippling out, lines being written round it, a reading band, a roaming lens, a line typed, deleted and retyped, a fast helical spin, a breath, dropped rings). Done and Error gather the dots into the v7.4 check and cross, with the rest resting on a faint ring. The 22px pill draws its own smaller point set, tuned rather than scaled. The look is inspired by dotted-globe loading indicators (libraries.dev/orbs), with rozu's own motions, projection, light and morph. The pill itself (orb, label, timer, `3/5` step text, no progress bar) is unchanged from v7.2.
 - Everything v7.5 doesn't redefine comes from v5 (Appendix B: chrome ramp, type, spacing, focus) and then v1 (Appendix A: layout, keyboard map, approvals, accessibility).
 - **Superseded:** the v7.2/v7.3 per-state clouds and the v7.4 ring-and-symbol orbs (removed from the repo; see git history), and v6.x (Appendix C), meaning the bead family, the bead tokens and the v5 progress line under the pill.
 - **Screens:** `screens/v7.5-sheet-{dark,light}.png` (all ten states, 96px and in the 22px pill), `screens/v7.5-strip-{dark,light}.png` (each state over one loop at 96px and at 22px) and `screens/v7.5-morphs.png` (Running into Waiting, Done, Error and Offline).
@@ -38,7 +38,7 @@
 | orb.litBoost | r×1.55, α+.5 | Lit dots |
 | motion.orbMorph / orbStagger / orbLift | 600ms crit. spring ω7 / 300ms across the cloud / .55 | Morph |
 | motion.orbPulse | 150ms, lit + .8·sin(πt/.15) | On every change |
-| motion.orbTempo.* | thinking 1.6s, notes 2.6s, reading 2.2s, searching 2.4s, editing 2.4s, running 900ms, waiting 1.8s, offline 2.4s; done draw 450ms, error shake 900ms; settle 1.3s | Per state |
+| motion.orbTempo.* | thinking 1.6s, notes 2.6s, reading 2.2s, searching 2.4s, editing 2.6s, running 900ms, waiting 1.8s, offline 2.4s; done draw 450ms, error shake 900ms; settle 1.3s | Per state |
 | size.orb / orbLg / activityPill | 22px / 88px / 32px (34px in the dock) | Sizes |
 **Deprecated (v6):** `bead.*`, `size.beadDiameter22`, `motion.morph` 480ms, `trail`, `arcBow`, and the v5 line tokens (`size.seg*`, sweep, notch) as pill companions.
 
@@ -57,11 +57,11 @@
 ## 3. States (math in motion-spec-v7.5.md)
 | State | Label | What the globe does | Tempo | Reduced-motion frame (T) |
 |---|---|---|---|---|
-| Thinking | Thinking… | Patches of light (value noise) drift over it while it turns slowly | 1.6s | .55s |
-| Notes | Jotting down notes… | Three lines of latitude light up left to right, one after another, hold, then start over | 2.6s | 1.2s |
+| Thinking | Thinking… | Sparks flash on its front and ripples spread out from them while it turns slowly | 1.6s | .55s |
+| Notes | Jotting down notes… | Seen from above (tilt .8): three lines of latitude write themselves all the way round, from the front, one after another, hold, then start over | 2.6s | 1.2s |
 | Reading | Reading `<file>` | A lit band reads down it, pole to pole, while it turns slowly | 2.2s | .6s |
 | Searching | Searching "`<q>`" | A lens roams its front; the dots under it swell and light | 2.4s | .3s |
-| Editing | Editing `<file>` | A caret moves along the equator, retyping the dots behind it, then blinks at 200ms | 2.4s | 1.1s |
+| Editing | Editing `<file>` | Seen from above: a caret types one line of the page all the way round, deletes the last third, retypes it, then blinks at 250ms | 2.6s | 1.1s |
 | Running | Running `<cmd>` | It spins fast with a helical stripe racing round it | .9s | .3s |
 | Waiting (amber) | Waiting for approval · Y / N | It stops and breathes | 1.8s | .45s |
 | Done (green) | Done · 42s · 2 files | 42% of the dots draw a check (450ms from 250ms, one pop); the rest rest on a faint ring | once | 1.5s |
@@ -82,7 +82,7 @@
 - Triggered by the OS setting or `prefers-reduced-motion`.
 - Each state shows one static frame (T in §3), and each still frame shows its state.
 - State changes use a 150ms cross-fade instead of the morph. The brighten pulse becomes a single 150ms α bump with no movement.
-- The spins, the drifting patches, the writing, the band, the lens, the blink, the check's draw, the cross's shake and the ring flicker are all off. The label carries the state.
+- The spins, the sparks, the writing, the band, the lens, the blink, the check's draw, the cross's shake and the ring flicker are all off. The label carries the state.
 
 ## 6. GPUI notes
 - **One instanced draw:** a single quad pipeline with **at most 284 instances** per orb (86 in the pill). Instance data: `{pos: vec2, radius, alpha, tone_idx}`.
