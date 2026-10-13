@@ -1,0 +1,229 @@
+{
+  "$description": "rozu tokens v7 (CURRENT SPEC: v7.2 activity orb pill). Layered after tokens-v6.json. Deprecated from v6: bead.*, size.beadDiameter22, motion.morph 480ms, trail, arcBow, and the v5 progress line under the pill. CSS: tokens.css \u2192 tokens-v4.css \u2192 tokens-v5.css \u2192 tokens-v6.css \u2192 tokens-v7.css.",
+  "color": {
+    "orbDot": {
+      "$type": "color",
+      "$value": "#F4F1EA",
+      "$extensions": {
+        "rozu.themes": {
+          "dark": "#F4F1EA",
+          "light": "#25242A"
+        }
+      }
+    },
+    "orbPillBg": {
+      "$type": "color",
+      "$value": "#1B1B1D",
+      "$extensions": {
+        "rozu.themes": {
+          "dark": "#1B1B1D",
+          "light": "#ECECEF"
+        }
+      }
+    },
+    "orbPillBorder": {
+      "$type": "color",
+      "$value": "#2A2A2E",
+      "$extensions": {
+        "rozu.themes": {
+          "dark": "#2A2A2E",
+          "light": "#DCDCE0"
+        }
+      }
+    },
+    "orbLabel": {
+      "$type": "color",
+      "$value": "#F4F1EA",
+      "$extensions": {
+        "rozu.themes": {
+          "dark": "#F4F1EA",
+          "light": "#25242A"
+        }
+      }
+    },
+    "orbMeta": {
+      "$type": "color",
+      "$value": "#9A9AA2",
+      "$extensions": {
+        "rozu.themes": {
+          "dark": "#9A9AA2",
+          "light": "#55555C"
+        }
+      }
+    },
+    "orbWarning": {
+      "$type": "color",
+      "$value": "#FBBF24",
+      "$extensions": {
+        "rozu.themes": {
+          "dark": "#FBBF24",
+          "light": "#8A5206"
+        }
+      }
+    },
+    "orbSuccess": {
+      "$type": "color",
+      "$value": "#4ADE80",
+      "$extensions": {
+        "rozu.themes": {
+          "dark": "#4ADE80",
+          "light": "#126B33"
+        }
+      }
+    },
+    "orbDanger": {
+      "$type": "color",
+      "$value": "#F87171",
+      "$extensions": {
+        "rozu.themes": {
+          "dark": "#F87171",
+          "light": "#B91C1C"
+        }
+      }
+    }
+  },
+  "orb": {
+    "points": {
+      "$type": "number",
+      "$value": 120,
+      "$description": "hard max"
+    },
+    "points22": {
+      "$type": "number",
+      "$value": 60
+    },
+    "camera": {
+      "$type": "number",
+      "$value": 3.2
+    },
+    "depthAlphaFar": {
+      "$type": "number",
+      "$value": 0.12
+    },
+    "depthSizeFar": {
+      "$type": "number",
+      "$value": 0.4
+    },
+    "light": {
+      "$type": "number",
+      "$value": [
+        -0.55,
+        0.6,
+        0.58
+      ],
+      "$description": "\u03b1\u00d7(.62+.48\u03bb), size\u00d7(.9+.2\u03bb)"
+    },
+    "dotBase": {
+      "$type": "number",
+      "$value": 0.017,
+      "$description": "\u00d7 orb size"
+    },
+    "dotBase22": {
+      "$type": "number",
+      "$value": 0.05
+    },
+    "litSize": {
+      "$type": "number",
+      "$value": 1.55
+    },
+    "litAlpha": {
+      "$type": "number",
+      "$value": 0.5
+    },
+    "offlineAlpha": {
+      "$type": "number",
+      "$value": 0.85
+    },
+    "snapMaxDevicePx": {
+      "$type": "number",
+      "$value": 1.6
+    }
+  },
+  "motion": {
+    "orbMorph": {
+      "$type": "duration",
+      "$value": "600ms"
+    },
+    "orbStagger": {
+      "$type": "duration",
+      "$value": "2.5ms"
+    },
+    "orbLift": {
+      "$type": "number",
+      "$value": 0.55
+    },
+    "orbPulse": {
+      "$type": "duration",
+      "$value": "150ms"
+    },
+    "orbPulseLit": {
+      "$type": "number",
+      "$value": 0.8
+    },
+    "orbReducedFade": {
+      "$type": "duration",
+      "$value": "150ms"
+    },
+    "orbTempo": {
+      "thinking": {
+        "$type": "duration",
+        "$value": "1.6s"
+      },
+      "searching": {
+        "$type": "duration",
+        "$value": "2.4s"
+      },
+      "reading": {
+        "$type": "duration",
+        "$value": "2.2s"
+      },
+      "readingBand": {
+        "$type": "duration",
+        "$value": "4.4s"
+      },
+      "notes": {
+        "$type": "duration",
+        "$value": "3.6s"
+      },
+      "editing": {
+        "$type": "duration",
+        "$value": "530ms"
+      },
+      "running": {
+        "$type": "duration",
+        "$value": "800ms"
+      },
+      "waiting": {
+        "$type": "duration",
+        "$value": "2.6s"
+      },
+      "offlineTick": {
+        "$type": "duration",
+        "$value": "300ms"
+      },
+      "doneRipple": {
+        "$type": "duration",
+        "$value": "1.1s"
+      },
+      "settle": {
+        "$type": "duration",
+        "$value": "1.3s"
+      }
+    }
+  },
+  "size": {
+    "orb": {
+      "$type": "dimension",
+      "$value": "22px"
+    },
+    "orbLg": {
+      "$type": "dimension",
+      "$value": "88px"
+    },
+    "activityPill": {
+      "$type": "dimension",
+      "$value": "32px",
+      "$description": "34px in the dock"
+    }
+  }
+}
