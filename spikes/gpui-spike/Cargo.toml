@@ -3,9 +3,12 @@ name = "gpui-spike"
 version = "0.0.0"
 edition = "2024"
 publish = false
+default-run = "gpui-spike"
 
 [dependencies]
 gpui = { version = "0.2", features = ["runtime_shaders"] }
+# The v7.2 activity orb (`cargo run --bin activity_orb`); no rozu-core needed for the demo.
+rozu-activity = { path = "../../crates/rozu-activity", default-features = false }
 
 [profile.release]
 strip = true
