@@ -22,11 +22,50 @@ rozu-secrets = { path = "crates/rozu-secrets" }
 rozu-store = { path = "crates/rozu-store" }
 
 # External crates
+anyhow = "1"
+async-stream = "0.3"
+async-trait = "0.1"
 clap = { version = "4.5", features = ["derive"] }
+eventsource-stream = "0.2"
+fastrand = "2"
+futures = "0.3"
+ignore = "0.4"
+# keyring 3 (not 4): 4.x needs Rust 1.88 and reorganizes the store API.
+keyring = "3.6"
 regex = "1.11"
+# native-tls (Security.framework on macOS) instead of the rustls/aws-lc default, whose OpenSSL-style
+# license cargo-deny would reject.
+reqwest = { version = "0.13", default-features = false, features = [
+    "charset",
+    "http2",
+    "json",
+    "native-tls",
+    "stream",
+    "system-proxy",
+] }
+rpassword = "7"
+schemars = "1"
+secrecy = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1.47", features = [
+    "fs",
+    "io-std",
+    "io-util",
+    "macros",
+    "net",
+    "rt-multi-thread",
+    "signal",
+    "sync",
+    "time",
+] }
+tokio-util = "0.7"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
 # Dev/test
 assert_cmd = "2"
 predicates = "3"
+tempfile = "3"
+wiremock = "0.6"

@@ -107,12 +107,18 @@ Each one is a vertical slice that can be demoed, reviewed by Fred, and then revi
 **Done when:** CI is green on main, `cargo test --workspace` passes locally, and README links PLAN.
 
 ### M1: Core loop end-to-end in the CLI, one provider (≈2–3 weeks)
-- [ ] Internal message/tool model, `Provider` trait, OpenAI Responses adapter with streaming + tool calls
-- [ ] Tool registry plus `read_file`, `list_dir`, `grep` (read-only)
-- [ ] `rozu-cli chat`: streams text, executes tool calls, Ctrl-C cancels mid-stream
-- [ ] API key read from the keychain (`rozu-cli auth set openai`)
+- [x] Internal message/tool model, `Provider` trait, OpenAI Responses adapter with streaming + tool calls
+- [x] Tool registry plus `read_file`, `list_dir`, `grep` (read-only)
+- [x] `rozu-cli chat`: streams text, executes tool calls, Ctrl-C cancels mid-stream
+- [x] API key read from the keychain (`rozu-cli auth set openai`)
 
 **Done when:** "list the files and summarize README" works against the real API, and wiremock SSE fixture tests cover text, a tool call, an interrupted stream, and a 429 retry.
+- [ ] Live check against the real OpenAI API (needs Fred's key): `rozu chat "list the files and summarize README"`
+- [x] Fixture tests: text, tool-call round trip through the agent loop, truncated stream, cancel mid-stream, 429 → success (plus 5xx retry, retry exhaustion, 401)
+
+Notes: `rozu-core` depends on `rozu-tools` (the agent loop uses `ToolRegistry` directly); `rozu-providers`
+depends on `rozu-core` for the shared model and `Provider` trait. `ApprovalGate` lives in `rozu-core`; M1 denies
+anything that isn't `Risk::Read`.
 
 ### M2: All providers + retries (≈2 weeks)
 - [ ] Anthropic adapter (tool_use/tool_result, input_json_delta, prompt caching)

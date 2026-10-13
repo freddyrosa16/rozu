@@ -9,3 +9,19 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+secrecy.workspace = true
+thiserror.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { workspace = true, features = ["apple-native"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { workspace = true, features = ["windows-native"] }
+
+# Kernel keyutils for now: pure Rust, no libdbus needed in CI. Not persistent across reboots; switch
+# to Secret Service once Linux is a real target.
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { workspace = true, features = ["linux-native"] }
+
+[target.'cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))'.dependencies]
+keyring.workspace = true
