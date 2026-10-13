@@ -1,0 +1,11 @@
+[package]
+name = "rozu-tools"
+description = "Tool trait, registry, file/shell tools, approvals and sandbox for rozu"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]

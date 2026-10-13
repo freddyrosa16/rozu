@@ -100,9 +100,9 @@ pub trait SecretStore { fn get(&self, p: ProviderId) -> Result<Option<Credential
 Each one is a vertical slice that can be demoed, reviewed by Fred, and then reviewed by Chief.
 
 ### M0: Skeleton & CI (≈1 week)
-- [ ] Cargo workspace with empty crates, `rust-toolchain.toml` (stable), MIT license, `deny.toml`
-- [ ] GitHub Actions: fmt, clippy `-D warnings`, test on macOS + Ubuntu, `rust-cache`
-- [ ] `tracing` setup with a redaction layer
+- [x] Cargo workspace with empty crates, `rust-toolchain.toml` (stable), MIT license, `deny.toml`
+- [x] GitHub Actions: fmt, clippy `-D warnings`, test on macOS + Ubuntu, `rust-cache`
+- [x] `tracing` setup with a redaction layer
 
 **Done when:** CI is green on main, `cargo test --workspace` passes locally, and README links PLAN.
 
