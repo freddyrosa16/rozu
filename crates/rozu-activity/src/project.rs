@@ -46,16 +46,24 @@ fn js_round(v: f32) -> f32 {
 }
 
 /// Projection options.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ProjectOptions {
-    /// Multiply each dot's radius by its state size multiplier `s`, and skip dots with
-    /// `s ≤ .02`. Off by default: in the reference `drawOrb`, the perspective factor shadows
-    /// the state's `s` (`{...b, s: F/(F-z)}`), so the approved renders don't use it. Turning it
-    /// on shows the spec's 1.3× core dots, Editing's empty wedge and Offline's sparse third.
+    /// Multiply each dot's radius by its state size multiplier `s` (`base · s · k · …`), and
+    /// skip dots with `s ≤ .02`. On by default, as in the v7.3 reference `drawOrb`; this is what
+    /// draws the 1.3× cue dots, Editing's empty wedge and Offline's sparse cloud. Off reproduces
+    /// the v7.2 reference bug, where the perspective factor shadowed `s` (`{...b, s: F/(F-z)}`).
     pub apply_state_size: bool,
 }
 
-/// [`project_with`] with the default (reference) options.
+impl Default for ProjectOptions {
+    fn default() -> Self {
+        ProjectOptions {
+            apply_state_size: true,
+        }
+    }
+}
+
+/// [`project_with`] with the default (v7.3 reference) options.
 pub fn project(points: &[Sample], size_px: f32, scale: f32) -> Vec<DrawDot> {
     project_with(points, size_px, scale, ProjectOptions::default())
 }
@@ -89,8 +97,8 @@ pub fn project_with(
         .filter_map(|(_, b)| {
             let z = b.p[2];
             let k = CAMERA / (CAMERA - z);
-            let s = if opts.apply_state_size { k * b.s } else { k };
-            if s <= 0.02 {
+            let s = if opts.apply_state_size { b.s } else { 1.0 };
+            if s <= 0.02 || k <= 0.02 {
                 return None;
             }
             let depth = ((z + 1.2) / 2.4).clamp(0.0, 1.0);
@@ -99,7 +107,7 @@ pub fn project_with(
                 if l == 0.0 { 1.0 } else { l }
             };
             let lam = (LIGHT[0] * b.p[0] + LIGHT[1] * b.p[1] + LIGHT[2] * b.p[2]) / len * 0.5 + 0.5;
-            let r = (base * s * (0.4 + 0.6 * depth) * (0.9 + 0.2 * lam) * (1.0 + 0.55 * b.lit))
+            let r = (base * s * k * (0.4 + 0.6 * depth) * (0.9 + 0.2 * lam) * (1.0 + 0.55 * b.lit))
                 .max(px * 0.75);
             let mut a = (0.12 + 0.88 * depth) * (0.62 + 0.48 * lam);
             a = (a + 0.5 * b.lit).clamp(0.0, 1.0) * b.a;
@@ -159,9 +167,11 @@ mod tests {
         for state in ActivityState::ALL {
             let pts = Orb::new(state, 0.0).sample(0.8);
             let dots = project(&pts, 88.0, 2.0);
-            assert_eq!(dots.len(), pts.len());
-            // The nearest sample is drawn last.
-            let near = pts.iter().max_by(|a, b| a.p[2].total_cmp(&b.p[2])).unwrap();
+            // Dots with a state size of 0 (Editing's wedge, Offline's hidden cloud) are skipped.
+            let shown: Vec<_> = pts.iter().filter(|p| p.s > 0.02).collect();
+            assert_eq!(dots.len(), shown.len());
+            // The nearest drawn sample is drawn last.
+            let near = shown.iter().max_by(|a, b| a.p[2].total_cmp(&b.p[2])).unwrap();
             let k = CAMERA / (CAMERA - near.p[2]);
             assert!((dots.last().unwrap().x - (44.0 + near.p[0] * k * 35.2) as f32).abs() < 1e-3);
             for d in &dots {
@@ -209,14 +219,32 @@ mod tests {
     }
 
     #[test]
-    fn state_size_option_hides_editing_gap() {
+    fn state_size_is_applied_by_default() {
+        assert!(ProjectOptions::default().apply_state_size);
+        // Editing's wedge (s = 0) is empty by default; the v7.2 legacy mode draws every dot.
         let pts = Orb::new(ActivityState::Editing, 0.0).sample(0.06);
-        let all = project(&pts, 88.0, 2.0).len();
-        let opts = ProjectOptions {
-            apply_state_size: true,
+        let shown = project(&pts, 88.0, 2.0).len();
+        let legacy = ProjectOptions {
+            apply_state_size: false,
         };
-        let shown = project_with(&pts, 88.0, 2.0, opts).len();
-        assert_eq!(all, MAX_POINTS);
-        assert!(shown < all, "the wedge's dots have s = 0");
+        assert_eq!(project_with(&pts, 88.0, 2.0, legacy).len(), MAX_POINTS);
+        assert!(shown < MAX_POINTS, "the wedge's dots have s = 0");
+    }
+
+    #[test]
+    fn state_size_scales_the_radius() {
+        // radius = base · s · k · …: the same dot at s = 1.3 is 1.3× the s = 1 dot.
+        let mut a = Orb::new(ActivityState::Done, 0.0).sample(5.0)[0];
+        a.lit = 0.0;
+        a.s = 1.0;
+        let mut b = a;
+        b.s = 1.3;
+        let (ra, rb) = (
+            project(&[a], 88.0, 2.0)[0].radius,
+            project(&[b], 88.0, 2.0)[0].radius,
+        );
+        assert!((rb / ra - 1.3).abs() < 1e-5, "{ra} {rb}");
+        b.s = 0.02;
+        assert!(project(&[b], 88.0, 2.0).is_empty());
     }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "rozu-activity"
-description = "v7.2 activity indicator for rozu: the dot-orb generators, morph timeline, projection and agent-event mapping (no GUI deps)"
+description = "v7.3 activity indicator for rozu: the dot-orb generators, morph timeline, projection and agent-event mapping (no GUI deps)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

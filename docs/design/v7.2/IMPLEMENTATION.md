@@ -1,5 +1,7 @@
 # v7.2 activity orb: implementation notes
 
+> **Superseded in part by v7.3** ([`../v7.3/IMPLEMENTATION.md`](../v7.3/IMPLEMENTATION.md)): six states are redesigned (Searching, Notes, Waiting, Done, Error, Offline), and the state size `s` is now applied by default. The rest of this file still applies.
+
 ## What's implemented
 
 **`crates/rozu-activity`** (workspace crate, pure Rust; deps: `serde_json`, plus `rozu-core` behind the default `core` feature):
@@ -47,14 +49,13 @@ Demo keys:
 - **← / →**: previous / next state
 - **T**: dark / light theme
 - **B**: low power (30fps)
-- **S**: apply the state size multiplier (see Gaps)
+- **S**: toggle the state size multiplier (on by default since v7.3; see Gaps)
 
 ## Deviations and gaps
 
-- **State size `s` isn't applied by default.** In the reference `drawOrb`, `{...b, s: F/(F-z)}` overwrites each dot's state `s` with the perspective factor. So the approved renders don't have the spec's 1.3× core dots, Editing's empty wedge or Offline's "sparse third".
-  - `project` matches the reference.
-  - `ProjectOptions { apply_state_size: true }` (key **S** in the demo) applies `s` as the spec text describes.
-  - Design needs to pick one.
+- **State size `s` wasn't applied by default (resolved in v7.3).** In the v7.2 reference `drawOrb`, `{...b, s: F/(F-z)}` overwrites each dot's state `s` with the perspective factor. So the approved renders don't have the spec's 1.3× core dots, Editing's empty wedge or Offline's "sparse third".
+  - v7.3 fixed this in the reference, and `apply_state_size` now defaults to `true`.
+  - Key **S** in the demo toggles back to the v7.2 behaviour.
 - **Interrupts blend from the live sample.** The reference blends from `gen(prev)`, which jumps if a change interrupts a morph that's still running. The Rust version recurses into the previous segment while its morph is unfinished, as handoff §4 asks. Once a morph has finished, the two are identical.
 - **Reduced-motion cross-fade:** to stay at ≤120 dots, the 150ms change is a per-dot dissolve (dot i switches at `hash(i+101)`) with an α bump of `×(1+.6·sin πx)`. No dot moves.
 - **No "approval pending" agent event.** `AgentEvent::Approval` arrives after the decision, so Waiting has to come from the host's `ApprovalGate` via `ActivityEvent::from(&ApprovalRequest)`.
