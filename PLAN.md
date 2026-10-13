@@ -121,11 +121,23 @@ depends on `rozu-core` for the shared model and `Provider` trait. `ApprovalGate`
 anything that isn't `Risk::Read`.
 
 ### M2: All providers + retries (≈2 weeks)
-- [ ] Anthropic adapter (tool_use/tool_result, input_json_delta, prompt caching)
-- [ ] xAI via the OpenAI adapter, plus a provider/model switch in the CLI
-- [ ] Shared retry/backoff and typed errors; usage accounting
+- [x] Anthropic adapter (tool_use/tool_result, input_json_delta, prompt caching)
+- [x] xAI via the OpenAI adapter, plus a provider/model switch in the CLI
+- [x] Shared retry/backoff and typed errors; usage accounting
 
 **Done when:** the same scripted task passes on all 3 providers, and fixture tests pass for each adapter.
+- [x] Scripted cross-provider task (fake `lookup` tool through the agent loop) passes against mocked OpenAI, Anthropic and xAI
+- [x] Fixture tests: Anthropic text, tool_use round trip, stream `error` event, 529 overloaded → retry (plus persistent 529, 401, 400); xAI via the OpenAI adapter with its own base URL and key; registry lookup
+- [ ] Live check against the real Anthropic API (needs Fred's key): `rozu chat --provider anthropic "list the files and summarize README"`
+- [ ] Live check against the real xAI API (needs Fred's key): `rozu chat --provider xai "list the files and summarize README"`
+- [ ] Verify the model list prices against each provider's pricing page
+
+Notes: the registry (`rozu_providers::registry`) owns providers, models and default models; `rozu models`
+lists them. Errors are unified as `Auth`, `RateLimited`, `BadRequest`, `Server` (5xx incl. 529), `Network`,
+`Cancelled`, plus in-stream `Api`/`Decode`/`UnexpectedEof`. Usage is normalized so `input_tokens` includes
+cached input (Anthropic reports cache reads/writes separately); cost uses the cached-input price for cache
+reads and counts Anthropic cache writes at the base input price, so it slightly underestimates. xAI needed no
+adapter flags against the fixtures; add one to `OpenAiConfig` if the live check shows a difference.
 
 ### M3: Write tools, shell, sandbox, approvals (≈3 weeks)
 - [ ] `apply_patch`/`write_file`, `shell` with timeout + process-group kill

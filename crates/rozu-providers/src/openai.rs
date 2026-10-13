@@ -2,16 +2,15 @@
 //!
 //! Requests are stateless (`store: false`): the whole conversation is sent each time, with tool
 //! calls as `function_call` items and tool results as `function_call_output` items. The base URL
-//! is configurable so tests can point at wiremock and xAI can reuse the adapter later.
+//! and provider id are configurable so tests can point at wiremock and xAI can reuse the adapter
+//! (see [`crate::xai`]).
 
 use std::collections::HashMap;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use eventsource_stream::Eventsource;
-use futures::{Stream, StreamExt};
+use futures::StreamExt;
 use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderValue};
-use reqwest::{Response, StatusCode};
 use rozu_core::{
     ChatRequest, ContentPart, EventStream, ModelInfo, Provider, ProviderError, ProviderResult,
     Role, StopReason, StreamEvent, Usage,
@@ -19,9 +18,10 @@ use rozu_core::{
 use secrecy::{ExposeSecret, SecretString};
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, warn};
+use tracing::debug;
 
-use crate::retry::RetryPolicy;
+use crate::retry::{RetryPolicy, send_with_retry};
+use crate::sse::{self, Decoder};
 
 pub const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 pub const PROVIDER_ID: &str = "openai";
@@ -60,6 +60,12 @@ impl OpenAiConfig {
         self.retry = retry;
         self
     }
+
+    /// The id reported by [`Provider::id`] (e.g. `xai` when this adapter serves xAI).
+    pub fn with_provider_id(mut self, provider_id: impl Into<String>) -> Self {
+        self.provider_id = provider_id.into();
+        self
+    }
 }
 
 #[derive(Debug)]
@@ -71,12 +77,7 @@ pub struct OpenAiProvider {
 
 impl OpenAiProvider {
     pub fn new(config: OpenAiConfig) -> ProviderResult<Self> {
-        let client = reqwest::Client::builder()
-            .user_agent(concat!("rozu/", env!("CARGO_PKG_VERSION")))
-            .connect_timeout(config.connect_timeout)
-            .read_timeout(config.read_timeout)
-            .build()
-            .map_err(|err| ProviderError::Transport(err.to_string()))?;
+        let client = sse::http_client(config.connect_timeout, config.read_timeout)?;
         let endpoint = format!("{}/responses", config.base_url);
         Ok(Self {
             client,
@@ -95,57 +96,6 @@ impl OpenAiProvider {
         value.set_sensitive(true);
         Ok(value)
     }
-
-    /// Sends the request, retrying 429 / 5xx / connection failures per the retry policy.
-    async fn send(&self, body: &Value, cancel: &CancellationToken) -> ProviderResult<Response> {
-        let policy = self.config.retry;
-        let mut attempt = 0;
-        loop {
-            let request = self
-                .client
-                .post(&self.endpoint)
-                .header(AUTHORIZATION, self.auth_header()?)
-                .header(ACCEPT, "text/event-stream")
-                .json(body)
-                .send();
-            let result = tokio::select! {
-                biased;
-                _ = cancel.cancelled() => return Err(ProviderError::Cancelled),
-                result = request => result,
-            };
-
-            let delay = match result {
-                Ok(response) if response.status().is_success() => return Ok(response),
-                Ok(response) => {
-                    let status = response.status();
-                    let retryable =
-                        status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error();
-                    if !retryable || attempt >= policy.max_retries {
-                        return Err(error_from_response(response, attempt + 1).await);
-                    }
-                    let delay = policy
-                        .retry_after(response.headers())
-                        .unwrap_or_else(|| policy.backoff(attempt));
-                    warn!(%status, attempt = attempt + 1, ?delay, "retrying OpenAI request");
-                    delay
-                }
-                Err(err)
-                    if (err.is_connect() || err.is_timeout()) && attempt < policy.max_retries =>
-                {
-                    let delay = policy.backoff(attempt);
-                    warn!(error = %err, attempt = attempt + 1, ?delay, "retrying OpenAI request");
-                    delay
-                }
-                Err(err) => return Err(ProviderError::Transport(err.to_string())),
-            };
-            attempt += 1;
-            tokio::select! {
-                biased;
-                _ = cancel.cancelled() => return Err(ProviderError::Cancelled),
-                _ = tokio::time::sleep(delay) => {}
-            }
-        }
-    }
 }
 
 #[async_trait]
@@ -160,9 +110,17 @@ impl Provider for OpenAiProvider {
         cancel: CancellationToken,
     ) -> ProviderResult<EventStream> {
         let body = request_body(&req);
-        debug!(model = %req.model, messages = req.messages.len(), "POST {}", self.endpoint);
-        let response = self.send(&body, &cancel).await?;
-        Ok(parse_sse(response, cancel).boxed())
+        debug!(provider = self.id(), model = %req.model, messages = req.messages.len(), "POST {}", self.endpoint);
+        let response = send_with_retry(self.config.retry, self.id(), &cancel, || {
+            Ok(self
+                .client
+                .post(&self.endpoint)
+                .header(AUTHORIZATION, self.auth_header()?)
+                .header(ACCEPT, "text/event-stream")
+                .json(&body))
+        })
+        .await?;
+        Ok(sse::decode(response, SseState::default(), cancel).boxed())
     }
 }
 
@@ -250,81 +208,6 @@ pub fn request_body(req: &ChatRequest) -> Value {
     body
 }
 
-async fn error_from_response(response: Response, attempts: u32) -> ProviderError {
-    let status = response.status();
-    let text = response.text().await.unwrap_or_default();
-    let message = serde_json::from_str::<Value>(&text)
-        .ok()
-        .and_then(|v| v["error"]["message"].as_str().map(str::to_owned))
-        .unwrap_or_else(|| {
-            if text.is_empty() {
-                status
-                    .canonical_reason()
-                    .unwrap_or("request failed")
-                    .to_owned()
-            } else {
-                text
-            }
-        });
-    match status {
-        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => ProviderError::Auth {
-            status: status.as_u16(),
-            message,
-        },
-        StatusCode::TOO_MANY_REQUESTS => ProviderError::RateLimited { attempts, message },
-        _ => ProviderError::Http {
-            status: status.as_u16(),
-            message,
-        },
-    }
-}
-
-fn parse_sse(
-    response: Response,
-    cancel: CancellationToken,
-) -> impl Stream<Item = ProviderResult<StreamEvent>> + Send + 'static {
-    async_stream::stream! {
-        let mut events = response.bytes_stream().eventsource();
-        let mut state = SseState::default();
-        loop {
-            let next = tokio::select! {
-                biased;
-                _ = cancel.cancelled() => return,
-                next = events.next() => next,
-            };
-            match next {
-                None => {
-                    yield Err(ProviderError::UnexpectedEof);
-                    return;
-                }
-                Some(Err(err)) => {
-                    yield Err(ProviderError::Transport(err.to_string()));
-                    return;
-                }
-                Some(Ok(event)) => {
-                    if event.data.trim() == "[DONE]" {
-                        continue;
-                    }
-                    match state.handle(&event.data) {
-                        Ok(out) => {
-                            for item in out {
-                                yield Ok(item);
-                            }
-                            if state.done {
-                                return;
-                            }
-                        }
-                        Err(err) => {
-                            yield Err(err);
-                            return;
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
 #[derive(Debug)]
 struct CallState {
     call_id: String,
@@ -341,7 +224,7 @@ struct SseState {
     done: bool,
 }
 
-impl SseState {
+impl Decoder for SseState {
     fn handle(&mut self, data: &str) -> ProviderResult<Vec<StreamEvent>> {
         let event: Value = serde_json::from_str(data)
             .map_err(|err| ProviderError::Decode(format!("{err} in event: {data}")))?;
@@ -450,6 +333,12 @@ impl SseState {
         Ok(out)
     }
 
+    fn is_done(&self) -> bool {
+        self.done
+    }
+}
+
+impl SseState {
     /// Ends a function call once; if no argument deltas arrived, sends the full arguments first.
     fn end_call(&mut self, item_id: &str, arguments: &str, out: &mut Vec<StreamEvent>) {
         let Some(call) = self.calls.get_mut(item_id) else {
@@ -471,25 +360,20 @@ impl SseState {
     }
 }
 
-/// Known OpenAI models with list prices (USD per 1M tokens) as of 2026-10.
+/// Known OpenAI models: (id, context window, USD per 1M input / output / cached input tokens).
+// Prices NEED VERIFICATION against https://openai.com/api/pricing before relying on cost totals;
+// they are list prices as last checked by hand and change without notice.
 pub fn models() -> Vec<ModelInfo> {
-    [
-        ("gpt-5.1", 400_000, 1.25, 10.0),
-        ("gpt-5", 400_000, 1.25, 10.0),
-        ("gpt-5-mini", 400_000, 0.25, 2.0),
-        ("gpt-5-nano", 400_000, 0.05, 0.40),
-        ("gpt-4.1", 1_047_576, 2.0, 8.0),
-    ]
-    .into_iter()
-    .map(|(id, context_window, price_in, price_out)| ModelInfo {
-        id: id.to_owned(),
-        provider: PROVIDER_ID.to_owned(),
-        context_window,
-        supports_tools: true,
-        price_in_per_mtok: price_in,
-        price_out_per_mtok: price_out,
-    })
-    .collect()
+    crate::registry::model_table(
+        PROVIDER_ID,
+        &[
+            ("gpt-5.1", 400_000, 1.25, 10.0, 0.125),
+            ("gpt-5", 400_000, 1.25, 10.0, 0.125),
+            ("gpt-5-mini", 400_000, 0.25, 2.0, 0.025),
+            ("gpt-5-nano", 400_000, 0.05, 0.40, 0.005),
+            ("gpt-4.1", 1_047_576, 2.0, 8.0, 0.50),
+        ],
+    )
 }
 
 /// Looks up `id` in [`models`].

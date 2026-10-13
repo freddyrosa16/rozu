@@ -5,6 +5,7 @@ use std::process::ExitCode;
 
 use anyhow::{Context, bail};
 use clap::{Subcommand, ValueEnum};
+use rozu_providers::registry;
 use rozu_secrets::{KeyringStore, SERVICE, SecretStore, env_var_for};
 use secrecy::SecretString;
 
@@ -21,20 +22,31 @@ pub enum AuthCommand {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum ProviderName {
     Openai,
+    Anthropic,
+    Xai,
 }
 
 impl ProviderName {
-    const ALL: [Self; 1] = [Self::Openai];
+    const ALL: [Self; 3] = [Self::Openai, Self::Anthropic, Self::Xai];
 
     pub fn id(self) -> &'static str {
         match self {
             Self::Openai => "openai",
+            Self::Anthropic => "anthropic",
+            Self::Xai => "xai",
         }
     }
 
     fn label(self) -> &'static str {
+        registry::provider_info(self.id()).map_or("API", |p| p.label)
+    }
+
+    /// The prefix this provider's API keys usually start with.
+    fn key_prefix(self) -> &'static str {
         match self {
-            Self::Openai => "OpenAI",
+            Self::Openai => "sk-",
+            Self::Anthropic => "sk-ant-",
+            Self::Xai => "xai-",
         }
     }
 }
@@ -88,8 +100,12 @@ fn read_key(provider: ProviderName) -> anyhow::Result<SecretString> {
     if key.is_empty() {
         bail!("no API key given");
     }
-    if provider == ProviderName::Openai && !key.starts_with("sk-") {
-        eprintln!("warning: OpenAI API keys usually start with `sk-`; saving it anyway.");
+    if !key.starts_with(provider.key_prefix()) {
+        eprintln!(
+            "warning: {} API keys usually start with `{}`; saving it anyway.",
+            provider.label(),
+            provider.key_prefix()
+        );
     }
     Ok(SecretString::from(key.to_owned()))
 }

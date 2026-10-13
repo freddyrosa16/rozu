@@ -26,21 +26,34 @@ pub trait Provider: Send + Sync {
     ) -> ProviderResult<EventStream>;
 }
 
+/// Errors shared by every provider adapter, so callers can react without knowing the provider.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ProviderError {
+    /// HTTP 401 / 403: missing, wrong or unauthorized API key.
     #[error("authentication failed (HTTP {status}): {message}")]
     Auth { status: u16, message: String },
+    /// HTTP 429 that outlasted the retries.
     #[error("rate limited (HTTP 429) after {attempts} attempts: {message}")]
     RateLimited { attempts: u32, message: String },
-    #[error("HTTP {status}: {message}")]
-    Http { status: u16, message: String },
+    /// Any other 4xx: bad parameters, unknown model, prompt too long. Never retried.
+    #[error("request rejected (HTTP {status}): {message}")]
+    BadRequest { status: u16, message: String },
+    /// 5xx (including Anthropic's 529 "overloaded") that outlasted the retries.
+    #[error("server error (HTTP {status}) after {attempts} attempts: {message}")]
+    Server {
+        status: u16,
+        attempts: u32,
+        message: String,
+    },
+    /// An error event inside an otherwise successful response stream.
     #[error("provider error{}: {message}", code.as_deref().map(|c| format!(" ({c})")).unwrap_or_default())]
     Api {
         code: Option<String>,
         message: String,
     },
+    /// Connection, TLS or timeout failure.
     #[error("network error: {0}")]
-    Transport(String),
+    Network(String),
     #[error("malformed response stream: {0}")]
     Decode(String),
     #[error("response stream ended before the model finished")]
@@ -49,9 +62,46 @@ pub enum ProviderError {
     Cancelled,
 }
 
+impl ProviderError {
+    /// The typed error for a failed HTTP response after `attempts` requests.
+    pub fn from_status(status: u16, attempts: u32, message: String) -> Self {
+        match status {
+            401 | 403 => Self::Auth { status, message },
+            429 => Self::RateLimited { attempts, message },
+            500..=599 => Self::Server {
+                status,
+                attempts,
+                message,
+            },
+            _ => Self::BadRequest { status, message },
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn classifies_statuses() {
+        let err = |status| ProviderError::from_status(status, 2, "m".into());
+        assert!(matches!(err(401), ProviderError::Auth { status: 401, .. }));
+        assert!(matches!(err(403), ProviderError::Auth { .. }));
+        assert!(matches!(
+            err(429),
+            ProviderError::RateLimited { attempts: 2, .. }
+        ));
+        assert!(matches!(err(400), ProviderError::BadRequest { .. }));
+        assert!(matches!(err(404), ProviderError::BadRequest { .. }));
+        assert!(matches!(
+            err(529),
+            ProviderError::Server {
+                status: 529,
+                attempts: 2,
+                ..
+            }
+        ));
+    }
 
     #[test]
     fn api_error_display() {

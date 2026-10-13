@@ -183,12 +183,19 @@ pub struct ModelInfo {
     pub price_in_per_mtok: f64,
     /// USD per million output tokens.
     pub price_out_per_mtok: f64,
+    /// USD per million input tokens served from the prompt cache.
+    pub price_cached_in_per_mtok: f64,
 }
 
 impl ModelInfo {
-    /// Estimated USD cost of `usage` at list prices (prompt-cache discounts are ignored).
+    /// Estimated USD cost of `usage` at list prices: cached input at the cache-read price, the
+    /// rest of the input at the normal price. Cache writes (Anthropic bills them at a premium)
+    /// are counted as normal input, so this can slightly underestimate.
     pub fn cost_usd(&self, usage: &Usage) -> f64 {
-        (usage.input_tokens as f64 * self.price_in_per_mtok
+        let cached = usage.cached_input_tokens.min(usage.input_tokens);
+        let uncached = usage.input_tokens - cached;
+        (uncached as f64 * self.price_in_per_mtok
+            + cached as f64 * self.price_cached_in_per_mtok
             + usage.output_tokens as f64 * self.price_out_per_mtok)
             / 1_000_000.0
     }
@@ -251,7 +258,12 @@ mod tests {
             supports_tools: true,
             price_in_per_mtok: 1.0,
             price_out_per_mtok: 10.0,
+            price_cached_in_per_mtok: 0.1,
         };
         assert!((model.cost_usd(&total) - 3.0).abs() < 1e-9);
+
+        // Half the input from the cache: 0.5 * 1.0 + 0.5 * 0.1 + 0.2 * 10.0.
+        total.cached_input_tokens = 500_000;
+        assert!((model.cost_usd(&total) - 2.55).abs() < 1e-9);
     }
 }
