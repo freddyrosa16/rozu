@@ -11,14 +11,20 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 
+use std::sync::Mutex;
+
 use anyhow::{Context, anyhow};
-use clap::Args;
+use clap::{Args, ValueEnum};
+use rozu_cli_providers::claude::install::{CLAUDE_BIN_ENV, find_claude_binary};
+use rozu_cli_providers::{ClaudeCliConfig, ClaudeCliProvider};
 use rozu_core::{
     Agent, AgentConfig, AgentError, AgentEvent, ApprovalMode, ApprovalPolicy, ApprovalRecord,
-    DEFAULT_MAX_STEPS, Decision, DecisionSource, Session, TurnOutcome, TurnUsage, approvals_path,
+    DEFAULT_MAX_STEPS, Decision, DecisionSource, Provider, Session, TurnOutcome, TurnUsage,
+    approvals_path,
 };
-use rozu_providers::{ModelChoice, registry};
-use rozu_secrets::{KeyringStore, env_var_for, resolve_api_key};
+use rozu_providers::registry::CLAUDE_CLI_ID;
+use rozu_providers::{ModelChoice, PROVIDERS, registry};
+use rozu_secrets::{KeyringStore, SecretStore, env_var_for, resolve_api_key};
 use rozu_tools::{Risk, ToolRegistry, Workspace, platform_sandbox};
 use tokio::sync::mpsc;
 
@@ -30,10 +36,13 @@ const MAX_STEPS_LIMIT: u64 = 200;
 
 #[derive(Debug, Args)]
 pub struct ChatArgs {
-    /// Provider: openai, anthropic or xai. Defaults to the model's provider, else openai.
+    /// Provider: openai, anthropic, xai (API keys) or claude-cli (your Claude subscription via
+    /// the official claude CLI). Defaults to the model's provider, else openai, or claude-cli
+    /// when no API key is configured.
     #[arg(long, env = "ROZU_PROVIDER")]
     provider: Option<String>,
-    /// Model id or provider/model (see `rozu models`). Defaults to the provider's default model.
+    /// Model id or provider/model (see `rozu models`); for claude-cli also sonnet, opus, haiku
+    /// or any id the claude CLI accepts. Defaults to the provider's default model.
     #[arg(long, env = "ROZU_MODEL")]
     model: Option<String>,
     /// Directory the agent works in. File tools reject paths outside it, and sandboxed shell
@@ -67,27 +76,35 @@ struct AgentFactory {
     tools: Arc<ToolRegistry>,
     workspace: Workspace,
     max_steps: usize,
+    approval: ApprovalArg,
     policy: Arc<ApprovalPolicy>,
     gate: Arc<CliGate>,
+    /// One claude CLI session for the whole chat, kept across `/model` switches.
+    claude: Mutex<Option<Arc<ClaudeCliProvider>>>,
 }
 
 impl AgentFactory {
-    /// Resolves the provider's key (env var first, then the keychain) and builds the agent.
+    /// Resolves the provider's key (env var first, then the keychain) — or, for claude-cli, the
+    /// claude binary — and builds the agent.
     fn build(&self, choice: &ModelChoice) -> anyhow::Result<Agent> {
-        let provider = choice.provider;
-        let (key, _source) =
-            resolve_api_key(&self.store, provider.id, |var| std::env::var(var).ok())?.ok_or_else(
-                || {
-                    anyhow!(
-                        "no {} API key: run `rozu auth set {}` or set {}",
-                        provider.label,
-                        provider.id,
-                        env_var_for(provider.id).unwrap_or("its API key variable"),
-                    )
-                },
-            )?;
-        let base_url = base_url_override(provider.id);
-        let provider = registry::build(provider, key, base_url.as_deref(), None)?;
+        let provider: Arc<dyn Provider> = if choice.provider.is_cli_backed() {
+            self.claude_provider()?
+        } else {
+            let provider = choice.provider;
+            let (key, _source) =
+                resolve_api_key(&self.store, provider.id, |var| std::env::var(var).ok())?
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "no {} API key: run `rozu auth set {}` or set {} (or use your Claude \
+                             subscription: --provider claude-cli)",
+                            provider.label,
+                            provider.id,
+                            env_var_for(provider.id).unwrap_or("its API key variable"),
+                        )
+                    })?;
+            let base_url = base_url_override(provider.id);
+            registry::build(provider, key, base_url.as_deref(), None)?
+        };
         let mut config = AgentConfig::new(&choice.model).with_model_info(choice.info.clone());
         config.max_steps = self.max_steps;
         Ok(
@@ -96,6 +113,70 @@ impl AgentFactory {
                 .with_approval_gate(self.gate.clone()),
         )
     }
+
+    /// The claude CLI provider, started once. Claude reaches rozu's tools through
+    /// `rozu mcp-serve` (this binary), which asks this process's gate when approval is needed.
+    fn claude_provider(&self) -> anyhow::Result<Arc<dyn Provider>> {
+        let mut cached = self.claude.lock().expect("claude provider lock");
+        if let Some(provider) = cached.as_ref() {
+            return Ok(provider.clone());
+        }
+        let binary = find_claude_binary().ok_or_else(|| {
+            anyhow!(
+                "the claude CLI isn't installed (looked on PATH and in ~/.local/bin): install \
+                 Claude Code and log in with `claude` → /login, or set {CLAUDE_BIN_ENV}"
+            )
+        })?;
+        let rozu = std::env::current_exe().context("cannot locate the rozu binary")?;
+        let approval = self
+            .approval
+            .to_possible_value()
+            .expect("approval values are named");
+        let mcp_args = vec![
+            "mcp-serve".to_owned(),
+            "--workspace".to_owned(),
+            self.workspace.root().display().to_string(),
+            "--approval".to_owned(),
+            approval.get_name().to_owned(),
+        ];
+        let config = ClaudeCliConfig::new(
+            binary,
+            self.workspace.root(),
+            rozu,
+            mcp_args,
+            self.gate.clone(),
+        );
+        let provider = Arc::new(
+            ClaudeCliProvider::new(config).context("could not prepare the claude CLI session")?,
+        );
+        *cached = Some(provider.clone());
+        Ok(provider)
+    }
+}
+
+/// The provider to use when neither `--provider` nor `--model` is given: claude-cli when no API
+/// key is configured anywhere, else the registry's default.
+fn default_provider(
+    provider: Option<String>,
+    model: Option<&str>,
+    any_api_key: impl FnOnce() -> bool,
+) -> Option<String> {
+    match (provider, model) {
+        (Some(provider), _) => Some(provider),
+        (None, Some(_)) => None,
+        (None, None) if any_api_key() => None,
+        (None, None) => Some(CLAUDE_CLI_ID.to_owned()),
+    }
+}
+
+/// Whether any API-key provider has a key (env var or keychain).
+fn any_api_key(store: &dyn SecretStore) -> bool {
+    PROVIDERS.iter().filter(|p| p.needs_api_key()).any(|p| {
+        matches!(
+            resolve_api_key(store, p.id, |var| std::env::var(var).ok()),
+            Ok(Some(_))
+        )
+    })
 }
 
 /// `OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL` or `XAI_BASE_URL`, if set: for proxies and tests.
@@ -115,7 +196,11 @@ fn parse_model_switch(arg: &str) -> Result<ModelChoice, registry::RegistryError>
 }
 
 async fn chat(args: ChatArgs) -> anyhow::Result<ExitCode> {
-    let mut choice = registry::resolve(args.provider.as_deref(), args.model.as_deref())?;
+    let store = KeyringStore::default();
+    let provider = default_provider(args.provider.clone(), args.model.as_deref(), || {
+        any_api_key(&store)
+    });
+    let mut choice = registry::resolve(provider.as_deref(), args.model.as_deref())?;
     let workspace = Workspace::new(&args.workspace)
         .with_context(|| format!("cannot open workspace {}", args.workspace.display()))?;
     let mode = ApprovalMode::from(args.approval);
@@ -127,12 +212,14 @@ async fn chat(args: ChatArgs) -> anyhow::Result<ExitCode> {
     })?;
     let (gate, mut asks) = CliGate::new();
     let factory = AgentFactory {
-        store: KeyringStore::default(),
+        store,
         tools: Arc::new(ToolRegistry::standard()),
         workspace: workspace.clone(),
         max_steps: args.max_steps,
+        approval: args.approval,
         policy: Arc::new(policy),
         gate,
+        claude: Mutex::default(),
     };
     let mut agent = factory.build(&choice)?;
     let mut session = Session::with_system_prompt(system_prompt(&workspace, mode));
@@ -486,6 +573,23 @@ mod tests {
         );
         assert_eq!(command_arg("/models", "/model"), None);
         assert_eq!(command_arg("hello", "/model"), None);
+    }
+
+    #[test]
+    fn claude_cli_is_the_default_without_api_keys() {
+        let no_keys = || false;
+        let keys = || true;
+        assert_eq!(
+            default_provider(None, None, no_keys).as_deref(),
+            Some("claude-cli")
+        );
+        assert_eq!(default_provider(None, None, keys), None);
+        // An explicit choice always wins, and a model picks its own provider.
+        assert_eq!(
+            default_provider(Some("xai".into()), None, no_keys).as_deref(),
+            Some("xai")
+        );
+        assert_eq!(default_provider(None, Some("gpt-5.1"), no_keys), None);
     }
 
     #[test]

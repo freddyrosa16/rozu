@@ -11,11 +11,28 @@ pub type ProviderResult<T> = Result<T, ProviderError>;
 /// A stream of normalized events for one model response.
 pub type EventStream = BoxStream<'static, ProviderResult<StreamEvent>>;
 
-/// Streams model responses. Implementations live in `rozu-providers`.
+/// Who runs the tool loop.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ProviderKind {
+    /// A model API: each stream is one model response, and rozu's agent loop runs the tools.
+    #[default]
+    Model,
+    /// A whole agent (a vendor CLI) that runs its own tool loop. One stream is one user turn:
+    /// the provider sends only the newest user message, reaches rozu's tools through its own
+    /// channel (MCP), and reports tool calls, [`StreamEvent::ToolResult`]s and
+    /// [`StreamEvent::Approval`]s for display. The agent forwards them and executes nothing.
+    AgentBackend,
+}
+
+/// Streams model responses. Implementations live in `rozu-providers` and `rozu-cli-providers`.
 #[async_trait]
 pub trait Provider: Send + Sync {
     /// Stable provider id, e.g. `"openai"`.
     fn id(&self) -> &str;
+
+    fn kind(&self) -> ProviderKind {
+        ProviderKind::Model
+    }
 
     /// Starts one model response. Retries (if any) happen before the stream is returned. The
     /// stream ends after [`StreamEvent::Done`], on the first error, or when `cancel` fires.
@@ -60,6 +77,16 @@ pub enum ProviderError {
     UnexpectedEof,
     #[error("cancelled")]
     Cancelled,
+    /// A CLI-backed provider's binary couldn't be found or started.
+    #[error("the `{cli}` CLI is not available: {message}")]
+    CliNotFound { cli: String, message: String },
+    /// A CLI-backed provider's CLI isn't logged in. `hint` says how to log in with the vendor's
+    /// own CLI (rozu never handles the credentials).
+    #[error("the `{cli}` CLI is not logged in: {hint}")]
+    NotLoggedIn { cli: String, hint: String },
+    /// A subscription's usage or rate limit was reached (not retried).
+    #[error("usage limit reached: {message}")]
+    UsageLimit { message: String },
 }
 
 impl ProviderError {

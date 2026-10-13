@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use rozu_core::{LongContextPrices, ModelInfo, Provider, ProviderResult};
+use rozu_core::{LongContextPrices, ModelInfo, Provider, ProviderError, ProviderResult};
 use secrecy::SecretString;
 
 use crate::anthropic::{self, AnthropicConfig, AnthropicProvider};
@@ -16,7 +16,14 @@ enum Kind {
     OpenAi,
     Anthropic,
     Xai,
+    /// The official `claude` CLI on the user's subscription; built by `rozu-cli-providers`.
+    ClaudeCli,
 }
+
+/// Id of the CLI-backed Claude provider (`rozu_cli_providers::claude::PROVIDER_ID`).
+pub const CLAUDE_CLI_ID: &str = "claude-cli";
+/// Context window assumed for the `claude` CLI's model aliases.
+const CLAUDE_CLI_CONTEXT: u32 = 200_000;
 
 /// A provider rozu can talk to.
 #[derive(Debug, PartialEq, Eq)]
@@ -52,14 +59,34 @@ pub const PROVIDERS: &[ProviderInfo] = &[
         default_model: "grok-4.7",
         kind: Kind::Xai,
     },
+    ProviderInfo {
+        id: CLAUDE_CLI_ID,
+        label: "Claude (subscription, via the claude CLI)",
+        default_base_url: "",
+        default_model: "sonnet",
+        kind: Kind::ClaudeCli,
+    },
 ];
+
+impl ProviderInfo {
+    /// Whether this provider drives a vendor CLI on the user's subscription (no API key; built
+    /// by `rozu-cli-providers`, not [`build`]).
+    pub fn is_cli_backed(&self) -> bool {
+        self.kind == Kind::ClaudeCli
+    }
+
+    /// Whether this provider needs an API key.
+    pub fn needs_api_key(&self) -> bool {
+        !self.is_cli_backed()
+    }
+}
 
 /// Used when neither a provider nor a model is given.
 pub const DEFAULT_PROVIDER: &str = openai::PROVIDER_ID;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum RegistryError {
-    #[error("unknown provider `{0}` (known: openai, anthropic, xai)")]
+    #[error("unknown provider `{0}` (known: openai, anthropic, xai, claude-cli)")]
     UnknownProvider(String),
     #[error(
         "can't tell which provider serves `{0}`; use provider/model, e.g. anthropic/{0}, or see `rozu models`"
@@ -103,6 +130,12 @@ pub fn models_for(provider: &str) -> Vec<ModelInfo> {
         Some(Kind::OpenAi) => openai::models(),
         Some(Kind::Anthropic) => anthropic::models(),
         Some(Kind::Xai) => xai::models(),
+        // The CLI's aliases, which follow the newest model of each family. Any other id the CLI
+        // accepts works too (see `resolve`).
+        Some(Kind::ClaudeCli) => ["sonnet", "opus", "haiku"]
+            .into_iter()
+            .map(|id| ModelInfo::subscription(CLAUDE_CLI_ID, id, CLAUDE_CLI_CONTEXT))
+            .collect(),
         None => Vec::new(),
     }
 }
@@ -154,7 +187,12 @@ pub fn resolve(provider: Option<&str>, model: Option<&str>) -> Result<ModelChoic
             (provider, provider.default_model.to_owned())
         }
     };
-    let info = lookup(&format!("{}/{model}", provider.id));
+    let info = lookup(&format!("{}/{model}", provider.id)).or_else(|| {
+        // Every model is covered by the subscription, listed or not.
+        provider
+            .is_cli_backed()
+            .then(|| ModelInfo::subscription(provider.id, &model, CLAUDE_CLI_CONTEXT))
+    });
     Ok(ModelChoice {
         provider,
         model,
@@ -179,7 +217,8 @@ fn infer_provider(model: &str) -> Option<&'static ProviderInfo> {
 }
 
 /// Builds the adapter for `provider`. `base_url` overrides the provider's default (tests and
-/// proxies); `retry` overrides the default retry policy.
+/// proxies); `retry` overrides the default retry policy. CLI-backed providers
+/// ([`ProviderInfo::is_cli_backed`]) are built by `rozu-cli-providers` and fail here.
 pub fn build(
     provider: &ProviderInfo,
     api_key: SecretString,
@@ -210,6 +249,15 @@ pub fn build(
                 config = config.with_retry(retry);
             }
             Arc::new(AnthropicProvider::new(config)?)
+        }
+        Kind::ClaudeCli => {
+            return Err(ProviderError::BadRequest {
+                status: 0,
+                message: format!(
+                    "{} is CLI-backed and takes no API key; build it with rozu-cli-providers",
+                    provider.id
+                ),
+            });
         }
     })
 }
@@ -257,6 +305,7 @@ pub(crate) fn model_table(provider: &str, rows: &[ModelRow]) -> Vec<ModelInfo> {
                 price_cached_in_per_mtok: p.cached,
                 price_cache_write_per_mtok: p.write,
             }),
+            billing: rozu_core::Billing::Metered,
         })
         .collect()
 }
@@ -463,10 +512,33 @@ mod tests {
     }
 
     #[test]
-    fn builds_each_provider() {
+    fn builds_each_http_provider() {
         for provider in PROVIDERS {
-            let built = build(provider, SecretString::from("k"), None, None).unwrap();
-            assert_eq!(built.id(), provider.id);
+            let built = build(provider, SecretString::from("k"), None, None);
+            if provider.is_cli_backed() {
+                assert!(built.is_err(), "{}", provider.id);
+            } else {
+                assert_eq!(built.unwrap().id(), provider.id);
+            }
         }
+    }
+
+    #[test]
+    fn claude_cli_models_are_subscription_billed() {
+        let provider = provider_info(CLAUDE_CLI_ID).unwrap();
+        assert!(provider.is_cli_backed() && !provider.needs_api_key());
+        assert!(!provider_info("anthropic").unwrap().is_cli_backed());
+        for model in models_for(CLAUDE_CLI_ID) {
+            assert!(!model.is_metered(), "{}", model.id);
+        }
+        // Aliases resolve to the CLI provider; any other id works there too, still unpriced.
+        let choice = resolve(None, Some("opus")).unwrap();
+        assert_eq!(choice.spec(), "claude-cli/opus");
+        let choice = resolve(Some(CLAUDE_CLI_ID), None).unwrap();
+        assert_eq!(choice.spec(), "claude-cli/sonnet");
+        let choice = resolve(Some(CLAUDE_CLI_ID), Some("claude-opus-5-5")).unwrap();
+        assert!(choice.info.is_some_and(|info| !info.is_metered()));
+        // ...while the HTTP provider keeps the same id priced.
+        assert!(lookup("anthropic/claude-opus-4-5").is_none_or(|m| m.is_metered()));
     }
 }

@@ -1,0 +1,28 @@
+[package]
+name = "rozu-cli-providers"
+description = "CLI-backed providers for rozu: drive official vendor CLIs (Claude Code) on the user's subscription"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-stream.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+rozu-core.workspace = true
+rozu-mcp.workspace = true
+rozu-tools.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+tokio-util = { workspace = true, features = ["codec"] }
+tracing.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -156,6 +156,10 @@ const DECLINED: &str = "the user declined";
 /// answer) if the agent stops waiting, e.g. because the turn was cancelled.
 pub async fn answer(ask: Ask, input: &Input, interactive: bool, color: bool) {
     let Ask { request, mut reply } = ask;
+    if reply.is_closed() {
+        // Withdrawn before it was shown (e.g. the claude CLI was cancelled meanwhile).
+        return;
+    }
     eprintln!("{}", render_card(&request, color));
     if !interactive {
         eprintln!("  ✗ denied: no terminal to ask on (stdin is not a TTY)");

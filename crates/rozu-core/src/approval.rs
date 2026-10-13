@@ -110,6 +110,9 @@ pub enum DecisionSource {
     Gate,
     /// The turn was cancelled while waiting for the gate.
     Cancelled,
+    /// Denied by rule without asking: a request rozu can't map to a tool and risk class
+    /// (default-deny), or a write to `.rozu/`.
+    Policy,
 }
 
 impl fmt::Display for DecisionSource {
@@ -119,8 +122,22 @@ impl fmt::Display for DecisionSource {
             DecisionSource::Rule { prefix } => write!(f, "rule `{prefix}`"),
             DecisionSource::Gate => f.write_str("user"),
             DecisionSource::Cancelled => f.write_str("cancelled"),
+            DecisionSource::Policy => f.write_str("rozu policy (default-deny)"),
         }
     }
+}
+
+/// The decision log entry for one tool call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApprovalRecord {
+    pub call_id: String,
+    pub tool: String,
+    pub risk: Risk,
+    pub preview: String,
+    pub sandbox: SandboxMode,
+    pub network: bool,
+    pub decision: Decision,
+    pub source: DecisionSource,
 }
 
 /// Asks someone (usually the user) about a call the policy didn't auto-approve.

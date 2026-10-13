@@ -1,11 +1,16 @@
-//! `rozu auth`: manage provider API keys in the OS keychain.
+//! `rozu auth`: manage provider API keys in the OS keychain, and report the claude CLI's login
+//! (which the CLI itself manages; rozu never sees its credentials).
 
 use std::io::{self, IsTerminal, Read};
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use anyhow::{Context, bail};
 use clap::{Subcommand, ValueEnum};
-use rozu_providers::registry;
+use rozu_cli_providers::claude::install::{
+    AuthStatus, CLAUDE_BIN_ENV, claude_auth_status, claude_version, find_claude_binary,
+};
+use rozu_providers::registry::{self, CLAUDE_CLI_ID};
 use rozu_secrets::{KeyringStore, SERVICE, SecretStore, env_var_for};
 use secrecy::SecretString;
 
@@ -13,7 +18,8 @@ use secrecy::SecretString;
 pub enum AuthCommand {
     /// Store a provider API key in the OS keychain. Prompts without echo, or reads piped stdin.
     Set { provider: ProviderName },
-    /// Show which providers have a key and where it comes from (never prints the key).
+    /// Show which providers have a key and where it comes from (never prints the key), and
+    /// whether the claude CLI is installed and logged in.
     Status,
     /// Remove a provider API key from the OS keychain.
     Delete { provider: ProviderName },
@@ -132,7 +138,88 @@ fn status(store: &dyn SecretStore) -> anyhow::Result<ExitCode> {
             ),
         }
     }
+    let runtime = tokio::runtime::Runtime::new().context("could not start the async runtime")?;
+    println!(
+        "{}",
+        runtime.block_on(claude_cli_status(find_claude_binary()))
+    );
     Ok(ExitCode::SUCCESS)
+}
+
+/// One line about the claude CLI: found where, which version, logged in or not. Only `loggedIn`
+/// and `authMethod` are read from `claude auth status`; nothing else it prints is shown.
+async fn claude_cli_status(binary: Option<PathBuf>) -> String {
+    let id = CLAUDE_CLI_ID;
+    let Some(binary) = binary else {
+        return format!(
+            "{id}: claude CLI not found (PATH, ~/.local/bin); install Claude Code or set \
+             {CLAUDE_BIN_ENV}"
+        );
+    };
+    let version = match claude_version(&binary).await {
+        Ok(version) => version,
+        Err(err) => return format!("{id}: {} doesn't run ({err})", binary.display()),
+    };
+    let login = match claude_auth_status(&binary).await {
+        Ok(AuthStatus {
+            logged_in: Some(true),
+            auth_method,
+        }) => match auth_method {
+            Some(method) => format!("logged in ({method})"),
+            None => "logged in".to_owned(),
+        },
+        Ok(AuthStatus {
+            logged_in: Some(false),
+            ..
+        }) => "not logged in; run `claude` and use /login".to_owned(),
+        Ok(_) => "login status unknown (couldn't read `claude auth status`)".to_owned(),
+        Err(err) => format!("login status unknown ({err})"),
+    };
+    format!("{id}: {} ({version}), {login}", binary.display())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::os::unix::fs::PermissionsExt;
+
+    use super::*;
+
+    /// The fake `claude` from the provider fixtures, wrapped so it finds its auth.json.
+    fn fake_claude(dir: &std::path::Path) -> PathBuf {
+        let fixtures = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../rozu-cli-providers/tests/fixtures/claude"
+        );
+        let wrapper = dir.join("claude");
+        std::fs::write(
+            &wrapper,
+            format!(
+                "#!/bin/sh\nFAKE_CLAUDE_TURNS='{fixtures}' exec /bin/sh '{fixtures}/fake_claude.sh' \"$@\"\n"
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        wrapper
+    }
+
+    #[tokio::test]
+    async fn claude_cli_status_shows_version_and_login_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let line = claude_cli_status(Some(fake_claude(dir.path()))).await;
+        assert!(line.starts_with("claude-cli: "), "{line}");
+        assert!(line.ends_with("(9.9.9), logged in (claude.ai)"), "{line}");
+        // Other fields of `claude auth status` never reach the output.
+        assert!(
+            !line.contains("example.invalid") && !line.contains("Fake Org"),
+            "{line}"
+        );
+
+        let missing = claude_cli_status(None).await;
+        assert!(
+            missing.contains("not found") && missing.contains(CLAUDE_BIN_ENV),
+            "{missing}"
+        );
+    }
 }
 
 fn env_is_set(var: &str) -> bool {

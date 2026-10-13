@@ -1,0 +1,23 @@
+[package]
+name = "rozu-mcp"
+description = "stdio MCP server exposing rozu's tools and permission-prompt tool to vendor CLIs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+futures.workspace = true
+rozu-core.workspace = true
+rozu-tools.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-util = { workspace = true, features = ["codec"] }
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
