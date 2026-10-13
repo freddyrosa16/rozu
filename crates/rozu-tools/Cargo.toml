@@ -9,3 +9,15 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+async-trait.workspace = true
+ignore.workspace = true
+regex.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

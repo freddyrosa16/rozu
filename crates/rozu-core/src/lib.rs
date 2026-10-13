@@ -5,8 +5,21 @@
 //! turn and token caps. It has no UI and does no HTTP itself; providers and tools plug in from
 //! their own crates.
 
+pub mod agent;
+pub mod approval;
+pub mod model;
+pub mod provider;
 pub mod telemetry;
 
+pub use agent::{
+    Agent, AgentConfig, AgentError, AgentEvent, DEFAULT_MAX_STEPS, DEFAULT_TOOL_TIMEOUT, Session,
+    TurnOutcome,
+};
+pub use approval::{ApprovalGate, ApprovalRequest, Decision, ReadOnlyGate};
+pub use model::{
+    ChatRequest, ContentPart, Message, ModelInfo, Role, StopReason, StreamEvent, ToolSpec, Usage,
+};
+pub use provider::{EventStream, Provider, ProviderError, ProviderResult};
 pub use telemetry::{init_tracing, redact};
 
 /// Version of this crate.
