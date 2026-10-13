@@ -14,6 +14,11 @@ fn rozu() -> Command {
         "ROZU_LOG_FILE",
         std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("rozu-cli-tests.log"),
     )
+    // Keep test decisions out of the developer's audit log.
+    .env(
+        "ROZU_AUDIT_LOG",
+        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("rozu-cli-tests-approvals.jsonl"),
+    )
     .env_remove("ROZU_LOG_STDERR")
     .env_remove("RUST_LOG");
     cmd
@@ -304,6 +309,104 @@ fn network_command_prompts_and_is_denied_without_a_tty() {
         output.starts_with("denied:") && output.contains("non-interactively"),
         "{output}"
     );
+}
+
+/// BUG-8: one denial, one line (not the card's line plus the decision plus the tool result).
+#[test]
+fn denial_is_printed_once() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let server = tool_then_answer(
+        &runtime,
+        "shell",
+        serde_json::json!({"command": "curl https://example.com"}),
+    );
+    let dir = tempfile::tempdir().unwrap();
+
+    let output = chat(&server, dir.path())
+        .arg("fetch it")
+        .write_stdin("")
+        .output()
+        .unwrap();
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(stderr.matches("✗").count(), 1, "{stderr}");
+    assert_eq!(stderr.matches("denied").count(), 1, "{stderr}");
+    assert_eq!(
+        stderr.matches("no terminal to ask on").count(),
+        1,
+        "{stderr}"
+    );
+}
+
+/// BUG-5 end to end: full mode still asks before interpreter code, and (denied without a TTY)
+/// the canary outside the workspace survives.
+#[test]
+fn full_mode_prompts_before_interpreter_code() {
+    let outside = tempfile::tempdir().unwrap();
+    let canary = outside.path().join("c1.txt");
+    std::fs::write(&canary, "canary").unwrap();
+    let command = format!(
+        "python3 -c \"import os; os.remove('{}')\"",
+        canary.display()
+    );
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let server = tool_then_answer(&runtime, "shell", serde_json::json!({ "command": command }));
+    let dir = tempfile::tempdir().unwrap();
+
+    chat(&server, dir.path())
+        .args(["--approval", "full", "clean up"])
+        .write_stdin("")
+        .assert()
+        .success()
+        .stderr(contains(
+            "approve shell? · risk: opaque (interpreter code or output redirect)",
+        ))
+        .stderr(contains("auto-approved").not());
+
+    assert_eq!(std::fs::read_to_string(&canary).unwrap(), "canary");
+    assert!(last_tool_output(&runtime, &server).starts_with("denied:"));
+}
+
+/// BUG-7 (REG-6) end to end: the CLI's decisions land in ROZU_AUDIT_LOG.
+#[test]
+fn chat_decisions_go_to_the_audit_log() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let server = tool_then_answer(
+        &runtime,
+        "shell",
+        serde_json::json!({"command": "curl https://example.com"}),
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let logs = tempfile::tempdir().unwrap();
+    let audit = logs.path().join("audit/approvals.jsonl");
+
+    chat(&server, dir.path())
+        .env("ROZU_AUDIT_LOG", &audit)
+        .arg("fetch it")
+        .write_stdin("")
+        .assert()
+        .success();
+
+    let text = std::fs::read_to_string(&audit).unwrap();
+    let entries: Vec<Value> = text
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(entries.len(), 1, "{text}");
+    let entry = &entries[0];
+    assert_eq!(entry["tool"], "shell");
+    assert_eq!(entry["decision"], "deny");
+    assert_eq!(entry["decided_by"], "user");
+    assert_eq!(entry["mode"], "auto");
+    assert_eq!(entry["risk"], "network");
+    assert_eq!(entry["preview"], "$ curl https://example.com");
+    assert!(entry["session_id"].as_str().unwrap().len() > 10);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&audit).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
 }
 
 #[test]

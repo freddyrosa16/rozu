@@ -83,8 +83,8 @@ fn open_log_file(path: &Path) -> io::Result<File> {
 }
 
 /// Installs the global `tracing` subscriber: a `fmt` layer writing through the redaction writer,
-/// filtered by `RUST_LOG` (default `info`, with the `rozu::approval` decision log at `warn`
-/// because the CLI already prints each decision).
+/// filtered by `RUST_LOG` (default `info`, which includes the `rozu::approval` decision log; the
+/// structured record of every decision is the audit log, see [`crate::audit`]).
 ///
 /// Logs go to a file ([`default_log_path`], or `ROZU_LOG_FILE`), never to the terminal, so
 /// stderr stays for user-facing messages; `ROZU_LOG_STDERR=1` sends them to stderr instead. If
@@ -92,8 +92,7 @@ fn open_log_file(path: &Path) -> io::Result<File> {
 ///
 /// Safe to call more than once; later calls only report the target.
 pub fn init_tracing() -> LogTarget {
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info,rozu::approval=warn"));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     let builder = tracing_subscriber::fmt().with_env_filter(filter);
     match log_target(|var| std::env::var(var).ok()) {
         LogTarget::Stderr => {

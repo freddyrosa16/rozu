@@ -19,13 +19,13 @@ use rozu_cli_providers::claude::install::{CLAUDE_BIN_ENV, find_claude_binary};
 use rozu_cli_providers::{ClaudeCliConfig, ClaudeCliProvider};
 use rozu_core::{
     Agent, AgentConfig, AgentError, AgentEvent, ApprovalMode, ApprovalPolicy, ApprovalRecord,
-    DEFAULT_MAX_STEPS, Decision, DecisionSource, Provider, Session, TurnOutcome, TurnUsage,
-    approvals_path,
+    AuditLog, DEFAULT_MAX_STEPS, Decision, DecisionSource, Provider, Session, TurnOutcome,
+    TurnUsage, approvals_path, new_session_id,
 };
 use rozu_providers::registry::CLAUDE_CLI_ID;
 use rozu_providers::{ModelChoice, PROVIDERS, registry};
 use rozu_secrets::{KeyringStore, SecretStore, env_var_for, resolve_api_key};
-use rozu_tools::{Risk, ToolRegistry, Workspace, platform_sandbox};
+use rozu_tools::{Risk, SessionTemp, ToolRegistry, Workspace, platform_sandbox};
 use tokio::sync::mpsc;
 
 use crate::approve::{self, ApprovalArg, Ask, CliGate, Input};
@@ -50,7 +50,8 @@ pub struct ChatArgs {
     #[arg(long, default_value = ".")]
     workspace: PathBuf,
     /// What runs without asking: read-only (only reads), auto (reads + sandboxed workspace
-    /// writes), full (everything except destructive commands, unsandboxed).
+    /// writes), full (everything except destructive commands, interpreter code and redirects).
+    /// Shell commands are sandboxed in every mode.
     #[arg(long, value_enum, default_value_t = ApprovalArg::Auto)]
     approval: ApprovalArg,
     /// Maximum model requests per turn (1-200).
@@ -81,6 +82,11 @@ struct AgentFactory {
     gate: Arc<CliGate>,
     /// One claude CLI session for the whole chat, kept across `/model` switches.
     claude: Mutex<Option<Arc<ClaudeCliProvider>>>,
+    /// Ties this chat's audit entries (and those of its `rozu mcp-serve`) together.
+    session_id: String,
+    audit: Option<Arc<AuditLog>>,
+    /// The session's private temp dir, shared by every agent of the chat.
+    temp: Option<Arc<SessionTemp>>,
 }
 
 impl AgentFactory {
@@ -110,7 +116,9 @@ impl AgentFactory {
         Ok(
             Agent::new(provider, self.tools.clone(), self.workspace.clone(), config)
                 .with_approval_policy(self.policy.clone())
-                .with_approval_gate(self.gate.clone()),
+                .with_approval_gate(self.gate.clone())
+                .with_audit(self.audit.clone())
+                .with_session_temp(self.temp.clone()),
         )
     }
 
@@ -138,6 +146,8 @@ impl AgentFactory {
             self.workspace.root().display().to_string(),
             "--approval".to_owned(),
             approval.get_name().to_owned(),
+            "--session-id".to_owned(),
+            self.session_id.clone(),
         ];
         let config = ClaudeCliConfig::new(
             binary,
@@ -211,6 +221,14 @@ async fn chat(args: ChatArgs) -> anyhow::Result<ExitCode> {
         )
     })?;
     let (gate, mut asks) = CliGate::new();
+    let session_id = new_session_id();
+    let temp = match SessionTemp::create(&session_id) {
+        Ok(temp) => Some(Arc::new(temp)),
+        Err(err) => {
+            tracing::warn!(error = %err, "could not create the session temp dir");
+            None
+        }
+    };
     let factory = AgentFactory {
         store,
         tools: Arc::new(ToolRegistry::standard()),
@@ -220,12 +238,18 @@ async fn chat(args: ChatArgs) -> anyhow::Result<ExitCode> {
         policy: Arc::new(policy),
         gate,
         claude: Mutex::default(),
+        audit: AuditLog::from_env(&session_id).map(Arc::new),
+        session_id,
+        temp,
     };
     let mut agent = factory.build(&choice)?;
     let mut session = Session::with_system_prompt(system_prompt(&workspace, mode));
     let printer = Printer::new();
     let interrupts = Interrupts::install();
-    let input = Input::spawn();
+    let input = {
+        let interrupts = interrupts.clone();
+        Input::spawn(Some(Box::new(move || interrupts.tty_press())))
+    };
     let io = TurnIo {
         input: &input,
         interactive: approve::stdin_is_interactive(),
@@ -251,7 +275,7 @@ async fn chat(args: ChatArgs) -> anyhow::Result<ExitCode> {
             choice.spec(),
             workspace.root().display(),
             mode,
-            sandbox_label(mode),
+            sandbox_label(),
         ));
     }
     loop {
@@ -298,13 +322,14 @@ async fn chat(args: ChatArgs) -> anyhow::Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-/// How shell commands will be confined in `mode` on this machine.
-fn sandbox_label(mode: ApprovalMode) -> String {
+/// How shell commands are confined on this machine (the same in every approval mode).
+fn sandbox_label() -> String {
     let sandbox = platform_sandbox();
-    if mode == ApprovalMode::FullAccess {
-        "off (full access)".to_owned()
-    } else if sandbox.enforced() {
-        format!("{} (writes: workspace + tmp, no network)", sandbox.name())
+    if sandbox.enforced() {
+        format!(
+            "{} in every mode (writes: workspace + session tmp; network only when approved)",
+            sandbox.name()
+        )
     } else {
         "unavailable on this OS (workspace writes by shell ask first)".to_owned()
     }
@@ -317,11 +342,13 @@ fn system_prompt(workspace: &Workspace, mode: ApprovalMode) -> String {
          Tools: read_file, list_dir and grep to look at files; apply_patch to edit a file \
          (exact search/replace edits or a unified diff) and write_file to create one; shell to \
          run commands (non-interactive, with a timeout). Shell commands run in a sandbox that \
-         only allows writes in the workspace and temp directories and blocks the network; set \
-         network: true when a command needs it.\n\
+         only allows writes in the workspace and $TMPDIR (a private temp dir) and blocks the \
+         network; set network: true when a command needs it.\n\
          Approval mode: {mode}. Calls that need approval are shown to the user, who may deny \
          them with a reason; respect it and adapt. Destructive commands (rm -rf, force push, \
-         git reset --hard, ...) always need approval, so prefer safer alternatives.\n\
+         git reset --hard, ...), interpreter one-liners (python -c, eval, ...) and output \
+         redirects always need approval, so prefer safer alternatives such as write_file and \
+         apply_patch.\n\
          Read files before editing them, keep changes minimal, and run the relevant tests after \
          changing code. Be concise, and cite file paths when you refer to code.",
         workspace.root().display()
@@ -440,6 +467,7 @@ impl Printer {
         TurnPrinter {
             printer: self,
             mid_line: false,
+            last_denial: None,
         }
     }
 }
@@ -448,6 +476,9 @@ struct TurnPrinter<'a> {
     printer: &'a Printer,
     /// Whether stdout has text not yet ended by a newline.
     mid_line: bool,
+    /// The reason of the denial just printed, so the tool result repeating it isn't printed
+    /// again.
+    last_denial: Option<String>,
 }
 
 impl TurnPrinter<'_> {
@@ -464,13 +495,19 @@ impl TurnPrinter<'_> {
             AgentEvent::ToolCallStarted {
                 name, args_json, ..
             } => {
+                self.last_denial = None;
                 self.status(&format!("→ {name} {}", clip(&args_json, 120)));
             }
             AgentEvent::ToolCallFinished {
                 output, is_error, ..
             } => {
+                let first = output.lines().next().unwrap_or("");
+                let denial = self.last_denial.take();
+                if is_error && denial.is_some_and(|reason| repeats_denial(first, &reason)) {
+                    return; // the "✗ denied" line already said it
+                }
                 let summary = if is_error {
-                    format!("  ✗ {}", clip(output.lines().next().unwrap_or(""), 120))
+                    format!("  ✗ {}", clip(first, 120))
                 } else {
                     let lines = output.lines().count();
                     format!("  ✓ {lines} line{}", if lines == 1 { "" } else { "s" })
@@ -481,6 +518,14 @@ impl TurnPrinter<'_> {
                 if let Some(line) = approval_line(&record) {
                     self.status(&line);
                 }
+                self.last_denial = match (&record.decision, &record.source, record.blocked_retry) {
+                    (Decision::Deny { reason }, source, false)
+                        if *source != DecisionSource::Cancelled =>
+                    {
+                        Some(reason.clone())
+                    }
+                    _ => None,
+                };
             }
             // Totals come from the session once the turn ends (see `Printer::usage_line`).
             AgentEvent::Usage(_) => {}
@@ -511,18 +556,49 @@ impl TurnPrinter<'_> {
     }
 }
 
+/// Whether a failed tool result's first line just repeats the denial `reason`.
+fn repeats_denial(first_line: &str, reason: &str) -> bool {
+    first_line == reason
+        || first_line.strip_prefix("denied: ") == Some(reason)
+        || first_line.ends_with(reason)
+}
+
 /// One status line per notable approval decision; reads approved by the mode are silent.
 fn approval_line(record: &ApprovalRecord) -> Option<String> {
-    let confinement = match record.sandbox {
+    let mut confinement = match record.sandbox {
         rozu_core::SandboxMode::InProcess => String::new(),
         sandbox => format!(
             " · sandbox: {sandbox} · network: {}",
             if record.network { "on" } else { "off" }
         ),
     };
+    if !record.extra_writes.is_empty() {
+        confinement.push_str(&format!(
+            " · also writable: {}",
+            record
+                .extra_writes
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    if record.blocked_retry {
+        return match (&record.decision, &record.source) {
+            (_, DecisionSource::Cancelled) => None,
+            (Decision::ApproveUnsandboxed, _) => {
+                Some("  ⚠ rerunning UNSANDBOXED (this command only)".to_owned())
+            }
+            _ => Some("  ✗ kept the sandbox's refusal".to_owned()),
+        };
+    }
     match (&record.decision, &record.source) {
         (_, DecisionSource::Cancelled) => None,
         (Decision::Approve, DecisionSource::Mode(_)) if record.risk == Risk::Read => None,
+        // Only the user can choose it (anything else runs sandboxed; see the executor).
+        (Decision::ApproveUnsandboxed, _) => {
+            Some("  ⚠ approved UNSANDBOXED (this command only)".to_owned())
+        }
         (Decision::Approve, DecisionSource::Mode(mode)) => Some(format!(
             "  ✓ auto-approved ({}, {mode} mode){confinement}",
             record.risk

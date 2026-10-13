@@ -424,13 +424,6 @@ pub fn models() -> Vec<ModelInfo> {
                 None,
             ),
             ("claude-opus-4-5", 200_000, opus, None),
-            // Deprecated.
-            (
-                "claude-sonnet-4-5",
-                200_000,
-                prices(3.0, 0.30, 3.75, 15.0),
-                None,
-            ),
             (
                 "claude-haiku-4-5",
                 200_000,

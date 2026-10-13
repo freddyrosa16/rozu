@@ -89,6 +89,22 @@ struct Client {
 
 impl Client {
     fn start(mode: ApprovalMode, socket: Option<&Path>) -> Self {
+        Self::start_inner(mode, socket, None)
+    }
+
+    fn start_with_audit(
+        mode: ApprovalMode,
+        socket: Option<&Path>,
+        audit: Arc<rozu_core::AuditLog>,
+    ) -> Self {
+        Self::start_inner(mode, socket, Some(audit))
+    }
+
+    fn start_inner(
+        mode: ApprovalMode,
+        socket: Option<&Path>,
+        audit: Option<Arc<rozu_core::AuditLog>>,
+    ) -> Self {
         let workspace = tempfile::tempdir().unwrap();
         std::fs::write(workspace.path().join("README.md"), "# demo\n").unwrap();
         let ws = Workspace::new(workspace.path()).unwrap();
@@ -98,7 +114,8 @@ impl Client {
             Arc::new(gate.clone()),
             Arc::new(ApprovalPolicy::new(mode)),
             Arc::new(NoSandbox),
-        );
+        )
+        .with_audit(audit);
         let root = ws.root().to_path_buf();
         let server = Arc::new(McpServer::new(exec, ws, gate));
         let (client_io, server_io) = tokio::io::duplex(1 << 20);
@@ -294,38 +311,96 @@ async fn approve_denies_unmappable_requests_and_logs_them() {
 }
 
 #[tokio::test]
-async fn destructive_bash_prompts_the_parent_even_in_full_access() {
-    for (answer, expected) in [
-        (Decision::Approve, "allow"),
+async fn claude_bash_is_denied_in_favor_of_the_sandboxed_shell() {
+    let mut parent = FakeParent::start(Decision::Approve);
+    let mut client = Client::start(ApprovalMode::FullAccess, Some(&parent.socket()));
+
+    let result = client.approve("Bash", json!({"command": "ls"})).await;
+    assert_eq!(result["behavior"], "deny", "{result}");
+    assert!(
+        result["message"]
+            .as_str()
+            .unwrap()
+            .contains("mcp__rozu__shell"),
+        "{result}"
+    );
+    assert!(parent.asked().is_empty(), "denied without asking");
+    let record = parent.record().await;
+    assert_eq!(record.tool, "Bash");
+    assert_eq!(record.source, DecisionSource::Policy);
+    client.close().await;
+}
+
+/// BUG-5 through MCP: rozu's shell with interpreter code asks even in full access.
+#[tokio::test]
+async fn interpreter_code_prompts_the_parent_even_in_full_access() {
+    for (answer, ran) in [
+        (Decision::Approve, true),
         (
             Decision::Deny {
                 reason: "not today".into(),
             },
-            "deny",
+            false,
         ),
     ] {
         let mut parent = FakeParent::start(answer);
         let mut client = Client::start(ApprovalMode::FullAccess, Some(&parent.socket()));
 
         let result = client
-            .approve("Bash", json!({"command": "git push --force origin main"}))
+            .call("shell", json!({"command": "eval 'echo ran > ran.txt'"}))
             .await;
-        assert_eq!(result["behavior"], expected, "{result}");
-        if expected == "deny" {
-            assert_eq!(result["message"], "denied by rozu: not today");
+        assert_eq!(client.root.join("ran.txt").exists(), ran, "{result}");
+        if !ran {
+            assert_eq!(text(&result), "denied: not today");
         }
-
         let asked = parent.asked();
         assert_eq!(asked.len(), 1);
-        assert_eq!(asked[0].tool, "Bash");
-        assert_eq!(asked[0].risk, Risk::Destructive);
-        assert_eq!(asked[0].allow_prefix, None, "never offered for destructive");
-        assert!(asked[0].preview.contains("git push --force"));
+        assert_eq!(asked[0].risk, Risk::Opaque);
+        assert_eq!(asked[0].allow_rule, None, "never offered for inline code");
         let record = parent.record().await;
         assert_eq!(record.source, DecisionSource::Gate);
-        assert_eq!(record.risk, Risk::Destructive);
         client.close().await;
     }
+}
+
+/// BUG-7: decisions made inside `rozu mcp-serve` are in the audit log too.
+#[tokio::test]
+async fn mcp_decisions_go_to_the_audit_log() {
+    let mut parent = FakeParent::start(Decision::Deny {
+        reason: "nope".into(),
+    });
+    let logs = tempfile::tempdir().unwrap();
+    let log_path = logs.path().join("approvals.jsonl");
+    let audit = Arc::new(rozu_core::AuditLog::open(&log_path, "chat-7").unwrap());
+    let mut client =
+        Client::start_with_audit(ApprovalMode::AutoWorkspace, Some(&parent.socket()), audit);
+
+    // Auto-approved by the mode, denied by policy, and asked (then denied by the user).
+    client
+        .call("write_file", json!({"path": "a.txt", "content": "a"}))
+        .await;
+    client.approve("TeleportFiles", json!({})).await;
+    client
+        .approve("WebFetch", json!({"url": "https://x.dev"}))
+        .await;
+    for _ in 0..3 {
+        parent.record().await;
+    }
+    client.close().await;
+
+    let entries: Vec<Value> = std::fs::read_to_string(&log_path)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let decided_by: Vec<_> = entries
+        .iter()
+        .map(|e| e["decided_by"].as_str().unwrap())
+        .collect();
+    assert_eq!(decided_by, ["mode", "policy", "user"]);
+    assert!(entries.iter().all(|e| e["session_id"] == "chat-7"));
+    assert_eq!(entries[2]["decision"], "deny");
+    assert_eq!(entries[2]["reason"], "nope");
 }
 
 #[tokio::test]
@@ -385,7 +460,7 @@ async fn unreachable_parent_means_deny() {
         let mut client = Client::start(ApprovalMode::ReadOnly, socket);
 
         let answer = client
-            .approve("Bash", json!({"command": "rm -rf build"}))
+            .approve("WebFetch", json!({"url": "https://example.com"}))
             .await;
         assert_eq!(answer["behavior"], "deny", "{answer}");
         assert!(

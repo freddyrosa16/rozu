@@ -20,10 +20,10 @@ use serde_json::Value;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
 use crate::command_risk::{
-    CommandRisk, PathScope, classify_command, prefixes_allow, suggest_prefix,
+    AllowRule, CommandRisk, PathScope, classify_command, rules_allow, suggest_rule,
 };
-use crate::sandbox::{NoSandbox, Sandbox, SandboxPolicy, temp_dirs};
-use crate::tool::{parse_args, schema_for};
+use crate::sandbox::{NoSandbox, SANDBOX_BLOCKED, Sandbox, SandboxPolicy};
+use crate::tool::{OutsideWrites, parse_args, schema_for};
 use crate::{MAX_OUTPUT_BYTES, Risk, Tool, ToolCtx, ToolOutput};
 
 pub const DEFAULT_SHELL_TIMEOUT_SECS: u64 = 120;
@@ -79,20 +79,47 @@ impl ShellArgs {
         let cwd = self
             .cwd(ctx)
             .unwrap_or_else(|_| ctx.workspace.root().to_path_buf());
+        // Inside: the workspace and the session temp dir, which the command gets as $TMPDIR.
         let mut inside = vec![ctx.workspace.root().to_path_buf()];
-        for dir in temp_dirs() {
-            if let Ok(canonical) = dir.canonicalize() {
-                inside.push(canonical);
-            }
-            inside.push(dir);
+        let mut scope_vars = Vec::new();
+        if let Some(tmp) = &ctx.temp_dir {
+            inside.push(tmp.clone());
+            scope_vars.push(("TMPDIR", tmp.clone()));
         }
-        let mut risk = classify_command(&self.command, &PathScope::new(cwd, inside));
+        if let Some(home) = home_dir() {
+            scope_vars.push(("HOME", home));
+        }
+        let mut scope = PathScope::new(cwd, inside);
+        for (name, value) in scope_vars {
+            scope = scope.with_var(name, value);
+        }
+        let mut risk = classify_command(&self.command, &scope);
         if self.network {
             risk.network = true;
             risk.risk = risk.risk.max(Risk::Network);
         }
         risk
     }
+}
+
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .filter(|h| !h.is_empty())
+        .map(PathBuf::from)
+}
+
+/// Appended to the output of a sandboxed command that failed with `EPERM`.
+fn blocked_note(temp_dir: Option<&std::path::Path>) -> String {
+    format!(
+        "[{SANDBOX_BLOCKED} are not permitted. Writable: the workspace{} and paths the user \
+         approved for this call; the network is off unless approved. If it must write elsewhere, \
+         say so: the user can run it unsandboxed, once, from the approval prompt.]",
+        if temp_dir.is_some() {
+            " and the session temp dir ($TMPDIR)"
+        } else {
+            ""
+        }
+    )
 }
 
 #[async_trait]
@@ -104,9 +131,10 @@ impl Tool for Shell {
     fn description(&self) -> &'static str {
         "Run a shell command (`/bin/sh -c`) in the workspace and return its exit code, stdout and \
          stderr. One-shot and non-interactive: no stdin, killed with its children after \
-         timeout_secs. Writes are limited to the workspace and temp directories, and the \
-         network is off unless you set network: true (which needs the user's approval). \
-         Prefer read_file/list_dir/grep for looking at files."
+         timeout_secs. It runs in a sandbox: writes are limited to the workspace and $TMPDIR (a \
+         private temp dir), and the network is off unless you set network: true (which needs \
+         the user's approval). Prefer read_file/list_dir/grep for looking at files, and \
+         write_file/apply_patch over redirects or interpreter one-liners for editing them."
     }
 
     fn schema(&self) -> Value {
@@ -151,17 +179,30 @@ impl Tool for Shell {
         Some(args.timeout() + DRAIN_GRACE + Duration::from_secs(3))
     }
 
-    fn allow_prefix(&self, args: &Value) -> Option<String> {
-        suggest_prefix(args.get("command")?.as_str()?)
+    fn outside_writes(&self, args: &Value, ctx: &ToolCtx) -> OutsideWrites {
+        match parse_args::<ShellArgs>(args.clone()) {
+            Ok(args) => {
+                let risk = args.classify(ctx);
+                OutsideWrites {
+                    paths: risk.outside_writes,
+                    unknown: risk.outside_unknown,
+                }
+            }
+            Err(_) => OutsideWrites::default(),
+        }
     }
 
-    fn prefix_allows(&self, args: &Value, prefixes: &[String]) -> bool {
-        // An explicit network request isn't covered by a prefix rule for the bare command.
+    fn allow_rule(&self, args: &Value) -> Option<AllowRule> {
+        suggest_rule(args.get("command")?.as_str()?)
+    }
+
+    fn rules_allow(&self, args: &Value, rules: &[AllowRule]) -> bool {
+        // An explicit network request isn't covered by a rule for the bare command.
         args.get("network").and_then(Value::as_bool) != Some(true)
             && args
                 .get("command")
                 .and_then(Value::as_str)
-                .is_some_and(|command| prefixes_allow(command, prefixes))
+                .is_some_and(|command| rules_allow(command, rules))
     }
 
     async fn call(&self, args: Value, ctx: &ToolCtx) -> ToolOutput {
@@ -173,13 +214,22 @@ impl Tool for Shell {
             Ok(cwd) => cwd,
             Err(output) => return output,
         };
-        let policy = SandboxPolicy::for_workspace(&ctx.workspace, ctx.permissions.network);
+        let policy = SandboxPolicy::for_workspace(
+            &ctx.workspace,
+            ctx.temp_dir.as_deref(),
+            ctx.permissions.network,
+            &ctx.permissions.extra_writable,
+        );
+        let sandboxed = ctx.permissions.sandbox && ctx.sandbox.enforced();
         let sandbox: &dyn Sandbox = if ctx.permissions.sandbox {
             &*ctx.sandbox
         } else {
             &NoSandbox
         };
         let mut cmd = sandbox.command(&args.command, &policy);
+        if let Some(tmp) = &ctx.temp_dir {
+            cmd.env("TMPDIR", tmp).env("TMP", tmp).env("TEMP", tmp);
+        }
         cmd.current_dir(&cwd)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -246,6 +296,14 @@ impl Tool for Shell {
         }
         if stdout.is_empty() && stderr.is_empty() {
             out.push_str("\n(no output)");
+        }
+        // Seatbelt denials surface as EPERM (even when a later command makes the exit status
+        // 0); say plainly who refused.
+        if sandboxed
+            && (stderr.contains("Operation not permitted")
+                || stdout.contains("Operation not permitted"))
+        {
+            let _ = write!(out, "\n{}", blocked_note(ctx.temp_dir.as_deref()));
         }
         ToolOutput {
             content: out,
@@ -447,25 +505,53 @@ mod tests {
         );
         assert!(Shell.wants_network(&json!({"command": "curl x"}), &ctx));
         assert!(!Shell.wants_network(&json!({"command": "ls"}), &ctx));
-        // Writing to the temp dir is not "outside".
-        let tmp = std::env::temp_dir().join("x.txt");
+    }
+
+    #[test]
+    fn only_the_session_temp_dir_is_inside() {
+        let (_dir, ctx) = setup();
+        let session = crate::SessionTemp::create("test").unwrap();
+        let ctx = ctx.with_temp_dir(session.path());
+        let risk = |command: &str| Shell.risk(&json!({ "command": command }), &ctx);
+        // Writing to the session temp dir is a (redirect, so opaque) write inside...
+        let inside = session.path().join("x.txt");
         assert_eq!(
-            Shell.risk(
-                &json!({"command": format!("echo hi > {}", tmp.display())}),
-                &ctx
-            ),
+            risk(&format!("touch {}", inside.display())),
             Risk::WriteWorkspace
+        );
+        assert_eq!(risk("touch $TMPDIR/x.txt"), Risk::WriteWorkspace);
+        assert_eq!(risk("echo hi > \"$TMPDIR/x.txt\""), Risk::Opaque);
+        // ...while /tmp and the user's temp dir are outside, with the path known.
+        let args = json!({"command": "touch /tmp/rozu-elsewhere.txt"});
+        assert_eq!(Shell.risk(&args, &ctx), Risk::WriteOutside);
+        assert_eq!(
+            Shell.outside_writes(&args, &ctx).paths,
+            [PathBuf::from("/tmp/rozu-elsewhere.txt")]
+        );
+    }
+
+    #[tokio::test]
+    async fn commands_get_the_session_temp_dir_as_tmpdir() {
+        let (_dir, ctx) = setup();
+        let session = crate::SessionTemp::create("test").unwrap();
+        let ctx = ctx.with_temp_dir(session.path());
+        let out = Shell
+            .call(json!({"command": "echo \"$TMPDIR\""}), &ctx)
+            .await;
+        assert_eq!(
+            out.content,
+            format!("exit code: 0\nstdout:\n{}\n", session.path().display())
         );
     }
 
     #[test]
-    fn prefix_rules() {
-        let rules = vec!["cargo test".to_owned()];
-        assert!(Shell.prefix_allows(&json!({"command": "cargo test -q"}), &rules));
-        assert!(!Shell.prefix_allows(&json!({"command": "cargo test", "network": true}), &rules));
+    fn rules() {
+        let rules = vec![AllowRule::prefix("cargo test")];
+        assert!(Shell.rules_allow(&json!({"command": "cargo test -q"}), &rules));
+        assert!(!Shell.rules_allow(&json!({"command": "cargo test", "network": true}), &rules));
         assert_eq!(
-            Shell.allow_prefix(&json!({"command": "cargo test -q"})),
-            Some("cargo test".into())
+            Shell.allow_rule(&json!({"command": "cargo test -q"})),
+            Some(AllowRule::prefix("cargo test"))
         );
     }
 
