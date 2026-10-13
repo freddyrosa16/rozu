@@ -87,7 +87,7 @@ impl Tool for Lookup {
     fn schema(&self) -> Value {
         json!({"type": "object", "properties": {"key": {"type": "string"}}, "required": ["key"]})
     }
-    fn risk(&self, _: &Value) -> Risk {
+    fn risk(&self, _: &Value, _: &ToolCtx) -> Risk {
         Risk::Read
     }
     async fn call(&self, args: Value, _: &ToolCtx) -> ToolOutput {

@@ -13,10 +13,10 @@ preserved on the [`archive/python-v0`](https://github.com/freddyrosa16/rozu/tree
 The static landing page (`index.html`, `styles.css`, `waves.js`, `assets/`, `tests/waves.test.cjs`) is still on main
 for now because GitHub Pages serves it.
 
-## Try the CLI (M2)
+## Try the CLI (M3)
 `rozu chat` runs the agent against OpenAI (Responses API), Anthropic (Messages API) or xAI (Responses API
-at `api.x.ai`) with read-only workspace tools (`read_file`, `list_dir`, `grep`), all confined to the
-workspace directory.
+at `api.x.ai`) with workspace tools: `read_file`, `list_dir`, `grep`, `write_file`, `apply_patch` and `shell`.
+File tools are confined to the workspace directory; shell commands run sandboxed (see below).
 
 ```sh
 cargo build --release
@@ -39,7 +39,37 @@ cargo build --release
 # `/model <provider/model>` (or just `/model anthropic`) switches for the next turn and keeps the conversation;
 # `/model` alone shows the current one.
 ./target/release/rozu chat --workspace .
+
+# Approval mode (default: auto). See "Approvals and sandbox" below.
+./target/release/rozu chat --approval read-only "explain src/main.rs"
+./target/release/rozu chat --approval full "run the tests and fix what fails"
+
+# Your shell inside a rozu PTY session (smoke test for the terminal layer); exit the shell to return.
+./target/release/rozu term
 ```
+
+### Approvals and sandbox
+Every tool call gets a risk class (read, write in workspace, write outside, network, destructive) and is either
+auto-approved or shown as an approval card with the exact command or diff, the sandbox and the network state:
+
+| `--approval` | runs without asking | asks |
+|---|---|---|
+| `read-only` | reads | everything else |
+| `auto` (default) | reads, workspace writes (sandboxed) | network, writes outside the workspace |
+| `full` | everything, unsandboxed | destructive only |
+
+Destructive commands (`rm -rf`, `git push --force`, `git reset --hard`, `git branch -D`, `git clean -fd`, `sudo`,
+redirects to paths outside the workspace, …) **always** ask, in every mode. At the prompt: `y` approves, `n` denies
+(`n <reason>` or a reason on the next line is passed to the agent), `a` approves and always allows that command
+prefix (e.g. `cargo test`) in this project. Rules live in `.rozu/approvals.json` in the workspace; tools and
+sandboxed commands can't write there, and rules never cover destructive commands. Without a terminal on stdin, every
+prompt is denied.
+
+On macOS, shell commands run under Seatbelt (`sandbox-exec`): they can read anywhere but only write inside the
+workspace, `$TMPDIR`, `/tmp` and `/dev`, and the network is blocked unless that call was approved with network
+access (the agent sets `network: true`, or the command is recognized as networked, e.g. `curl`, `git fetch`,
+`npm install`). There is no sandbox on Linux yet, so in auto mode shell commands that write ask first. Commands
+time out after 120 s by default (max 600 s), and the whole process group is killed on timeout or Ctrl-C.
 
 Model selection: `--model` takes `provider/model` or a bare model id (the provider is inferred), and
 `--provider` alone picks that provider's default model. Defaults are `openai/gpt-5.1`,
@@ -52,7 +82,9 @@ Environment variables:
 - `OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL`, `XAI_BASE_URL`: API roots (defaults `https://api.openai.com/v1`,
   `https://api.anthropic.com`, `https://api.x.ai/v1`), for proxies and tests.
 - `ROZU_PROVIDER`, `ROZU_MODEL`: defaults for `--provider` / `--model`.
-- `RUST_LOG`: log filter (default `info`, logs go to stderr). API keys are redacted from logs.
+- `RUST_LOG`: log filter (default `info`, logs go to stderr). API keys are redacted from logs. Approval decisions
+  are logged under the `rozu::approval` target (hidden by default since the CLI prints them; show them with
+  `RUST_LOG=info,rozu::approval=info`).
 - `NO_COLOR`: disables the dim styling.
 
 ## Auth

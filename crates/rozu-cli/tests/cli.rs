@@ -222,6 +222,115 @@ fn chat_runs_tools_in_the_workspace() {
     assert_eq!(input.last().unwrap()["output"], "README.md");
 }
 
+/// A mock OpenAI server whose first response calls `tool` with `args`, then answers "ok".
+fn tool_then_answer(runtime: &tokio::runtime::Runtime, tool: &str, args: Value) -> MockServer {
+    let added = serde_json::json!({"type": "response.output_item.added", "item": {
+        "type": "function_call", "id": "fc_1", "call_id": "call_1", "name": tool, "arguments": ""}});
+    let done = serde_json::json!({"type": "response.function_call_arguments.done",
+        "item_id": "fc_1", "arguments": args.to_string()});
+    let tool_call = format!(
+        "data: {added}\n\ndata: {done}\n\ndata: {{\"type\":\"response.completed\",\"response\":{{}}}}\n\n"
+    );
+    let answer = "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n\
+                  data: {\"type\":\"response.completed\",\"response\":{}}\n\n";
+    runtime.block_on(async {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(sse(&tool_call))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .respond_with(sse(answer))
+            .mount(&server)
+            .await;
+        server
+    })
+}
+
+fn last_tool_output(runtime: &tokio::runtime::Runtime, server: &MockServer) -> String {
+    let requests = runtime.block_on(server.received_requests()).unwrap();
+    assert_eq!(requests.len(), 2);
+    let second: Value = serde_json::from_slice(&requests[1].body).unwrap();
+    let last = second["input"].as_array().unwrap().last().unwrap().clone();
+    assert_eq!(last["type"], "function_call_output");
+    last["output"].as_str().unwrap().to_owned()
+}
+
+#[test]
+fn network_command_prompts_and_is_denied_without_a_tty() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let server = tool_then_answer(
+        &runtime,
+        "shell",
+        serde_json::json!({"command": "curl https://example.com"}),
+    );
+    let dir = tempfile::tempdir().unwrap();
+
+    chat(&server, dir.path())
+        .arg("fetch it")
+        .write_stdin("")
+        .assert()
+        .success()
+        .stdout("ok\n")
+        .stderr(contains("approve shell? · risk: network"))
+        .stderr(contains("│ $ curl https://example.com"))
+        .stderr(contains("network: on"))
+        .stderr(contains("✗ denied"));
+
+    let output = last_tool_output(&runtime, &server);
+    assert!(
+        output.starts_with("denied:") && output.contains("non-interactively"),
+        "{output}"
+    );
+}
+
+#[test]
+fn auto_mode_writes_files_without_prompting() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let server = tool_then_answer(
+        &runtime,
+        "write_file",
+        serde_json::json!({"path": "notes/todo.md", "content": "- ship M3\n"}),
+    );
+    let dir = tempfile::tempdir().unwrap();
+
+    chat(&server, dir.path())
+        .arg("write a todo")
+        .write_stdin("")
+        .assert()
+        .success()
+        .stderr(contains("auto-approved (write in workspace, auto mode)"))
+        .stderr(contains("approve write_file?").not());
+
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("notes/todo.md")).unwrap(),
+        "- ship M3\n"
+    );
+    assert!(last_tool_output(&runtime, &server).starts_with("created"));
+}
+
+#[test]
+fn read_only_mode_denies_writes_without_a_tty() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let server = tool_then_answer(
+        &runtime,
+        "write_file",
+        serde_json::json!({"path": "x.txt", "content": "x"}),
+    );
+    let dir = tempfile::tempdir().unwrap();
+
+    chat(&server, dir.path())
+        .args(["--approval", "read-only", "write x"])
+        .write_stdin("")
+        .assert()
+        .success()
+        .stderr(contains("approve write_file? · risk: write in workspace"));
+
+    assert!(!dir.path().join("x.txt").exists());
+    assert!(last_tool_output(&runtime, &server).starts_with("denied:"));
+}
+
 #[test]
 fn chat_reports_provider_errors() {
     let runtime = tokio::runtime::Runtime::new().unwrap();

@@ -12,10 +12,13 @@ pub mod provider;
 pub mod telemetry;
 
 pub use agent::{
-    Agent, AgentConfig, AgentError, AgentEvent, DEFAULT_MAX_STEPS, DEFAULT_TOOL_TIMEOUT, Session,
-    TurnOutcome, TurnUsage,
+    Agent, AgentConfig, AgentError, AgentEvent, ApprovalRecord, DEFAULT_MAX_STEPS,
+    DEFAULT_TOOL_TIMEOUT, Session, TurnOutcome, TurnUsage,
 };
-pub use approval::{ApprovalGate, ApprovalRequest, Decision, ReadOnlyGate};
+pub use approval::{
+    ApprovalGate, ApprovalMode, ApprovalPolicy, ApprovalRequest, ApprovalRules, Decision,
+    DecisionSource, PrefixRule, ReadOnlyGate, SandboxMode, approvals_path,
+};
 pub use model::{
     ChatRequest, ContentPart, Message, ModelInfo, Role, StopReason, StreamEvent, ToolSpec, Usage,
 };

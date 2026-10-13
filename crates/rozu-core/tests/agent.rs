@@ -8,11 +8,13 @@ use std::time::Duration;
 use async_trait::async_trait;
 use futures::stream::{self, StreamExt};
 use rozu_core::{
-    Agent, AgentConfig, AgentError, AgentEvent, ChatRequest, ContentPart, EventStream, Message,
-    ModelInfo, Provider, ProviderError, ProviderResult, Role, Session, StopReason, StreamEvent,
-    TurnOutcome, Usage,
+    Agent, AgentConfig, AgentError, AgentEvent, ApprovalGate, ApprovalMode, ApprovalPolicy,
+    ApprovalRecord, ApprovalRequest, ApprovalRules, ChatRequest, ContentPart, Decision,
+    DecisionSource, EventStream, Message, ModelInfo, PrefixRule, Provider, ProviderError,
+    ProviderResult, Role, SandboxMode, Session, StopReason, StreamEvent, TurnOutcome, Usage,
+    approvals_path,
 };
-use rozu_tools::{Risk, Tool, ToolCtx, ToolOutput, ToolRegistry, Workspace};
+use rozu_tools::{NoSandbox, Risk, Shell, Tool, ToolCtx, ToolOutput, ToolRegistry, Workspace};
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -127,7 +129,7 @@ impl Tool for Echo {
     fn schema(&self) -> Value {
         json!({"type": "object"})
     }
-    fn risk(&self, _: &Value) -> Risk {
+    fn risk(&self, _: &Value, _: &ToolCtx) -> Risk {
         Risk::Read
     }
     async fn call(&self, args: Value, _: &ToolCtx) -> ToolOutput {
@@ -149,7 +151,7 @@ impl Tool for Slow {
     fn schema(&self) -> Value {
         json!({"type": "object"})
     }
-    fn risk(&self, _: &Value) -> Risk {
+    fn risk(&self, _: &Value, _: &ToolCtx) -> Risk {
         Risk::Read
     }
     async fn call(&self, _: Value, _: &ToolCtx) -> ToolOutput {
@@ -172,7 +174,7 @@ impl Tool for Big {
     fn schema(&self) -> Value {
         json!({"type": "object"})
     }
-    fn risk(&self, _: &Value) -> Risk {
+    fn risk(&self, _: &Value, _: &ToolCtx) -> Risk {
         Risk::Read
     }
     async fn call(&self, _: Value, _: &ToolCtx) -> ToolOutput {
@@ -195,7 +197,7 @@ impl Tool for Write {
     fn schema(&self) -> Value {
         json!({"type": "object"})
     }
-    fn risk(&self, _: &Value) -> Risk {
+    fn risk(&self, _: &Value, _: &ToolCtx) -> Risk {
         Risk::WriteWorkspace
     }
     async fn call(&self, _: Value, _: &ToolCtx) -> ToolOutput {
@@ -208,7 +210,7 @@ impl Tool for Write {
 // Harness
 
 struct Harness {
-    _dir: tempfile::TempDir,
+    dir: tempfile::TempDir,
     provider: Arc<ScriptedProvider>,
     agent: Agent,
     session: Session,
@@ -224,6 +226,15 @@ impl Harness {
         configure: impl FnOnce(&mut AgentConfig),
         register: impl FnOnce(&mut ToolRegistry),
     ) -> Self {
+        Self::build(scripts, configure, register, |agent| agent)
+    }
+
+    fn build(
+        scripts: impl IntoIterator<Item = Script>,
+        configure: impl FnOnce(&mut AgentConfig),
+        register: impl FnOnce(&mut ToolRegistry),
+        customize: impl FnOnce(Agent) -> Agent,
+    ) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let provider = ScriptedProvider::new(scripts);
         let mut tools = ToolRegistry::new();
@@ -233,14 +244,14 @@ impl Harness {
         register(&mut tools);
         let mut config = AgentConfig::new("test-model");
         configure(&mut config);
-        let agent = Agent::new(
+        let agent = customize(Agent::new(
             provider.clone(),
             Arc::new(tools),
             Workspace::new(dir.path()).unwrap(),
             config,
-        );
+        ));
         Self {
-            _dir: dir,
+            dir,
             provider,
             agent,
             session: Session::with_system_prompt("be brief"),
@@ -597,6 +608,216 @@ async fn write_tools_are_denied_without_approval() {
     let (_, output, is_error) = &h.tool_results()[0];
     assert!(is_error);
     assert!(output.contains("denied"), "{output}");
+}
+
+/// Answers every prompt with a fixed decision and records what it was asked.
+struct ScriptedGate {
+    decision: Decision,
+    asked: Mutex<Vec<ApprovalRequest>>,
+}
+
+impl ScriptedGate {
+    fn new(decision: Decision) -> Arc<Self> {
+        Arc::new(Self {
+            decision,
+            asked: Mutex::default(),
+        })
+    }
+
+    fn asked(&self) -> Vec<ApprovalRequest> {
+        self.asked.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl ApprovalGate for ScriptedGate {
+    async fn decide(&self, req: ApprovalRequest) -> Decision {
+        self.asked.lock().unwrap().push(req);
+        self.decision.clone()
+    }
+}
+
+fn approvals(events: &[AgentEvent]) -> Vec<ApprovalRecord> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::Approval(record) => Some(record.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn shell_harness(steps: Vec<Script>, mode: ApprovalMode, gate: Arc<ScriptedGate>) -> Harness {
+    Harness::build(
+        steps,
+        |_| {},
+        |tools| tools.register(Shell),
+        |agent| {
+            let policy = ApprovalPolicy::for_project(mode, agent.workspace().root()).unwrap();
+            // No OS sandbox, so the test behaves the same on every platform.
+            agent
+                .with_approval_policy(Arc::new(policy))
+                .with_approval_gate(gate)
+                .with_sandbox(Arc::new(NoSandbox))
+        },
+    )
+}
+
+fn done() -> Script {
+    ok(vec![StreamEvent::Done(StopReason::EndTurn)])
+}
+
+#[tokio::test]
+async fn every_decision_is_logged_as_an_event() {
+    let gate = ScriptedGate::new(Decision::Approve);
+    let mut h = shell_harness(
+        vec![
+            tool_step(&[
+                ("c1", "echo", "{}"),
+                ("c2", "shell", r#"{"command":"echo hi"}"#),
+            ]),
+            done(),
+        ],
+        ApprovalMode::FullAccess,
+        gate.clone(),
+    );
+
+    let (_, events) = h.run("go").await;
+
+    let records = approvals(&events);
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0].tool, "echo");
+    assert_eq!(
+        records[0].source,
+        DecisionSource::Mode(ApprovalMode::FullAccess)
+    );
+    assert_eq!(records[1].tool, "shell");
+    assert_eq!(records[1].preview, "$ echo hi");
+    assert_eq!(records[1].decision, Decision::Approve);
+    assert_eq!(records[1].sandbox, SandboxMode::Off);
+    assert!(gate.asked().is_empty());
+}
+
+#[tokio::test]
+async fn destructive_commands_prompt_even_in_full_access() {
+    let gate = ScriptedGate::new(Decision::Deny {
+        reason: "not on my machine".into(),
+    });
+    let mut h = shell_harness(
+        vec![
+            tool_step(&[("c1", "shell", r#"{"command":"touch keep && rm -rf keep"}"#)]),
+            done(),
+        ],
+        ApprovalMode::FullAccess,
+        gate.clone(),
+    );
+
+    let (_, events) = h.run("clean up").await;
+
+    let asked = gate.asked();
+    assert_eq!(asked.len(), 1);
+    assert_eq!(asked[0].risk, Risk::Destructive);
+    assert_eq!(asked[0].preview, "$ touch keep && rm -rf keep");
+    assert_eq!(asked[0].allow_prefix, None);
+    // The reason goes back to the model, and the command never ran.
+    let (_, output, is_error) = &h.tool_results()[0];
+    assert!(is_error);
+    assert_eq!(output, "denied: not on my machine");
+    assert!(!h.dir.path().join("keep").exists());
+    let records = approvals(&events);
+    assert_eq!(records[0].source, DecisionSource::Gate);
+}
+
+#[tokio::test]
+async fn network_commands_prompt_in_auto_mode() {
+    let gate = ScriptedGate::new(Decision::Deny {
+        reason: "no".into(),
+    });
+    let mut h = shell_harness(
+        vec![
+            tool_step(&[
+                ("c1", "shell", r#"{"command":"echo local > out.txt"}"#),
+                ("c2", "shell", r#"{"command":"curl https://example.com"}"#),
+            ]),
+            done(),
+        ],
+        ApprovalMode::AutoWorkspace,
+        gate.clone(),
+    );
+
+    h.run("go").await.0.unwrap();
+
+    // Without an OS sandbox even the workspace write asks (with one it would run on its own;
+    // see the policy's unit tests); the network call asks either way.
+    let asked = gate.asked();
+    assert_eq!(asked.len(), 2);
+    assert_eq!(
+        (asked[0].risk, asked[0].sandbox),
+        (Risk::WriteWorkspace, SandboxMode::Off)
+    );
+    assert_eq!(asked[1].risk, Risk::Network);
+    assert!(asked[1].network, "the prompt says the network would be on");
+    assert_eq!(asked[1].allow_prefix.as_deref(), Some("curl"));
+}
+
+#[tokio::test]
+async fn always_allow_is_persisted_and_reused() {
+    let gate = ScriptedGate::new(Decision::AlwaysAllowPrefix);
+    let mut h = shell_harness(
+        vec![
+            // Unsandboxed (NoSandbox), so these workspace writes ask in auto mode.
+            tool_step(&[("c1", "shell", r#"{"command":"touch one.txt"}"#)]),
+            tool_step(&[("c2", "shell", r#"{"command":"touch two.txt"}"#)]),
+            done(),
+        ],
+        ApprovalMode::AutoWorkspace,
+        gate.clone(),
+    );
+
+    let (_, events) = h.run("go").await;
+
+    // Only the first call prompted; the rule covered the second.
+    assert_eq!(gate.asked().len(), 1);
+    let records = approvals(&events);
+    assert_eq!(records[0].decision, Decision::AlwaysAllowPrefix);
+    assert_eq!(
+        records[1].source,
+        DecisionSource::Rule {
+            prefix: "touch".into()
+        }
+    );
+    let root = h.agent.workspace().root();
+    let saved = ApprovalRules::load(&approvals_path(root)).unwrap();
+    assert_eq!(
+        saved.rules,
+        [PrefixRule {
+            tool: "shell".into(),
+            prefix: "touch".into()
+        }]
+    );
+    assert!(root.join("one.txt").exists() && root.join("two.txt").exists());
+}
+
+#[tokio::test]
+async fn invalid_calls_are_rejected_before_approval() {
+    let gate = ScriptedGate::new(Decision::Approve);
+    let mut h = shell_harness(
+        vec![
+            tool_step(&[("c1", "shell", r#"{"command":"ls","cwd":"../.."}"#)]),
+            done(),
+        ],
+        ApprovalMode::ReadOnly,
+        gate.clone(),
+    );
+
+    h.run("go").await.0.unwrap();
+
+    assert!(gate.asked().is_empty());
+    let (_, output, is_error) = &h.tool_results()[0];
+    assert!(
+        *is_error && output.contains("outside the workspace"),
+        "{output}"
+    );
 }
 
 #[tokio::test]

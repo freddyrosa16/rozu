@@ -69,7 +69,7 @@ impl Tool for ReadFile {
         schema_for::<ReadFileArgs>()
     }
 
-    fn risk(&self, _args: &Value) -> Risk {
+    fn risk(&self, _args: &Value, _ctx: &ToolCtx) -> Risk {
         Risk::Read
     }
 
@@ -150,7 +150,7 @@ impl Tool for ListDir {
         schema_for::<ListDirArgs>()
     }
 
-    fn risk(&self, _args: &Value) -> Risk {
+    fn risk(&self, _args: &Value, _ctx: &ToolCtx) -> Risk {
         Risk::Read
     }
 
@@ -231,7 +231,7 @@ impl Tool for Grep {
         schema_for::<GrepArgs>()
     }
 
-    fn risk(&self, _args: &Value) -> Risk {
+    fn risk(&self, _args: &Value, _ctx: &ToolCtx) -> Risk {
         Risk::Read
     }
 

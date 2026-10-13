@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use schemars::JsonSchema;
@@ -10,7 +11,7 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
-use crate::Workspace;
+use crate::{NoSandbox, Sandbox, Workspace};
 
 /// How risky a particular tool call is; drives the approval policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -25,6 +26,18 @@ pub enum Risk {
     Network,
     /// Hard to undo (`rm -rf`, force push, …). Always prompts.
     Destructive,
+}
+
+impl fmt::Display for Risk {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Risk::Read => "read",
+            Risk::WriteWorkspace => "write in workspace",
+            Risk::WriteOutside => "write outside workspace",
+            Risk::Network => "network",
+            Risk::Destructive => "destructive",
+        })
+    }
 }
 
 /// The result of a tool call, sent back to the model as text.
@@ -50,16 +63,54 @@ impl ToolOutput {
     }
 }
 
-/// Per-call context: where the tool may operate and when to give up.
+/// What an approved subprocess may do. Decided per call by the approval policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExecPermissions {
+    /// Run under [`ToolCtx::sandbox`]. When false the command runs unrestricted.
+    pub sandbox: bool,
+    /// Allow network access inside the sandbox.
+    pub network: bool,
+}
+
+impl Default for ExecPermissions {
+    fn default() -> Self {
+        Self {
+            sandbox: true,
+            network: false,
+        }
+    }
+}
+
+/// Per-call context: where the tool may operate, how subprocesses are confined and when to give
+/// up.
 #[derive(Debug, Clone)]
 pub struct ToolCtx {
     pub workspace: Workspace,
     pub cancel: CancellationToken,
+    /// Sandbox for subprocesses (see [`crate::platform_sandbox`]).
+    pub sandbox: Arc<dyn Sandbox>,
+    pub permissions: ExecPermissions,
 }
 
 impl ToolCtx {
+    /// A context without an OS sandbox (subprocesses still get the default permissions).
     pub fn new(workspace: Workspace, cancel: CancellationToken) -> Self {
-        Self { workspace, cancel }
+        Self {
+            workspace,
+            cancel,
+            sandbox: Arc::new(NoSandbox),
+            permissions: ExecPermissions::default(),
+        }
+    }
+
+    pub fn with_sandbox(mut self, sandbox: Arc<dyn Sandbox>) -> Self {
+        self.sandbox = sandbox;
+        self
+    }
+
+    pub fn with_permissions(mut self, permissions: ExecPermissions) -> Self {
+        self.permissions = permissions;
+        self
     }
 }
 
@@ -76,7 +127,43 @@ pub trait Tool: Send + Sync {
     fn schema(&self) -> Value;
 
     /// Risk class of this particular call.
-    fn risk(&self, args: &Value) -> Risk;
+    fn risk(&self, args: &Value, ctx: &ToolCtx) -> Risk;
+
+    /// Rejects a call before anyone is asked to approve it (bad arguments, a path outside the
+    /// workspace), so the user never approves something that can't run.
+    fn validate(&self, _args: &Value, _ctx: &ToolCtx) -> Result<(), ToolOutput> {
+        Ok(())
+    }
+
+    /// What the call will do, shown verbatim on the approval prompt (the command, the diff…).
+    fn preview(&self, args: &Value) -> String {
+        serde_json::to_string_pretty(args).unwrap_or_else(|_| args.to_string())
+    }
+
+    /// Whether the tool runs a subprocess under [`ToolCtx::sandbox`].
+    fn sandboxed(&self) -> bool {
+        false
+    }
+
+    /// Whether this call needs network access (only meaningful for sandboxed tools).
+    fn wants_network(&self, _args: &Value, _ctx: &ToolCtx) -> bool {
+        false
+    }
+
+    /// How long the agent should let this call run, when the tool manages its own timeout.
+    fn timeout(&self, _args: &Value) -> Option<Duration> {
+        None
+    }
+
+    /// The prefix an "always allow" rule for this call would store, if the tool supports them.
+    fn allow_prefix(&self, _args: &Value) -> Option<String> {
+        None
+    }
+
+    /// Whether stored "always allow" `prefixes` cover this call.
+    fn prefix_allows(&self, _args: &Value, _prefixes: &[String]) -> bool {
+        false
+    }
 
     /// Runs the tool. Failures are reported as [`ToolOutput::error`] so the model can react.
     async fn call(&self, args: Value, ctx: &ToolCtx) -> ToolOutput;
@@ -118,6 +205,15 @@ impl ToolRegistry {
         registry
     }
 
+    /// The read-only tools plus `write_file`, `apply_patch` and `shell`.
+    pub fn standard() -> Self {
+        let mut registry = Self::read_only();
+        registry.register(crate::WriteFile);
+        registry.register(crate::ApplyPatch);
+        registry.register(crate::Shell);
+        registry
+    }
+
     /// Adds `tool`, replacing any tool with the same name.
     pub fn register(&mut self, tool: impl Tool + 'static) {
         self.tools.insert(tool.name(), Arc::new(tool));
@@ -153,11 +249,35 @@ mod tests {
 
     #[test]
     fn read_only_registry_has_the_fs_tools() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ToolCtx::new(
+            Workspace::new(dir.path()).unwrap(),
+            CancellationToken::new(),
+        );
         let registry = ToolRegistry::read_only();
         let names: Vec<_> = registry.iter().map(|t| t.name()).collect();
         assert_eq!(names, ["grep", "list_dir", "read_file"]);
         for tool in registry.iter() {
-            assert_eq!(tool.risk(&serde_json::json!({})), Risk::Read);
+            assert_eq!(tool.risk(&serde_json::json!({}), &ctx), Risk::Read);
+        }
+    }
+
+    #[test]
+    fn standard_registry_schemas_are_objects() {
+        let registry = ToolRegistry::standard();
+        let names: Vec<_> = registry.iter().map(|t| t.name()).collect();
+        assert_eq!(
+            names,
+            [
+                "apply_patch",
+                "grep",
+                "list_dir",
+                "read_file",
+                "shell",
+                "write_file"
+            ]
+        );
+        for tool in registry.iter() {
             let schema = tool.schema();
             assert_eq!(schema["type"], "object", "{}: {schema}", tool.name());
             assert!(schema.get("$schema").is_none());
