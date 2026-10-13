@@ -1,12 +1,14 @@
 //! Agent events → activity state and label.
 //!
 //! [`ActivityEvent`] mirrors the parts of `rozu_core::AgentEvent` the pill needs, so the mapping
-//! works (and is tested) without rozu-core. With the `core` feature, `AgentEvent` and
-//! `ApprovalRequest` convert into it.
+//! works (and is tested) without rozu-core. With the `core` feature, `AgentEvent`,
+//! `ApprovalRequest` and the turn's error (`AgentError` / `ProviderError`) convert into it.
 //!
-//! `AgentEvent::Approval` is sent after the decision, so nothing in the event stream says "a
-//! prompt is open". Hosts get Waiting from their `ApprovalGate`: send
-//! [`ActivityEvent::ApprovalPending`] (`From<&ApprovalRequest>`) when the gate is asked.
+//! Waiting comes from the event stream: `AgentEvent::ApprovalPending` is sent the moment a
+//! prompt waits for the user (native loop, `rozu mcp-serve` forwards, Codex's own requests) and
+//! `AgentEvent::ApprovalResolved` when it closes; decisions made without asking never open
+//! one. While any prompt is open the pill shows Waiting; when the last one closes it goes back
+//! to the tool that was running, or to what it showed before.
 
 use std::collections::BTreeSet;
 
@@ -32,12 +34,18 @@ pub enum ActivityEvent {
         name: String,
         is_error: bool,
     },
-    /// The approval gate was asked about a call and is waiting for the user.
+    /// An approval prompt about a call is open and waiting for the user.
     ApprovalPending {
         call_id: String,
         tool: String,
     },
-    /// A decision was made (by the user, a rule or the mode).
+    /// That prompt closed.
+    ApprovalResolved {
+        call_id: String,
+        outcome: ApprovalOutcome,
+    },
+    /// A decision was logged (by the user, a rule or the mode). Closes a prompt still open for
+    /// the call (hosts that report prompts from their gate send no `ApprovalResolved`).
     ApprovalDecided {
         call_id: String,
         approved: bool,
@@ -46,8 +54,21 @@ pub enum ActivityEvent {
     TurnCancelled,
     /// The step cap was reached.
     TurnMaxSteps,
+    /// The turn ended with an error; `offline` when the provider couldn't be reached.
+    TurnFailed {
+        offline: bool,
+    },
     /// Events that don't change the pill (usage, …).
     Other,
+}
+
+/// How an approval prompt closed (`rozu_core::ApprovalResolution`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApprovalOutcome {
+    Approved,
+    Denied,
+    /// Nobody answered (the turn was cancelled, or the asker went away).
+    Expired,
 }
 
 /// What the pill shows.
@@ -209,6 +230,10 @@ pub struct ActivityTracker {
     current: Option<Activity>,
     /// The running tool's activity, restored when an approval prompt closes.
     tool: Option<Activity>,
+    /// What the pill showed when Waiting began, restored if no tool is running.
+    before_wait: Option<Activity>,
+    /// Calls whose approval prompt is open.
+    pending: BTreeSet<String>,
     /// Calls the user (or a rule) denied: their error result isn't a failure.
     denied: BTreeSet<String>,
     /// Paths written this turn, for Done's "2 files".
@@ -255,25 +280,31 @@ impl ActivityTracker {
                 self.tool = Some(activity.clone());
                 Some(activity)
             }
-            ActivityEvent::ApprovalPending { .. } => {
+            ActivityEvent::ApprovalPending { call_id, tool } => {
+                self.pending.insert(call_id.clone());
+                if !self.waiting() {
+                    self.before_wait = self.current.clone();
+                }
                 let mut waiting =
                     Activity::new(ActivityState::Waiting, ActivityState::Waiting.label());
-                waiting.detail = self.tool.as_ref().map(|t| t.label.clone());
+                waiting.detail = Some(
+                    self.tool
+                        .as_ref()
+                        .map_or_else(|| tool.clone(), |t| t.label.clone()),
+                );
                 Some(waiting)
+            }
+            ActivityEvent::ApprovalResolved { call_id, outcome } => {
+                if *outcome == ApprovalOutcome::Denied {
+                    self.denied.insert(call_id.clone());
+                }
+                self.close_prompt(call_id)?
             }
             ActivityEvent::ApprovalDecided { call_id, approved } => {
                 if !approved {
                     self.denied.insert(call_id.clone());
                 }
-                if self
-                    .current
-                    .as_ref()
-                    .is_some_and(|a| a.state == ActivityState::Waiting)
-                {
-                    self.tool.clone()
-                } else {
-                    return None;
-                }
+                self.close_prompt(call_id)?
             }
             ActivityEvent::ToolFinished { id, name, is_error } => {
                 self.tool = None;
@@ -309,8 +340,29 @@ impl ActivityTracker {
                 self.current = None;
                 return None;
             }
+            ActivityEvent::TurnFailed { offline } => {
+                self.end_turn();
+                Some(if *offline {
+                    Activity::new(ActivityState::Offline, ActivityState::Offline.label())
+                } else {
+                    Activity::new(ActivityState::Error, "Request failed")
+                })
+            }
             ActivityEvent::Other => return None,
         };
+        // An open prompt keeps the pill on Waiting until it closes; the rest of the turn's
+        // progress is remembered and shown then.
+        if !self.pending.is_empty()
+            && matches!(
+                event,
+                ActivityEvent::TextDelta
+                    | ActivityEvent::ToolStarted { .. }
+                    | ActivityEvent::ToolFinished { .. }
+            )
+        {
+            self.before_wait = next;
+            return None;
+        }
         if next == self.current {
             return None;
         }
@@ -318,8 +370,28 @@ impl ActivityTracker {
         self.current.as_ref()
     }
 
+    fn waiting(&self) -> bool {
+        self.current
+            .as_ref()
+            .is_some_and(|a| a.state == ActivityState::Waiting)
+    }
+
+    /// Closes `call_id`'s prompt. `Some(activity)` to show next when it was the last one open
+    /// (the running tool, else what Waiting replaced); `None` when nothing changes.
+    fn close_prompt(&mut self, call_id: &str) -> Option<Option<Activity>> {
+        if !self.pending.remove(call_id) || !self.pending.is_empty() || !self.waiting() {
+            return None;
+        }
+        let before = self.before_wait.take();
+        Some(Some(self.tool.clone().or(before).unwrap_or_else(|| {
+            Activity::new(ActivityState::Thinking, ActivityState::Thinking.label())
+        })))
+    }
+
     fn end_turn(&mut self) {
         self.tool = None;
+        self.before_wait = None;
+        self.pending.clear();
         self.denied.clear();
         self.files.clear();
     }
@@ -327,9 +399,40 @@ impl ActivityTracker {
 
 #[cfg(feature = "core")]
 mod core_events {
-    use rozu_core::{AgentEvent, ApprovalRequest, Decision, TurnOutcome};
+    use rozu_core::{
+        AgentError, AgentEvent, ApprovalRequest, ApprovalResolution, Decision, ProviderError,
+        TurnOutcome,
+    };
 
-    use super::{Activity, ActivityEvent, ActivityTracker};
+    use super::{Activity, ActivityEvent, ActivityTracker, ApprovalOutcome};
+
+    impl From<ApprovalResolution> for ApprovalOutcome {
+        fn from(resolution: ApprovalResolution) -> Self {
+            match resolution {
+                ApprovalResolution::Approved => ApprovalOutcome::Approved,
+                ApprovalResolution::Denied => ApprovalOutcome::Denied,
+                ApprovalResolution::Expired => ApprovalOutcome::Expired,
+            }
+        }
+    }
+
+    /// A turn that ended with this error: Offline when the provider couldn't be reached, else
+    /// Error.
+    impl From<&ProviderError> for ActivityEvent {
+        fn from(err: &ProviderError) -> Self {
+            ActivityEvent::TurnFailed {
+                offline: matches!(err, ProviderError::Network(_)),
+            }
+        }
+    }
+
+    impl From<&AgentError> for ActivityEvent {
+        fn from(err: &AgentError) -> Self {
+            match err {
+                AgentError::Provider(err) => err.into(),
+            }
+        }
+    }
 
     impl From<&AgentEvent> for ActivityEvent {
         fn from(event: &AgentEvent) -> Self {
@@ -354,6 +457,17 @@ mod core_events {
                 AgentEvent::Approval(record) => ActivityEvent::ApprovalDecided {
                     call_id: record.call_id.clone(),
                     approved: !matches!(record.decision, Decision::Deny { .. }),
+                },
+                AgentEvent::ApprovalPending(pending) => ActivityEvent::ApprovalPending {
+                    call_id: pending.request_id.clone(),
+                    tool: pending.tool.clone(),
+                },
+                AgentEvent::ApprovalResolved {
+                    request_id,
+                    resolution,
+                } => ActivityEvent::ApprovalResolved {
+                    call_id: request_id.clone(),
+                    outcome: (*resolution).into(),
                 },
                 AgentEvent::TurnFinished(TurnOutcome::Completed) => ActivityEvent::TurnCompleted,
                 AgentEvent::TurnFinished(TurnOutcome::Cancelled) => ActivityEvent::TurnCancelled,
@@ -533,6 +647,109 @@ mod tests {
         assert_eq!(t.apply(&finished("shell", true)).unwrap().state, Thinking);
     }
 
+    fn pending(id: &str) -> ActivityEvent {
+        ActivityEvent::ApprovalPending {
+            call_id: id.into(),
+            tool: "shell".into(),
+        }
+    }
+
+    fn resolved(id: &str, outcome: ApprovalOutcome) -> ActivityEvent {
+        ActivityEvent::ApprovalResolved {
+            call_id: id.into(),
+            outcome,
+        }
+    }
+
+    #[test]
+    fn approval_pending_waits_and_resolved_goes_back() {
+        // During a tool: back to the tool.
+        let mut t = ActivityTracker::new();
+        t.apply(&started("shell", r#"{"command":"cargo test"}"#));
+        let w = t.apply(&pending("c1")).unwrap();
+        assert_eq!(
+            (w.state, w.detail.as_deref()),
+            (Waiting, Some("Running cargo test"))
+        );
+        let back = t.apply(&resolved("c1", ApprovalOutcome::Approved)).unwrap();
+        assert_eq!(
+            (back.state, back.label.as_str()),
+            (Running, "Running cargo test")
+        );
+        // The decision record that follows changes nothing.
+        assert!(
+            t.apply(&ActivityEvent::ApprovalDecided {
+                call_id: "c1".into(),
+                approved: true
+            })
+            .is_none()
+        );
+
+        // A backend's own request, with no tool started: back to what was shown before.
+        let mut t = ActivityTracker::new();
+        t.apply(&ActivityEvent::TextDelta);
+        let w = t.apply(&pending("x9")).unwrap();
+        assert_eq!((w.state, w.detail.as_deref()), (Waiting, Some("shell")));
+        assert_eq!(
+            t.apply(&resolved("x9", ApprovalOutcome::Expired))
+                .unwrap()
+                .state,
+            Thinking
+        );
+        // A resolution for a prompt that isn't open is ignored.
+        assert!(
+            t.apply(&resolved("nope", ApprovalOutcome::Approved))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn waiting_holds_until_the_last_prompt_closes() {
+        let mut t = ActivityTracker::new();
+        t.apply(&started("shell", r#"{"command":"make"}"#));
+        t.apply(&pending("a"));
+        t.apply(&pending("b"));
+        // Progress while a prompt is open is remembered, not shown.
+        assert!(t.apply(&ActivityEvent::TextDelta).is_none());
+        assert!(t.apply(&resolved("a", ApprovalOutcome::Approved)).is_none());
+        assert_eq!(t.current().unwrap().state, Waiting);
+        assert_eq!(
+            t.apply(&resolved("b", ApprovalOutcome::Approved))
+                .unwrap()
+                .state,
+            Running
+        );
+    }
+
+    #[test]
+    fn denied_prompt_is_not_an_error_and_turn_end_clears_prompts() {
+        let mut t = ActivityTracker::new();
+        t.apply(&started("shell", r#"{"command":"rm -rf target"}"#));
+        t.apply(&pending("c1"));
+        t.apply(&resolved("c1", ApprovalOutcome::Denied));
+        assert_eq!(t.apply(&finished("shell", true)).unwrap().state, Thinking);
+
+        t.apply(&pending("c2"));
+        let d = t.apply(&ActivityEvent::TurnCompleted).unwrap();
+        assert_eq!(d.state, Done);
+        // The next turn isn't stuck behind the old prompt.
+        assert_eq!(t.apply(&ActivityEvent::TextDelta).unwrap().state, Thinking);
+    }
+
+    #[test]
+    fn turn_errors_map_to_error_or_offline() {
+        let mut t = ActivityTracker::new();
+        t.apply(&ActivityEvent::TextDelta);
+        let e = t
+            .apply(&ActivityEvent::TurnFailed { offline: false })
+            .unwrap();
+        assert_eq!((e.state, e.hint), (Error, Some("R retry")));
+        let o = t
+            .apply(&ActivityEvent::TurnFailed { offline: true })
+            .unwrap();
+        assert_eq!(o.state, Offline);
+    }
+
     #[test]
     fn cancel_and_step_cap() {
         let mut t = ActivityTracker::new();
@@ -598,5 +815,65 @@ mod tests {
         ];
         let a = from_agent_events(&turn).unwrap();
         assert_eq!((a.state, a.label.as_str()), (Reading, "Reading README.md"));
+    }
+
+    #[cfg(feature = "core")]
+    #[test]
+    fn approval_agent_events_map() {
+        use rozu_core::{
+            AgentError, AgentEvent, ApprovalResolution, PendingApproval, ProviderError, TurnOutcome,
+        };
+
+        let pending = AgentEvent::ApprovalPending(PendingApproval {
+            request_id: "c1".into(),
+            tool: "shell".into(),
+            summary: "cargo test".into(),
+            provider: "codex".into(),
+        });
+        let resolved = |resolution| AgentEvent::ApprovalResolved {
+            request_id: "c1".into(),
+            resolution,
+        };
+        let shell = AgentEvent::ToolCallStarted {
+            id: "c1".into(),
+            name: "shell".into(),
+            args_json: r#"{"command":"cargo test"}"#.into(),
+        };
+        let state = |events: &[AgentEvent]| from_agent_events(events).map(|a| a.state);
+
+        assert_eq!(state(std::slice::from_ref(&pending)), Some(Waiting));
+        assert_eq!(state(&[shell.clone(), pending.clone()]), Some(Waiting));
+        for resolution in [
+            ApprovalResolution::Approved,
+            ApprovalResolution::Denied,
+            ApprovalResolution::Expired,
+        ] {
+            assert_eq!(
+                state(&[shell.clone(), pending.clone(), resolved(resolution)]),
+                Some(Running),
+                "{resolution}"
+            );
+        }
+        assert_eq!(
+            state(&[
+                shell,
+                pending,
+                resolved(ApprovalResolution::Approved),
+                AgentEvent::TurnFinished(TurnOutcome::Completed),
+            ]),
+            Some(Done)
+        );
+
+        let failed = |err: ProviderError| {
+            let mut t = ActivityTracker::new();
+            t.apply(&(&AgentEvent::TextDelta("x".into())).into());
+            t.apply(&(&AgentError::Provider(err)).into())
+                .map(|a| a.state)
+        };
+        assert_eq!(
+            failed(ProviderError::Network("refused".into())),
+            Some(Offline)
+        );
+        assert_eq!(failed(ProviderError::UnexpectedEof), Some(Error));
     }
 }

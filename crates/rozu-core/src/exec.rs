@@ -24,7 +24,8 @@ use tracing::{debug, info, warn};
 
 use crate::agent::{AgentEvent, DEFAULT_TOOL_TIMEOUT};
 use crate::approval::{
-    ApprovalGate, ApprovalPolicy, ApprovalRecord, ApprovalRequest, Decision, DecisionSource,
+    ApprovalGate, ApprovalPolicy, ApprovalRecord, ApprovalRequest, ApprovalResolution, Decision,
+    DecisionSource, PendingApproval,
 };
 use crate::audit::AuditLog;
 
@@ -44,6 +45,9 @@ pub struct ToolExecutor {
     /// The CLI-backed provider whose requests this executor decides (e.g. `codex`), recorded in
     /// the audit log.
     pub provider: Option<String>,
+    /// The model provider whose agent loop this executor serves (set by [`crate::Agent`]),
+    /// named in [`PendingApproval`]s when `provider` isn't set. Not written to the audit log.
+    pub model_provider: Option<String>,
 }
 
 impl ToolExecutor {
@@ -70,6 +74,7 @@ impl ToolExecutor {
             audit: None,
             temp,
             provider: None,
+            model_provider: None,
         }
     }
 
@@ -173,7 +178,7 @@ impl ToolExecutor {
             allow_rule: None,
             ..request
         };
-        let (decision, source) = self.ask_gate(&retry, &ctx.cancel).await;
+        let (decision, source) = self.ask_gate(&retry, &ctx.cancel, events).await;
         let _ = events
             .send(AgentEvent::Approval(
                 self.record_decision(&retry, &decision, &source),
@@ -214,20 +219,49 @@ impl ToolExecutor {
         }
     }
 
-    /// Asks the gate (never the policy), unless the turn is cancelled first.
+    /// Asks the gate (never the policy), unless the turn is cancelled first. When the gate asks
+    /// a person, the prompt is reported on `events` as it opens
+    /// ([`AgentEvent::ApprovalPending`]) and as it closes ([`AgentEvent::ApprovalResolved`]).
     async fn ask_gate(
         &self,
         request: &ApprovalRequest,
         cancel: &CancellationToken,
+        events: &mpsc::Sender<AgentEvent>,
     ) -> (Decision, DecisionSource) {
-        tokio::select! {
+        let prompt = self.gate.asks_user() && !cancel.is_cancelled();
+        if prompt {
+            let _ = events
+                .send(AgentEvent::ApprovalPending(PendingApproval::new(
+                    request,
+                    self.asker(),
+                )))
+                .await;
+        }
+        let (decision, source) = tokio::select! {
             biased;
             _ = cancel.cancelled() => (
                 Decision::Deny { reason: "cancelled by the user".into() },
                 DecisionSource::Cancelled,
             ),
             decision = self.gate.decide(request.clone()) => (decision, DecisionSource::Gate),
+        };
+        if prompt {
+            let _ = events
+                .send(AgentEvent::ApprovalResolved {
+                    request_id: request.call_id.clone(),
+                    resolution: ApprovalResolution::of(&decision, &source),
+                })
+                .await;
         }
+        (decision, source)
+    }
+
+    /// Who is asking, for [`PendingApproval::provider`].
+    fn asker(&self) -> &str {
+        self.provider
+            .as_deref()
+            .or(self.model_provider.as_deref())
+            .unwrap_or("rozu")
     }
 
     /// Decides `request`: auto-approved by the policy, or asked through the gate. Logs the
@@ -244,7 +278,7 @@ impl ToolExecutor {
     ) -> (Decision, DecisionSource) {
         let (decision, source) = match self.policy.auto_approval(request, tool) {
             Some(source) => (Decision::Approve, source),
-            None => self.ask_gate(request, cancel).await,
+            None => self.ask_gate(request, cancel, events).await,
         };
         let _ = events
             .send(AgentEvent::Approval(
@@ -268,7 +302,7 @@ impl ToolExecutor {
         cancel: &CancellationToken,
         events: &mpsc::Sender<AgentEvent>,
     ) -> (Decision, DecisionSource) {
-        let (mut decision, source) = self.ask_gate(request, cancel).await;
+        let (mut decision, source) = self.ask_gate(request, cancel, events).await;
         if decision == Decision::AlwaysAllowPrefix {
             decision = Decision::Approve;
         }

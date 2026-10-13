@@ -362,7 +362,8 @@ async fn chat(args: ChatArgs) -> anyhow::Result<ExitCode> {
             approvals_path(workspace.root()).display()
         )
     })?;
-    let (gate, mut asks) = CliGate::new();
+    let interactive = approve::stdin_is_interactive();
+    let (gate, mut asks) = CliGate::new(interactive);
     let session_id = new_session_id();
     let temp = match SessionTemp::create(&session_id) {
         Ok(temp) => Some(Arc::new(temp)),
@@ -397,10 +398,11 @@ async fn chat(args: ChatArgs) -> anyhow::Result<ExitCode> {
     };
     let io = TurnIo {
         input: &input,
-        interactive: approve::stdin_is_interactive(),
+        interactive,
         interrupts: &interrupts,
         printer: &printer,
     };
+    crate::sandbox_warning::warn_if_unsandboxed();
     printer.unpriced_note(&choice);
 
     let prompt = args.prompt.join(" ");
@@ -680,6 +682,8 @@ impl TurnPrinter<'_> {
                     _ => None,
                 };
             }
+            // The card and the decision line already show the prompt and its answer.
+            AgentEvent::ApprovalPending(_) | AgentEvent::ApprovalResolved { .. } => {}
             // Totals come from the session once the turn ends (see `Printer::usage_line`).
             AgentEvent::Usage(_) => {}
             AgentEvent::TurnFinished(outcome) => match outcome {
