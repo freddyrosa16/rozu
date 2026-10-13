@@ -58,7 +58,7 @@ Demo keys:
   - Key **S** in the demo toggles back to the v7.2 behaviour.
 - **Interrupts blend from the live sample.** The reference blends from `gen(prev)`, which jumps if a change interrupts a morph that's still running. The Rust version recurses into the previous segment while its morph is unfinished, as handoff §4 asks. Once a morph has finished, the two are identical.
 - **Reduced-motion cross-fade:** to stay at ≤120 dots, the 150ms change is a per-dot dissolve (dot i switches at `hash(i+101)`) with an α bump of `×(1+.6·sin πx)`. No dot moves.
-- **No "approval pending" agent event.** `AgentEvent::Approval` arrives after the decision, so Waiting has to come from the host's `ApprovalGate` via `ActivityEvent::from(&ApprovalRequest)`.
+- ~~**No "approval pending" agent event.**~~ Resolved: `AgentEvent::ApprovalPending` / `ApprovalResolved` now drive Waiting (see `events.rs`), and `Debouncer` paces the pill.
 - **Not done:**
   - A numeric cross-check against `v7.2-orb.js`. Running node needed an approval this session didn't have.
   - The 22px golden-image test against `screens/v7.2-22px-compare.png`.

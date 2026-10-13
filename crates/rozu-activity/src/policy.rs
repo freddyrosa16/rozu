@@ -47,10 +47,90 @@ impl FramePolicy {
     }
 }
 
+/// Reduced motion (handoff §6): the OS setting (macOS Reduce motion), unless the user has
+/// overridden it in the app. An override sticks, so later OS changes don't move the effective
+/// value, until the user toggles back to what the OS says, which drops it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ReducedMotion {
+    /// The OS setting, as last read.
+    pub os: bool,
+    /// The in-app override; `None` follows the OS.
+    pub manual: Option<bool>,
+}
+
+impl ReducedMotion {
+    pub fn new(os: bool) -> Self {
+        ReducedMotion { os, manual: None }
+    }
+
+    /// Whether to draw in reduced motion.
+    pub fn effective(&self) -> bool {
+        self.manual.unwrap_or(self.os)
+    }
+
+    /// Flips the effective value (the demo's M key). Flipping back to the OS value drops the
+    /// override, so the OS setting applies again.
+    pub fn toggle(&mut self) {
+        let on = !self.effective();
+        self.manual = (on != self.os).then_some(on);
+    }
+
+    /// Records a new OS reading; returns whether the effective value changed.
+    pub fn set_os(&mut self, os: bool) -> bool {
+        let before = self.effective();
+        self.os = os;
+        self.effective() != before
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::state::ActivityState::*;
+
+    #[test]
+    fn reduced_motion_os_flag_and_override() {
+        for os in [false, true] {
+            for manual in [None, Some(false), Some(true)] {
+                let rm = ReducedMotion { os, manual };
+                assert_eq!(rm.effective(), manual.unwrap_or(os), "{rm:?}");
+            }
+        }
+        assert!(
+            ReducedMotion::new(true).effective(),
+            "follows the OS at startup"
+        );
+
+        // Overriding, then toggling back, follows the OS again.
+        let mut rm = ReducedMotion::new(true);
+        rm.toggle();
+        assert_eq!(
+            rm,
+            ReducedMotion {
+                os: true,
+                manual: Some(false)
+            }
+        );
+        rm.toggle();
+        assert_eq!(rm, ReducedMotion::new(true));
+
+        // Without an override, OS changes apply.
+        let mut rm = ReducedMotion::new(false);
+        assert!(rm.set_os(true));
+        assert!(rm.effective());
+        assert!(!rm.set_os(true), "same reading");
+
+        // The override wins over OS changes until it's toggled back.
+        let mut rm = ReducedMotion::new(false);
+        rm.toggle();
+        assert!(rm.effective());
+        assert!(!rm.set_os(true));
+        assert!(!rm.set_os(false));
+        assert!(rm.effective());
+        rm.toggle();
+        assert_eq!(rm, ReducedMotion::new(false));
+        assert!(rm.set_os(true), "following the OS again");
+    }
 
     #[test]
     fn fps_by_window_and_state() {
