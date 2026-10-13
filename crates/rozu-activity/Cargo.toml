@@ -1,0 +1,18 @@
+[package]
+name = "rozu-activity"
+description = "v7.2 activity indicator for rozu: the dot-orb generators, morph timeline, projection and agent-event mapping (no GUI deps)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+default = ["core"]
+# `from_agent_events` / `From<&AgentEvent>`. Off for GUI spikes that only want the orb.
+core = ["dep:rozu-core"]
+
+[dependencies]
+rozu-core = { workspace = true, optional = true }
+serde_json.workspace = true
