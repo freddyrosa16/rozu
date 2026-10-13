@@ -21,9 +21,6 @@ pub const CAMERA: f64 = 3.2;
 pub const R: f64 = 0.9;
 /// The globe's tilt toward the camera (rad).
 const TILT: f64 = 0.3;
-/// Notes and Editing look down on the globe at this tilt, so a line of latitude reads as a
-/// whole ellipse.
-const PAGE_TILT: f64 = 0.8;
 /// The plane Done's and Error's flat symbols sit on (toward the camera).
 pub const GLYPH_Z: f64 = 0.3;
 
@@ -176,12 +173,8 @@ fn dir(size: OrbSize, i: usize) -> Vec3 {
 
 /// Dot `i` on the globe of radius `r`, spun by `yaw` radians and tilted toward the camera.
 fn globe(size: OrbSize, i: usize, yaw: f64, r: f64) -> Vec3 {
-    globe_tilted(size, i, yaw, r, TILT)
-}
-
-fn globe_tilted(size: OrbSize, i: usize, yaw: f64, r: f64, tilt: f64) -> Vec3 {
     let d = dir(size, i);
-    rot_x(rot_y([d[0] * r, d[1] * r, d[2] * r], yaw), tilt)
+    rot_x(rot_y([d[0] * r, d[1] * r, d[2] * r], yaw), TILT)
 }
 
 /// Fraction `0..1` round a ring, starting at the front and going round the back (writing order).
@@ -299,34 +292,6 @@ pub fn generate(size: OrbSize, state: ActivityState, i: usize, t: f64) -> Dot {
             dot(p, lit, (0.85 + 0.45 * lit) * k, 0.45 + 0.55 * lit)
         }
         // Three lines of text write themselves round the globe, hold, then start over.
-        ActivityState::Notes => {
-            let (_, _, j) = size.grid(i);
-            let p = globe_tilted(size, i, 0.0, R, PAGE_TILT);
-            let mid = (size.rings() - 1) as f64 / 2.0;
-            let lines = [mid - 2.0, mid, mid + 2.0].map(|l| l.round() as usize);
-            let Some(li) = lines.iter().position(|&l| l == j) else {
-                return dot(p, 0.0, 0.75 * k, 0.3);
-            };
-            let ph = (t % 2.6) / 1.9;
-            let w = cl(ph * 3.0 - li as f64);
-            let u = round_from(size, i);
-            let on = u <= w;
-            let head = on && w < 1.0 && u > w - 0.06;
-            let s = if head {
-                1.6
-            } else if on {
-                1.15
-            } else {
-                0.75
-            };
-            dot(
-                p,
-                if on { 1.0 } else { 0.0 },
-                s * k,
-                if on { 1.0 } else { 0.35 },
-            )
-        }
-        // A lit band reads down the globe, line by line.
         ActivityState::Reading => {
             let (phi, _, _) = size.grid(i);
             let p = globe(size, i, 0.25 * t * size.speed(), R);
@@ -349,27 +314,34 @@ pub fn generate(size: OrbSize, state: ActivityState, i: usize, t: f64) -> Dot {
         // One full line of a page is revised: a caret sweeps round it and the dots behind it
         // brighten as new text, settling back over half a lap.
         ActivityState::Editing => {
+            // A caret writes every dot, ring by ring, from the bottom of the globe to the top:
+            // written over 2s, held, then cleared over the last .3s.
             let (_, _, j) = size.grid(i);
-            let p = globe_tilted(size, i, 0.0, R, PAGE_TILT);
-            let line = ((size.rings() - 1) as f64 / 2.0).round() as usize - 1;
-            if j != line {
-                return dot(p, 0.0, 0.75 * k, 0.35);
+            let p = globe(size, i, 0.0, R);
+            let ph = t % 2.6;
+            let rings = size.rings() as f64;
+            let o = (j as f64 + round_from(size, i)) / rings;
+            let w = (ph / 2.0).min(1.0);
+            if ph >= 2.3 {
+                let q = (ph - 2.3) / 0.3;
+                return dot(p, 0.75 * (1.0 - q), (1.15 - 0.4 * q) * k, 0.9 - 0.6 * q);
             }
-            let cx = (t / 2.4) % 1.0;
-            let u = round_from(size, i);
-            let du = (u - cx).abs();
-            if du.min(1.0 - du) < 0.5 / size.lon() as f64 {
-                return dot(p, 1.0, 1.7 * k, 1.0);
+            if o >= w {
+                return dot(p, 0.0, 0.75 * k, 0.3);
             }
-            // The revised dots behind the caret settle back over half a lap.
-            let d = ((cx - u) % 1.0 + 1.0) % 1.0;
-            let fresh = (1.0 - d / 0.5).max(0.0);
-            dot(
-                p,
-                0.6 + 0.4 * fresh,
-                (1.15 + 0.45 * fresh) * k,
-                0.85 + 0.15 * fresh,
-            )
+            // The last ring and a half is fresh; the newest dot is the caret.
+            let fresh = (1.0 - (w - o) * rings / 1.5).max(0.0);
+            let head = ph < 2.0 && (w - o) * rings * (size.ring_len(j) as f64) < 1.0;
+            if head {
+                dot(p, 1.0, 1.7 * k, 0.9 + 0.1 * fresh)
+            } else {
+                dot(
+                    p,
+                    0.75 + 0.25 * fresh,
+                    (1.15 + 0.5 * fresh) * k,
+                    0.9 + 0.1 * fresh,
+                )
+            }
         }
         // The globe spins fast with a helical stripe racing round it.
         ActivityState::Running => {
@@ -528,15 +500,11 @@ mod tests {
     #[test]
     fn matches_the_reference() {
         #[rustfmt::skip]
-        let sums: [(OrbSize, ActivityState, f64, [f64; 6]); 80] = [
+        let sums: [(OrbSize, ActivityState, f64, [f64; 6]); 72] = [
             (Large, Thinking, 0.0, [-14.3261699283, 1680.3413729625, 400.0591006128, 387.4496292860, 5295.4809046073, 2924.2830103930]),
             (Large, Thinking, 0.37, [-28.9775422074, 1679.5115993655, 402.7415330729, 439.0638579348, 5318.7073074992, 2952.6708361499]),
             (Large, Thinking, 1.1, [-56.2353429481, 1676.2769666866, 413.1982211685, 400.7733464505, 5301.4765773313, 2931.6110548335]),
             (Large, Thinking, 2.9, [-104.7255635489, 1660.7772209091, 463.3046855648, 499.6818797709, 5345.9854173255, 2986.0107481597]),
-            (Large, Notes, 0.0, [-14.3261699283, 1282.8397371500, 1156.6834581948, 0.0000000000, 4518.6428571429, 1896.5571428571]),
-            (Large, Notes, 0.37, [-14.3261699283, 1282.8397371500, 1156.6834581948, 209.5714285714, 4614.8785714286, 2032.7785714286]),
-            (Large, Notes, 1.1, [-14.3261699283, 1282.8397371500, 1156.6834581948, 821.1428571429, 4866.4500000000, 2430.3000000000]),
-            (Large, Notes, 2.9, [-14.3261699283, 1282.8397371500, 1156.6834581948, 168.0000000000, 4598.6357142857, 2005.7571428571]),
             (Large, Reading, 0.0, [-14.3261699283, 1680.3413729625, 400.0591006128, 45.2770853182, 4842.5242569448, 2138.1301054568]),
             (Large, Reading, 0.37, [-24.8303417106, 1679.8058072945, 401.7904388206, 837.5500181440, 5238.6607233577, 2653.1075117936]),
             (Large, Reading, 1.1, [-44.8484301683, 1677.9216017252, 407.8815631932, 751.6159917159, 5195.6937101437, 2597.2503946153]),
@@ -545,10 +513,10 @@ mod tests {
             (Large, Searching, 0.37, [-26.9085465527, 1679.6643718063, 402.2476613038, 210.9734411250, 5237.1639640473, 2536.5269218178]),
             (Large, Searching, 1.1, [-50.6184276323, 1677.1455654870, 410.3902773810, 240.0116248777, 5253.1349651113, 2553.9498320695]),
             (Large, Searching, 2.9, [-96.6647224556, 1665.0996269529, 449.3315218981, 152.9210072179, 5205.2351253984, 2501.6954614736]),
-            (Large, Editing, 0.0, [-14.3261699283, 1282.8397371500, 1156.6834581948, 349.1034482759, 4777.4092364532, 2375.1887931034]),
-            (Large, Editing, 0.37, [-14.3261699283, 1282.8397371500, 1156.6834581948, 344.2745320197, 4771.9195628079, 2373.3779495074]),
-            (Large, Editing, 1.1, [-14.3261699283, 1282.8397371500, 1156.6834581948, 349.6515599343, 4778.2544334975, 2375.3943349754]),
-            (Large, Editing, 2.9, [-14.3261699283, 1282.8397371500, 1156.6834581948, 346.0996715928, 4773.9442733990, 2374.0623768473]),
+            (Large, Editing, 0.0, [-14.3261699283, 1680.3413729625, 400.0591006128, 0.0000000000, 4518.6428571429, 1807.4571428571]),
+            (Large, Editing, 0.37, [-14.3261699283, 1680.3413729625, 400.0591006128, 56.0183862434, 4561.4153439153, 1848.7923544974]),
+            (Large, Editing, 1.1, [-14.3261699283, 1680.3413729625, 400.0591006128, 1676.1117952928, 5588.9950191571, 3100.2304324028]),
+            (Large, Editing, 2.9, [-14.3261699283, 1680.3413729625, 400.0591006128, 27.1539682540, 4539.6222222222, 1827.4346031746]),
             (Large, Running, 0.0, [-14.3261699283, 1680.3413729625, 400.0591006128, 1750.9560271176, 6006.0234376106, 4179.7325895069]),
             (Large, Running, 0.37, [-97.7795423163, 1664.5824531054, 451.0034043503, 1810.0277819481, 6025.7140225541, 4219.1137593940]),
             (Large, Running, 1.1, [-42.4368628374, 1614.8641847116, 611.7290498463, 1771.2386231926, 6012.7843029690, 4193.2543202237]),
@@ -573,10 +541,6 @@ mod tests {
             (Small, Thinking, 0.37, [-6.7281162861, 161.8642291347, 33.3832435949, 44.5541251019, 617.5164025974, 298.1690545203]),
             (Small, Thinking, 1.1, [-11.0567956552, 161.0864827844, 35.8974861102, 41.2319266019, 615.7971648736, 296.3418453453]),
             (Small, Thinking, 2.9, [-17.1011082795, 157.9329546918, 46.0919851275, 50.6259354995, 620.6585644782, 301.5085502390]),
-            (Small, Notes, 0.0, [-4.2882595841, 126.6339874916, 106.3258257281, 0.0000000000, 524.5232142857, 195.3928571429]),
-            (Small, Notes, 0.37, [-4.2882595841, 126.6339874916, 106.3258257281, 18.8571428571, 533.1975000000, 207.6500000000]),
-            (Small, Notes, 1.1, [-4.2882595841, 126.6339874916, 106.3258257281, 112.4285714286, 579.9367857143, 268.4714285714]),
-            (Small, Notes, 2.9, [-4.2882595841, 126.6339874916, 106.3258257281, 15.2857142857, 533.4767857143, 205.3285714286]),
             (Small, Reading, 0.0, [-4.2882595841, 162.1070954325, 32.5981228788, 4.9262807383, 562.3240399959, 216.0520824799]),
             (Small, Reading, 0.37, [-6.0439025529, 161.9445413919, 33.1236159007, 99.9153680539, 616.9427652024, 277.7949892350]),
             (Small, Reading, 1.1, [-9.2892020114, 161.4672910655, 34.6664364627, 62.1929187029, 595.2523568256, 253.2753971569]),
@@ -585,10 +549,10 @@ mod tests {
             (Small, Searching, 0.37, [-6.3874549279, 161.9054607497, 33.2499529926, 25.6880152250, 610.7073124869, 258.6699519921]),
             (Small, Searching, 1.1, [-10.1933816669, 161.2851494915, 35.2552506550, 19.9693798627, 607.0902756203, 255.2387707748]),
             (Small, Searching, 2.9, [-16.4258849341, 158.7609456372, 43.4153154953, 17.5052710003, 605.5317267648, 253.7603054573]),
-            (Small, Editing, 0.0, [-4.2882595841, 126.6339874916, 106.3258257281, 48.1714285714, 565.0237500000, 249.8892857143]),
-            (Small, Editing, 0.37, [-4.2882595841, 126.6339874916, 106.3258257281, 49.1300000000, 566.7403303571, 250.2487500000]),
-            (Small, Editing, 1.1, [-4.2882595841, 126.6339874916, 106.3258257281, 49.7857142857, 567.7529464286, 250.4946428571]),
-            (Small, Editing, 2.9, [-4.2882595841, 126.6339874916, 106.3258257281, 47.8224489796, 565.0486862245, 249.7584183673]),
+            (Small, Editing, 0.0, [-4.2882595841, 162.1070954325, 32.5981228788, 0.0000000000, 524.5232142857, 182.4428571429]),
+            (Small, Editing, 0.37, [-4.2882595841, 162.1070954325, 32.5981228788, 9.8983956916, 533.6784529478, 189.6408888889]),
+            (Small, Editing, 1.1, [-4.2882595841, 162.1070954325, 32.5981228788, 182.6410430839, 668.6715419501, 321.0129251701]),
+            (Small, Editing, 2.9, [-4.2882595841, 162.1070954325, 32.5981228788, 5.9348072562, 530.1232709751, 186.7358276644]),
             (Small, Running, 0.0, [-4.2882595841, 162.1070954325, 32.5981228788, 175.9923256273, 696.8915819667, 421.3996456563]),
             (Small, Running, 0.37, [-16.5349830834, 158.6601268010, 43.7412353845, 184.5160627863, 700.1590145443, 427.0821370956]),
             (Small, Running, 1.1, [2.4975343182, 152.0930709925, 64.9707415183, 178.6768810017, 697.9206615269, 423.1893492393]),
@@ -632,7 +596,7 @@ mod tests {
     fn busy_states_stay_on_the_globe() {
         for size in OrbSize::ALL {
             for state in [
-                Thinking, Notes, Reading, Searching, Editing, Running, Waiting, Offline,
+                Thinking, Reading, Searching, Editing, Running, Waiting, Offline,
             ] {
                 for t in [0.0, 0.7, 1.5, 3.3] {
                     for d in frame(size, state, t) {
@@ -714,31 +678,6 @@ mod tests {
     }
 
     #[test]
-    fn notes_write_three_lines_then_hold() {
-        let lit = |t: f64| {
-            frame(Large, Notes, t)
-                .iter()
-                .filter(|d| d.lit > 0.0)
-                .count()
-        };
-        let rings: usize = [5, 7, 9].iter().map(|&j| Large.ring_len(j)).sum();
-        assert!(lit(0.3) < lit(1.0));
-        assert!(lit(1.0) < lit(1.9));
-        assert_eq!(lit(1.95), rings, "every line goes all the way round");
-        assert_eq!(lit(2.5), rings);
-        assert!(lit(2.7) < rings, "starts over");
-        // Looked at from above, so no line dot hides at the back of the globe.
-        let f = frame(Large, Notes, 2.5);
-        assert!(f.iter().filter(|d| d.lit > 0.0).all(|d| d.p[2] > -0.9));
-        // The first dot written is at the front.
-        let first = (0..Large.dots())
-            .filter(|&i| Large.grid(i).2 == 7)
-            .min_by(|&a, &b| round_from(Large, a).total_cmp(&round_from(Large, b)))
-            .unwrap();
-        assert!(f[first].p[2] > 0.0);
-    }
-
-    #[test]
     fn reading_band_moves_down() {
         let band_y = |t: f64| {
             let f = frame(Large, Reading, t);
@@ -773,54 +712,55 @@ mod tests {
     }
 
     #[test]
-    fn editing_revises_one_full_line() {
-        let line = 6;
-        let on_line = |i: usize| Large.grid(i).2 == line;
-        for t in [0.0, 0.7, 1.9, 3.3] {
-            let f = frame(Large, Editing, t);
-            // The whole line is always there, and exactly one dot is the caret.
-            assert!(
-                f.iter()
-                    .enumerate()
-                    .filter(|(i, _)| on_line(*i))
-                    .all(|(_, d)| d.lit >= 0.6 && d.a >= 0.85)
-            );
-            assert_eq!(f.iter().filter(|d| d.s == 1.7).count(), 1, "t={t}");
-            for (i, d) in f.iter().enumerate() {
-                if !on_line(i) {
-                    assert_eq!((d.lit, d.a), (0.0, 0.35));
-                }
-            }
-        }
-        // The caret goes round from the front and laps every 2.4s.
-        let caret = |t: f64| {
+    fn editing_writes_every_dot_from_the_bottom_to_the_top() {
+        let written = |t: f64| {
             frame(Large, Editing, t)
                 .iter()
-                .position(|d| d.s == 1.7)
-                .unwrap()
+                .filter(|d| d.lit > 0.0)
+                .count()
         };
-        let front = (0..Large.dots())
-            .filter(|&i| on_line(i))
-            .min_by(|&a, &b| round_from(Large, a).total_cmp(&round_from(Large, b)))
+        assert!(written(0.2) < written(1.0));
+        assert!(written(1.0) < written(1.9));
+        assert_eq!(written(2.1), Large.dots(), "every dot, then held");
+        // Then everything fades together.
+        let f = frame(Large, Editing, 2.5);
+        assert!(f.iter().all(|d| d.lit > 0.0 && d.lit < 0.5), "clearing");
+        assert!(frame(Large, Editing, 2.59).iter().all(|d| d.lit < 0.05));
+        // Half-way through, every written dot sits on a ring at or below every unwritten one,
+        // and the lowest ring went first.
+        let f = frame(Large, Editing, 1.0);
+        let top_written = (0..Large.dots())
+            .filter(|&i| f[i].lit > 0.0)
+            .map(|i| Large.grid(i).2)
+            .max()
             .unwrap();
-        assert_eq!(caret(0.0), front);
-        assert_eq!(caret(2.4), front);
-        assert!(round_from(Large, caret(0.6)) < round_from(Large, caret(1.2)));
-        // Behind the caret the dots are freshly revised; ahead of it they have settled back.
-        let f = frame(Large, Editing, 1.2);
-        let lit_at = |u: f64| {
-            let i = (0..Large.dots())
-                .filter(|&i| on_line(i))
-                .min_by(|&a, &b| {
-                    (round_from(Large, a) - u)
-                        .abs()
-                        .total_cmp(&(round_from(Large, b) - u).abs())
-                })
-                .unwrap();
-            f[i].lit
+        let bottom_unwritten = (0..Large.dots())
+            .filter(|&i| f[i].lit == 0.0)
+            .map(|i| Large.grid(i).2)
+            .min()
+            .unwrap();
+        assert!(top_written <= bottom_unwritten);
+        assert!(
+            frame(Large, Editing, 0.1)
+                .iter()
+                .enumerate()
+                .all(|(i, d)| d.lit == 0.0 || Large.grid(i).2 == 0)
+        );
+        // Exactly one caret while writing, none while held or clearing.
+        let carets = |t: f64| {
+            frame(Large, Editing, t)
+                .iter()
+                .filter(|d| d.s == 1.7)
+                .count()
         };
-        assert!(lit_at(0.45) > lit_at(0.2), "fresh behind the caret");
-        assert!(lit_at(0.2) > lit_at(0.9), "settled ahead of it");
+        let counts: Vec<usize> = (0..20).map(|n| carets(0.1 * n as f64)).collect();
+        // (Briefly 0 or 2 where the edge crosses from one ring to the next.)
+        assert!(counts.iter().all(|&c| c <= 2), "{counts:?}");
+        assert!(
+            counts.iter().filter(|&&c| c == 1).count() >= 14,
+            "{counts:?}"
+        );
+        assert_eq!(carets(2.1), 0);
     }
 
     #[test]
