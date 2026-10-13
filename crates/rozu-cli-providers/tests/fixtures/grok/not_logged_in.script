@@ -1,0 +1,5 @@
+# Signed out: the cached login is offered, but authenticate fails.
+< initialize
+> {"jsonrpc":"2.0","id":__ID__,"result":{"protocolVersion":1,"agentCapabilities":{},"authMethods":[{"id":"cached_token","name":"Cached Grok login"}]}}
+< authenticate
+> {"jsonrpc":"2.0","id":__ID__,"error":{"code":-32000,"message":"Authentication required"}}

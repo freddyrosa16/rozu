@@ -1,0 +1,16 @@
+# use_tool → rozu's MCP tool: the tool call, Grok's permission request (approved once by rozu,
+# delegated to rozu mcp-serve), the MCP result. Then a built-in shell request (denied by
+# default), a file-system request (refused: rozu advertised no fs) and the answer.
+< session/prompt
+> {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-0001","update":{"sessionUpdate":"tool_call","toolCallId":"call-0001","title":"use_tool","kind":"use_tool","status":"pending","rawInput":{"tool_name":"rozu__read_file","tool_input":{"path":"README.md"}},"content":[],"locations":[]}}}
+> {"jsonrpc":"2.0","id":"perm-1","method":"session/request_permission","params":{"sessionId":"sess-0001","toolCall":{"toolCallId":"call-0001","title":"use_tool","kind":"use_tool","rawInput":{"tool_name":"rozu__read_file","tool_input":{"path":"README.md"}}},"options":[{"optionId":"allow-always","name":"Always allow","kind":"allow_always"},{"optionId":"allow-once","name":"Allow","kind":"allow_once"},{"optionId":"reject-once","name":"Reject","kind":"reject_once"}]}}
+<
+> {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-0001","update":{"sessionUpdate":"tool_call_update","toolCallId":"call-0001","status":null,"content":[],"rawOutput":null}}}
+> {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-0001","update":{"sessionUpdate":"tool_call_update","toolCallId":"call-0001","status":"completed","content":[],"rawOutput":{"type":"MCP","tool_name":"read_file","server_name":"rozu","output":{"OkayOutput":"# demo"}}}}}
+> {"jsonrpc":"2.0","id":"perm-2","method":"session/request_permission","params":{"sessionId":"sess-0001","toolCall":{"toolCallId":"call-0002","title":"run_terminal_cmd","kind":"execute","rawInput":{"command":"git push --force origin main"}},"options":[{"optionId":"allow-once","name":"Allow","kind":"allow_once"},{"optionId":"reject-once","name":"Reject","kind":"reject_once"}]}}
+<
+> {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-0001","update":{"sessionUpdate":"tool_call_update","toolCallId":"call-0002","title":"run_terminal_cmd","status":"failed","rawInput":{"command":"git push --force origin main"},"rawOutput":{"output":{"ErrorOutput":"User rejected the tool call"}}}}}
+> {"jsonrpc":"2.0","id":"fs-1","method":"fs/read_text_file","params":{"sessionId":"sess-0001","path":"/etc/hosts"}}
+<
+> {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-0001","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"The README says demo."}}}}
+> {"jsonrpc":"2.0","id":__ID__,"result":{"stopReason":"end_turn","_meta":{"inputTokens":10364,"cachedReadTokens":6144,"outputTokens":448}}}

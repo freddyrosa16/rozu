@@ -1,13 +1,14 @@
 //! `rozu models`: list the known models with context window and prices.
 //!
 //! Codex's models come from the installed Codex CLI (`codex app-server`'s `model/list`) when it
-//! answers; otherwise a small static list, marked unverified, is shown.
+//! answers; otherwise a small static list, marked unverified, is shown. Grok's list is always
+//! the static, unverified one (Grok Build isn't asked).
 
 use std::process::ExitCode;
 
 use rozu_cli_providers::codex::DEFAULT_MODEL as CODEX_DEFAULT_MODEL;
 use rozu_cli_providers::codex::install::{CodexModel, find_codex_binary, list_models};
-use rozu_providers::registry::{self, CODEX_ID};
+use rozu_providers::registry::{self, CODEX_ID, GROK_ID};
 
 pub fn run() -> anyhow::Result<ExitCode> {
     let codex_live = codex_models();
@@ -35,7 +36,9 @@ pub fn run() -> anyhow::Result<ExitCode> {
             if is_default { " *" } else { "" }
         );
         if !model.is_metered() {
-            let note = if model.provider == CODEX_ID {
+            let note = if model.provider == GROK_ID {
+                " · unverified · memory features limited"
+            } else if model.provider == CODEX_ID {
                 " · unverified"
             } else {
                 ""
@@ -74,7 +77,10 @@ pub fn run() -> anyhow::Result<ExitCode> {
          Claude subscription through the official claude CLI: tokens are counted, cost isn't; \
          any model id the CLI accepts works. codex models run on your ChatGPT subscription \
          through the official Codex CLI the same way; `codex/default` is the model Codex is \
-         configured with. {}",
+         configured with. grok models run on your SuperGrok subscription through xAI's Grok \
+         Build CLI; the list is static and unverified, `grok/default` is Grok Build's own \
+         default, and rozu's memory features are limited there (no per-turn prompt-prefix \
+         control, cache writes not reported). {}",
         if codex_live.is_some() {
             "The codex list comes from the installed Codex CLI."
         } else {

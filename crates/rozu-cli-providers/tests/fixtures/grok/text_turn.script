@@ -1,0 +1,7 @@
+# A text turn: a thought (not shown), two message chunks, then the prompt result with usage in
+# `_meta` (inputTokens is the whole prompt, cached part included). Values from a 1.0.52 run.
+< session/prompt
+> {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-0001","update":{"sessionUpdate":"agent_thought_chunk","content":{"type":"text","text":"Greeting the user."}}}}
+> {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-0001","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Hello "}}}}
+> {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-0001","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"from Grok!"}}}}
+> {"jsonrpc":"2.0","id":__ID__,"result":{"stopReason":"end_turn","_meta":{"sessionId":"sess-0001","totalTokens":4711,"modelId":"grok-4.7","inputTokens":4591,"outputTokens":111,"cachedReadTokens":1152,"reasoningTokens":110,"usage":{"inputTokens":4591,"outputTokens":111,"totalTokens":4702,"cachedReadTokens":1152,"cacheCreationTokens":0,"reasoningTokens":110,"modelCalls":1,"costUsdTicks":81200000},"numTurns":1}}}

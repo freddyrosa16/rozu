@@ -3,6 +3,7 @@
 mod approve;
 mod auth;
 mod chat;
+mod grok_hook;
 mod interrupt;
 mod mcp_serve;
 mod models;
@@ -23,15 +24,16 @@ struct Cli {
 enum Command {
     /// Print versions of the rozu crates and where logs go.
     Doctor,
-    /// Manage provider API keys (stored in the OS keychain), check the claude and codex CLI
-    /// logins, and start `codex login`.
+    /// Manage provider API keys (stored in the OS keychain), check the claude, codex and grok
+    /// CLIs, and start `codex login` or `grok login`.
     Auth {
         #[command(subcommand)]
         command: auth::AuthCommand,
     },
     /// Chat with the agent. OPENAI_API_KEY / ANTHROPIC_API_KEY / XAI_API_KEY, if set, override
     /// the keychain; `--provider claude-cli` uses your Claude subscription via the claude CLI,
-    /// `--provider codex` your ChatGPT subscription via the Codex CLI.
+    /// `--provider codex` your ChatGPT subscription via the Codex CLI, `--provider grok` your
+    /// SuperGrok subscription via xAI's Grok Build CLI.
     Chat(chat::ChatArgs),
     /// List known models with context window and prices.
     Models,
@@ -40,6 +42,9 @@ enum Command {
     /// rozu's stdio MCP server, started by the claude or codex CLI (internal).
     #[command(hide = true)]
     McpServe(mcp_serve::McpServeArgs),
+    /// Grok Build's PostToolUse hook for rozu's MCP tools (internal).
+    #[command(hide = true)]
+    GrokHook(grok_hook::GrokHookArgs),
 }
 
 /// Name and version of every crate linked into this binary.
@@ -80,9 +85,10 @@ fn main() -> ExitCode {
         Some(Command::Models) => models::run(),
         Some(Command::Term) => term::run(),
         Some(Command::McpServe(args)) => mcp_serve::run(args),
+        Some(Command::GrokHook(args)) => grok_hook::run(args),
         None => {
             println!(
-                "rozu {}: try `rozu chat`, `rozu chat --provider claude-cli`, `rozu chat --provider codex`, `rozu models`, `rozu auth status` or `rozu --help`.",
+                "rozu {}: try `rozu chat`, `rozu chat --provider claude-cli`, `rozu chat --provider codex`, `rozu chat --provider grok`, `rozu models`, `rozu auth status` or `rozu --help`.",
                 env!("CARGO_PKG_VERSION")
             );
             Ok(ExitCode::SUCCESS)
