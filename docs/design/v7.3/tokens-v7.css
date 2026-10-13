@@ -1,0 +1,19 @@
+/* rozu tokens v7 (CURRENT SPEC: v7.3 activity orb pill). Load order: tokens.css → tokens-v4.css → tokens-v5.css → tokens-v6.css → tokens-v7.css.
+   DEPRECATED from v6: --bead-*, --dur-morph (480ms), trail/arc tokens, and the v5 progress line under the pill. No new hues. */
+[data-theme=dark]{--orb-dot:#F4F1EA;--orb-pill-bg:#1B1B1D;--orb-pill-border:#2A2A2E;--orb-label:#F4F1EA;--orb-meta:#9A9AA2;
+  --warning:#FBBF24;--success:#4ADE80;--danger:#F87171}
+[data-theme=light]{--orb-dot:#25242A;--orb-pill-bg:#ECECEF;--orb-pill-border:#DCDCE0;--orb-label:#25242A;--orb-meta:#55555C;
+  --warning:#8A5206;--success:#126B33;--danger:#B91C1C} /* light status tones darkened so labels clear 4.5:1 on #ECECEF */
+:root{
+  --orb-points:120;--orb-points-22:60;      /* hard max 120 */
+  --orb-camera:3.2;                         /* k = F/(F−z) */
+  --orb-depth-alpha-far:.12;--orb-depth-size-far:.40;
+  --orb-light-x:-.55;--orb-light-y:.6;--orb-light-z:.58; /* α×(.62+.48λ), size×(.9+.2λ) */
+  --orb-dot-base:.017;--orb-dot-base-22:.05;            /* × orb size */
+  --orb-lit-size:1.55;--orb-cue-size:1.25 1.4;--orb-context-alpha:.18 .30;--orb-lit-alpha:.5;
+  --dur-orb-morph:600ms;--orb-stagger:2.5ms;--orb-lift:.55;
+  --dur-orb-pulse:150ms;--orb-pulse-lit:.8;
+  --tempo-thinking:1.6s;--tempo-searching:2.4s;--tempo-reading:2.2s;--tempo-reading-band:4.4s;--tempo-notes:3.0s;--tempo-notes-stroke:1.5s;
+  --tempo-editing:530ms;--tempo-running:800ms;--tempo-waiting:2.6s;--tempo-offline-tick:300ms;--dur-done-ripple:1.1s;--dur-settle:1.3s;
+  --dur-orb-reduced-fade:150ms;
+  --size-orb:22px;--size-orb-lg:88px;--size-activity-pill:32px;--size-activity-pill-dock:34px}
