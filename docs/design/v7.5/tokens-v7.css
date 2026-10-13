@@ -16,7 +16,7 @@
   --orb-globe-radius:.9;--orb-globe-tilt:.3;--orb-page-tilt:.8;       /* v7.5: the dotted globe; Notes/Editing look down on it */
   --orb-rings-lg:15;--orb-lon-lg:30;--orb-dots-lg:284;                /* ≥30px: 15 lines of latitude, 284 dots */
   --orb-rings-22:9;--orb-lon-22:15;--orb-dots-22:86;--orb-dot-mul-22:1.15;--orb-speed-mul-22:1.15; /* 22px: its own point set */
-  --tempo-thinking:1.6s;--tempo-notes:2.6s;--tempo-reading:2.2s;--tempo-searching:2.4s;--tempo-editing:2.6s;--tempo-running:900ms;
+  --tempo-thinking:1.6s;--tempo-notes:2.6s;--tempo-reading:2.2s;--tempo-searching:2.4s;--tempo-editing:2.4s;--tempo-running:900ms;
   --tempo-waiting:1.8s;--tempo-offline:2.4s;--dur-done-draw:450ms;--dur-error-shake:900ms;--dur-settle:1.3s;
   --dur-orb-reduced-fade:150ms;
   --size-orb:22px;--size-orb-lg:88px;--size-activity-pill:32px;--size-activity-pill-dock:34px}
