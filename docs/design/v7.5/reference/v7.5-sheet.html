@@ -1,4 +1,4 @@
-<!doctype html><html><head><meta charset=utf-8><title>rozu v7.4 orbs</title>
+<!doctype html><html><head><meta charset=utf-8><title>rozu v7.5 orbs</title>
 <style>
 [data-theme=dark]{--bg-app:#0E0E10;--bg-surface:#151517;--border-subtle:#232327;--text-primary:#F4F1EA;--text-secondary:#B4B4BB;--text-muted:#7A7A82;
   --orb-dot:#F4F1EA;--orb-pill-bg:#1B1B1D;--orb-pill-border:#2A2A2E;--orb-label:#F4F1EA;--orb-meta:#9A9AA2;--warning:#FBBF24;--success:#4ADE80;--danger:#F87171}
@@ -21,22 +21,22 @@ canvas.big{width:96px;height:96px}
 .uses{font:11px/1.5 ui-monospace,monospace;color:var(--text-secondary)}
 </style></head>
 <body data-theme="dark">
-<div class="eyebrow">rozu v7.4 · activity orbs</div>
-<h1>One dotted ring, ten symbols</h1>
-<div class="sub">Every state keeps the same fully dotted ring and puts its own symbol inside it, so all ten read at 22px and a change only reshapes the symbol.</div>
+<div class="eyebrow">rozu v7.5 · activity orbs</div>
+<h1>A dotted globe, doing what the agent does</h1>
+<div class="sub">Every state is the same globe of small dots on lines of latitude; what it does is the state. The 22px pill draws its own smaller point set, tuned rather than scaled.</div>
 <div class="grid" id="grid"></div>
-<script src="v7.4-orb.js"></script><script>
+<script src="v7.5-orb.js"></script><script>
 const CARDS=[
- {orb:"thinking",name:"Thinking",label:"Thinking…",t:"0:01",meta:"a dot sphere turns inside; a lit arc sweeps the ring"},
- {orb:"notes",name:"Notes",label:"Jotting down notes…",t:"0:02",meta:"three lines write themselves"},
- {orb:"reading",name:"Reading",label:"Reading README.md",t:"0:03",meta:"a lit band moves down the page"},
- {orb:"searching",name:"Searching",label:'Searching "set_size"',t:"0:01",meta:"a magnifier circles, scanning"},
- {orb:"editing",name:"Editing",label:"Editing src/term/view.rs",t:"0:12",meta:"a line types out behind a blinking caret"},
- {orb:"running",name:"Running",label:"Running cargo test",t:"0:08",meta:"play; two arcs chase round the ring"},
- {orb:"waiting",name:"Waiting",label:"Waiting for approval",tone:"warning",t:"Y / N",meta:"pause bars; the ring breathes"},
- {orb:"done",name:"Done",label:"Done",tone:"success",t:"42s · 2 files",meta:"check draws itself once, then holds"},
- {orb:"error",name:"Error",label:"Command failed",tone:"danger",t:"R retry",meta:"cross shakes once, then holds"},
- {orb:"offline",name:"Offline",label:"Offline · retrying",t:"in 3s",meta:"broken ring; a retry arrow turns"},
+ {orb:"thinking",name:"Thinking",label:"Thinking…",t:"0:01",meta:"thought weather drifts over a slowly turning globe"},
+ {orb:"notes",name:"Notes",label:"Jotting down notes…",t:"0:02",meta:"three lines of text write themselves round the globe"},
+ {orb:"reading",name:"Reading",label:"Reading README.md",t:"0:03",meta:"a lit band reads down the globe"},
+ {orb:"searching",name:"Searching",label:'Searching "set_size"',t:"0:01",meta:"a lens roams the surface; the dots under it swell"},
+ {orb:"editing",name:"Editing",label:"Editing src/term/view.rs",t:"0:12",meta:"a caret retypes the equator, then blinks"},
+ {orb:"running",name:"Running",label:"Running cargo test",t:"0:08",meta:"a fast spin with a helical stripe"},
+ {orb:"waiting",name:"Waiting",label:"Waiting for approval",tone:"warning",t:"Y / N",meta:"the globe stops and breathes"},
+ {orb:"done",name:"Done",label:"Done",tone:"success",t:"42s · 2 files",meta:"the dots gather into a check; the rest rest on a ring"},
+ {orb:"error",name:"Error",label:"Command failed",tone:"danger",t:"R retry",meta:"a cross that shakes once, then holds"},
+ {orb:"offline",name:"Offline",label:"Offline · retrying",t:"in 3s",meta:"the globe dims and its rings drop out"},
 ];
 const g=document.getElementById('grid');
 for(const c of CARDS){g.insertAdjacentHTML('beforeend',`<div class="card"><div class="name">${c.name}</div><canvas class="big" data-orb="${c.orb}"></canvas>

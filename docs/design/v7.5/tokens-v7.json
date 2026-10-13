@@ -1,5 +1,5 @@
 {
-  "$description": "rozu tokens v7 (CURRENT SPEC: v7.4 activity orb pill: one dotted ring, ten symbols). Layered after tokens-v6.json. Deprecated from v6: bead.*, size.beadDiameter22, motion.morph 480ms, trail, arcBow, and the v5 progress line under the pill. CSS: tokens.css \u2192 tokens-v4.css \u2192 tokens-v5.css \u2192 tokens-v6.css \u2192 tokens-v7.css.",
+  "$description": "rozu tokens v7 (CURRENT SPEC: v7.5 activity orb pill: a dotted globe per state at two tuned sizes). Layered after tokens-v6.json. Deprecated from v6: bead.*, size.beadDiameter22, motion.morph 480ms, trail, arcBow, and the v5 progress line under the pill. CSS: tokens.css \u2192 tokens-v4.css \u2192 tokens-v5.css \u2192 tokens-v6.css \u2192 tokens-v7.css.",
   "color": {
     "orbDot": {
       "$type": "color",
@@ -85,12 +85,13 @@
   "orb": {
     "points": {
       "$type": "number",
-      "$value": 120,
-      "$description": "hard max"
+      "$value": 284,
+      "$description": "hard max; the large point set"
     },
     "points22": {
       "$type": "number",
-      "$value": 60
+      "$value": 86,
+      "$description": "the 22px point set"
     },
     "camera": {
       "$type": "number",
@@ -115,12 +116,12 @@
     },
     "dotBase": {
       "$type": "number",
-      "$value": 0.017,
+      "$value": 0.011,
       "$description": "\u00d7 orb size"
     },
     "dotBase22": {
       "$type": "number",
-      "$value": 0.05
+      "$value": 0.045
     },
     "litSize": {
       "$type": "number",
@@ -138,16 +139,15 @@
       "$type": "number",
       "$value": 1.6
     },
-    "ring": {
+    "globe": {
       "$type": "number",
       "$value": {
-        "dots": 44,
-        "radius": 0.86,
-        "z": 0.3,
-        "alpha": 0.55,
-        "size": 0.85
+        "radius": 0.9,
+        "tilt": 0.3,
+        "large": { "rings": 15, "lon": 30, "dots": 284, "dotMul": 1, "speedMul": 1 },
+        "small": { "rings": 9, "lon": 15, "dots": 86, "dotMul": 1.15, "speedMul": 1.15 }
       },
-      "$description": "the dotted ring every state shares; dots 0..44"
+      "$description": "the dotted globe: lines of latitude, up to `lon` dots round the equator; the 22px size is its own point set"
     }
   },
   "motion": {
@@ -157,7 +157,8 @@
     },
     "orbStagger": {
       "$type": "duration",
-      "$value": "2.5ms"
+      "$value": "300ms",
+      "$description": "across the whole cloud: dot i starts hash(i)·300ms late"
     },
     "orbLift": {
       "$type": "number",
@@ -179,37 +180,37 @@
       "thinking": {
         "$type": "duration",
         "$value": "1.6s",
-        "$description": "ring sweep"
+        "$description": "thought weather drifts; the globe turns at .5 rad/s"
       },
       "notes": {
         "$type": "duration",
         "$value": "2.6s",
-        "$description": "write 1.9s, hold, repeat"
+        "$description": "three lines write round the globe over 1.9s, hold, repeat"
       },
       "reading": {
         "$type": "duration",
         "$value": "2.2s",
-        "$description": "band down the page"
+        "$description": "a band reads down the globe"
       },
       "searching": {
         "$type": "duration",
         "$value": "2.4s",
-        "$description": "magnifier circles"
+        "$description": "a lens roams the surface"
       },
       "editing": {
         "$type": "duration",
         "$value": "2.4s",
-        "$description": "type 1.6s, then blink at 200ms"
+        "$description": "a caret retypes the equator over 1.6s, then blinks at 200ms"
       },
       "running": {
         "$type": "duration",
         "$value": "900ms",
-        "$description": "two arcs chase"
+        "$description": "a helical stripe; the globe spins at 2.4 rad/s"
       },
       "waiting": {
         "$type": "duration",
         "$value": "1.8s",
-        "$description": "ring breath"
+        "$description": "the globe breathes ±3%"
       },
       "doneDraw": {
         "$type": "duration",
@@ -224,7 +225,7 @@
       "offline": {
         "$type": "duration",
         "$value": "2.4s",
-        "$description": "retry arrow turn"
+        "$description": "rings drop out in 400ms slots"
       },
       "settle": {
         "$type": "duration",

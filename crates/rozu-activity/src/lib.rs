@@ -1,14 +1,14 @@
-//! The rozu v7.4 activity indicator: a dotted-ring orb, a label and a timer in a pill.
+//! The rozu v7.5 activity indicator: a dotted-globe orb, a label and a timer in a pill.
 //!
 //! Everything here is pure and deterministic, so any renderer (GPUI, a canvas, a golden-image
 //! test) draws the same frame for the same time:
 //!
-//! 1. [`generate`] makes one state's 120 dots at a time `t` (`gen` in
-//!    `docs/design/v7.4/reference/v7.4-orb.js`, ported 1:1; `gen` is a keyword in Rust 2024):
-//!    a fully dotted ring that every state shares, around a symbol for the state.
+//! 1. [`generate`] makes one state's dots at a time `t` for an [`OrbSize`] (`gen` in
+//!    `docs/design/v7.5/reference/v7.5-orb.js`, ported 1:1; `gen` is a keyword in Rust 2024):
+//!    a globe of dots on lines of latitude, doing what the state says.
 //! 2. [`Orb::sample`] blends states over a timeline: the 600ms critically damped morph and the
 //!    150ms brighten pulse, or static frames in reduced-motion mode.
-//! 3. [`project`] turns the samples into a depth-sorted draw list (≤120 dots) for a given orb
+//! 3. [`project`] turns the samples into a depth-sorted draw list (≤284 dots) for a given orb
 //!    size and scale factor, applying each dot's state size (`base · s · k · …`).
 //! 4. [`FramePolicy`] says how often to draw, and [`ActivityTracker`] maps agent events to states
 //!    and labels.
@@ -24,9 +24,7 @@ pub mod tokens;
 pub use events::{Activity, ActivityEvent, ActivityTracker, tool_state};
 #[cfg(feature = "core")]
 pub use events::{from_agent_event, from_agent_events};
-pub use generate::{
-    CAMERA, Dot, GLYPH, GLYPH_R, GLYPH_Z, N_POINTS, RING, Vec3, fib, generate, hash,
-};
+pub use generate::{CAMERA, Dot, GLYPH_Z, MAX_DOTS, OrbSize, R, Vec3, generate, hash, vnoise};
 pub use orb::{MORPH, MORPH_END, Orb, PULSE, SETTLE, STAGGER, Sample};
 pub use policy::FramePolicy;
 pub use project::{DrawDot, MAX_POINTS, POINTS_22, ProjectOptions, project, project_with};
