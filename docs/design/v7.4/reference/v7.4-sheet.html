@@ -9,8 +9,9 @@ body{width:1400px;background:var(--bg-app);color:var(--text-primary);font:13px/1
 .eyebrow{font:600 12px/1 system-ui;letter-spacing:.06em;text-transform:uppercase;color:var(--text-muted)}
 h1{font-size:26px;font-weight:600;margin:6px 0 4px}.sub{color:var(--text-secondary);max-width:1000px}
 .grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:12px;margin-top:18px}
+canvas.big{width:96px;height:96px}
 .card{border-radius:14px;background:var(--bg-surface);border:1px solid var(--border-subtle);padding:14px;display:flex;flex-direction:column;gap:12px}
-.name{font-weight:600}.big{width:120px;height:120px;display:block;margin:0 auto}
+.name{font-weight:600}.big{display:block;margin:0 auto}
 .pill{display:inline-flex;align-items:center;gap:8px;height:32px;padding:0 12px 0 6px;border-radius:999px;align-self:flex-start;max-width:100%;white-space:nowrap;
   background:var(--orb-pill-bg);border:1px solid var(--orb-pill-border)}
 .pill canvas{width:22px;height:22px;flex:none}.pill .l{font-weight:500;color:var(--orb-label);overflow:hidden;text-overflow:ellipsis}
@@ -21,21 +22,26 @@ h1{font-size:26px;font-weight:600;margin:6px 0 4px}.sub{color:var(--text-seconda
 </style></head>
 <body data-theme="dark">
 <div class="eyebrow">rozu v7.4 · activity orbs</div>
-<h1>Five orbs, one for each thing you need to know</h1>
-<div class="sub">Every busy state shares the Working orb and the label says what it's doing, so a fast agent loop no longer morphs on every tool call. Waiting, Done, Error and Offline each get a shape that reads at 22px.</div>
+<h1>One dotted ring, ten symbols</h1>
+<div class="sub">Every state keeps the same fully dotted ring and puts its own symbol inside it, so all ten read at 22px and a change only reshapes the symbol.</div>
 <div class="grid" id="grid"></div>
 <script src="v7.4-orb.js"></script><script>
 const CARDS=[
- {orb:"working",name:"Working",label:"Running cargo test",t:"0:08",uses:"thinking · notes · reading · searching · editing · running",meta:"ORBIT · a lit comet circles a turning sphere"},
- {orb:"waiting",name:"Waiting",label:"Waiting for approval",tone:"warning",t:"Y / N",uses:"waiting",meta:"PING · the sphere holds still and pings for you"},
- {orb:"done",name:"Done",label:"Done",tone:"success",t:"42s · 2 files",uses:"done",meta:"CHECK · draws itself once, then holds"},
- {orb:"error",name:"Error",label:"Command failed",tone:"danger",t:"R retry",uses:"error",meta:"CROSS · one shake, then holds"},
- {orb:"offline",name:"Offline",label:"Offline · retrying",t:"in 3s",uses:"offline",meta:"DASHED RING · turns slowly while it retries"},
+ {orb:"thinking",name:"Thinking",label:"Thinking…",t:"0:01",meta:"a dot sphere turns inside; a lit arc sweeps the ring"},
+ {orb:"notes",name:"Notes",label:"Jotting down notes…",t:"0:02",meta:"three lines write themselves"},
+ {orb:"reading",name:"Reading",label:"Reading README.md",t:"0:03",meta:"a lit band moves down the page"},
+ {orb:"searching",name:"Searching",label:'Searching "set_size"',t:"0:01",meta:"a magnifier circles, scanning"},
+ {orb:"editing",name:"Editing",label:"Editing src/term/view.rs",t:"0:12",meta:"a line types out behind a blinking caret"},
+ {orb:"running",name:"Running",label:"Running cargo test",t:"0:08",meta:"play; two arcs chase round the ring"},
+ {orb:"waiting",name:"Waiting",label:"Waiting for approval",tone:"warning",t:"Y / N",meta:"pause bars; the ring breathes"},
+ {orb:"done",name:"Done",label:"Done",tone:"success",t:"42s · 2 files",meta:"check draws itself once, then holds"},
+ {orb:"error",name:"Error",label:"Command failed",tone:"danger",t:"R retry",meta:"cross shakes once, then holds"},
+ {orb:"offline",name:"Offline",label:"Offline · retrying",t:"in 3s",meta:"broken ring; a retry arrow turns"},
 ];
 const g=document.getElementById('grid');
 for(const c of CARDS){g.insertAdjacentHTML('beforeend',`<div class="card"><div class="name">${c.name}</div><canvas class="big" data-orb="${c.orb}"></canvas>
  <div class="pill"><canvas data-orb="${c.orb}"></canvas><span class="l ${c.tone||''}">${c.label}</span><span class="t">${c.t}</span></div>
- <div class="meta">${c.meta}</div><div class="uses">used for: ${c.uses}</div></div>`)}
+ <div class="meta">${c.meta}</div></div>`)}
 const q=new URLSearchParams(location.search);document.body.dataset.theme=q.get('theme')||'dark';
 const still=q.has('still'),fixed=q.get('T');
 function frame(T){for(const cv of document.querySelectorAll('canvas[data-orb]')){const o=cv.dataset.orb;

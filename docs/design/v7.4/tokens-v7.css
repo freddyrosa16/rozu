@@ -1,4 +1,4 @@
-/* rozu tokens v7 (CURRENT SPEC: v7.4 activity orb pill, five orbs). Load order: tokens.css → tokens-v4.css → tokens-v5.css → tokens-v6.css → tokens-v7.css.
+/* rozu tokens v7 (CURRENT SPEC: v7.4 activity orb pill, one dotted ring with ten symbols). Load order: tokens.css → tokens-v4.css → tokens-v5.css → tokens-v6.css → tokens-v7.css.
    DEPRECATED from v6: --bead-*, --dur-morph (480ms), trail/arc tokens, and the v5 progress line under the pill. No new hues. */
 [data-theme=dark]{--orb-dot:#F4F1EA;--orb-pill-bg:#1B1B1D;--orb-pill-border:#2A2A2E;--orb-label:#F4F1EA;--orb-meta:#9A9AA2;
   --warning:#FBBF24;--success:#4ADE80;--danger:#F87171}
@@ -13,7 +13,8 @@
   --orb-lit-size:1.55;--orb-lit-alpha:.5;
   --dur-orb-morph:600ms;--orb-stagger:2.5ms;--orb-lift:.55;
   --dur-orb-pulse:150ms;--orb-pulse-lit:.8;
-  --tempo-working:1.4s;--tempo-waiting:1.8s;--tempo-offline:2.4s;   /* v7.4: five orbs; every busy state is Working */
-  --dur-done-draw:450ms;--dur-error-shake:900ms;--dur-settle:1.3s;
+  --orb-ring-dots:44;--orb-ring-radius:.86;--orb-ring-alpha:.55;      /* v7.4: the dotted ring every state shares */
+  --tempo-thinking:1.6s;--tempo-notes:2.6s;--tempo-reading:2.2s;--tempo-searching:2.4s;--tempo-editing:2.4s;--tempo-running:900ms;
+  --tempo-waiting:1.8s;--tempo-offline:2.4s;--dur-done-draw:450ms;--dur-error-shake:900ms;--dur-settle:1.3s;
   --dur-orb-reduced-fade:150ms;
   --size-orb:22px;--size-orb-lg:88px;--size-activity-pill:32px;--size-activity-pill-dock:34px}

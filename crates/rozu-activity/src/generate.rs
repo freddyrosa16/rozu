@@ -1,14 +1,14 @@
-//! Per-orb point generators, ported 1:1 from `docs/design/v7.4/reference/v7.4-orb.js`.
+//! Per-state point generators, ported 1:1 from `docs/design/v7.4/reference/v7.4-orb.js`.
 //!
-//! There are five orbs ([`OrbKind`]). Working and Waiting are the spherical cloud of
-//! [`N_POINTS`] dots (dot `i` has a Fibonacci-sphere direction `d_i`); Done, Error and Offline
-//! gather the same dots into a flat glyph facing the camera: a faint ring around a bold check or
-//! cross, or a dashed ring. The arithmetic (including JS's truncating `%`) is kept as in the
-//! reference so samples match it at the same `t`.
+//! Every state is the same frame: a fully dotted ring of [`RING`] dots (indices `0..RING`) on
+//! the plane [`GLYPH_Z`] facing the camera, around a symbol drawn by the other dots. The ring
+//! dots never move between states, so a change only reshapes the symbol. Thinking's symbol is a
+//! small turning sphere; the rest are flat strokes. The arithmetic (including JS's truncating
+//! `%`) is kept as in the reference so samples match it at the same `t`.
 
 use std::f64::consts::{PI, TAU};
 
-use crate::state::OrbKind;
+use crate::state::ActivityState;
 
 /// A point in orb space (unit-radius sphere, +y up, +z toward the camera).
 pub type Vec3 = [f64; 3];
@@ -60,132 +60,244 @@ pub fn hash(i: usize) -> f64 {
     x - x.floor()
 }
 
-fn dir(i: usize) -> Vec3 {
-    fib(i, N_POINTS)
-}
-
-/// The shared camera: yaw `t·yaw` around y, then a fixed .3 rad tilt.
-fn view(p: Vec3, t: f64, yaw: f64) -> Vec3 {
-    rot_x(rot_y(p, t * yaw), 0.3)
-}
-
-fn sc(d: Vec3, r: f64) -> Vec3 {
-    [d[0] * r, d[1] * r, d[2] * r]
-}
-
-fn hypot3(p: Vec3) -> f64 {
-    (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt()
-}
-
-/// `Math.hypot(...p) || 1`.
-fn len_or_one(p: Vec3) -> f64 {
-    let m = hypot3(p);
-    if m == 0.0 { 1.0 } else { m }
-}
-
 fn dot(p: Vec3, lit: f64, s: f64, a: f64) -> Dot {
     Dot { p, lit, s, a }
 }
 
-/// Glyph dots `0..RING` are the faint ring; the rest draw the check or the cross. Both are
-/// contiguous index runs, so the 22px subsample keeps an even share of each.
-pub(crate) const RING: usize = 44;
-/// The glyph plane (toward the camera, so glyph dots are near and bright).
-pub(crate) const GLYPH_Z: f64 = 0.3;
-/// The glyph ring's radius.
-pub(crate) const GLYPH_R: f64 = 0.86;
+/// Dots `0..RING` are the ring; the rest draw the symbol. Both are contiguous index runs, so
+/// the 22px subsample keeps an even share of each.
+pub const RING: usize = 44;
+/// Symbol dots.
+pub const GLYPH: usize = N_POINTS - RING;
+/// The plane the ring and the flat symbols sit on (toward the camera).
+pub const GLYPH_Z: f64 = 0.3;
+/// The ring's radius.
+pub const GLYPH_R: f64 = 0.86;
 
-const CHECK: [[f64; 2]; 3] = [[-0.46, 0.02], [-0.14, -0.32], [0.48, 0.34]];
-const CROSS_A: [[f64; 2]; 2] = [[-0.36, 0.36], [0.36, -0.36]];
-const CROSS_B: [[f64; 2]; 2] = [[0.36, 0.36], [-0.36, -0.36]];
+type Pt = [f64; 2];
 
-/// Dot `j` of `n` on the glyph ring, starting at angle `rot`.
-fn ring_at(j: usize, n: usize, rot: f64) -> Vec3 {
-    let a = TAU * j as f64 / n as f64 + rot;
+/// Ring dot `j`, clockwise from 12 o'clock.
+fn ring_at(j: usize) -> Vec3 {
+    let a = PI / 2.0 - TAU * j as f64 / RING as f64;
     [GLYPH_R * a.cos(), GLYPH_R * a.sin(), GLYPH_Z]
 }
 
-/// The point at arc-length fraction `u` along a polyline.
-fn along(pts: &[[f64; 2]], u: f64) -> [f64; 2] {
-    let seg: Vec<f64> = pts
-        .windows(2)
-        .map(|w| (w[1][0] - w[0][0]).hypot(w[1][1] - w[0][1]))
-        .collect();
-    let mut d = u * seg.iter().sum::<f64>();
-    for (k, &l) in seg.iter().enumerate() {
-        if d <= l || k == seg.len() - 1 {
+/// Ring dot `j`'s angle, clockwise from 12 o'clock.
+fn ring_angle(j: usize) -> f64 {
+    (TAU * j as f64 / RING as f64) % TAU
+}
+
+/// A ring dot: resting (`lit` 0) or lit by a sweep.
+fn ring(j: usize, lit: f64, a: f64) -> Dot {
+    dot(ring_at(j), lit, 0.85 + 0.4 * lit, a.max(lit))
+}
+
+/// A symbol dot on the glyph plane.
+fn flat(xy: Pt, lit: f64, s: f64, a: f64) -> Dot {
+    dot([xy[0], xy[1], GLYPH_Z], lit, s, a)
+}
+
+/// Symbol dot `i` as a fraction `0..=1` along its path.
+fn gu(i: usize) -> f64 {
+    (i - RING) as f64 / (GLYPH - 1) as f64
+}
+
+/// How far (rad, `0..TAU`) ring dot `j` is behind a head moving clockwise at angle `h`.
+fn behind(j: usize, h: f64) -> f64 {
+    ((h - ring_angle(j)) % TAU + TAU) % TAU
+}
+
+/// The point at arc-length fraction `u` along a set of polylines, taken as one path.
+fn along(strokes: &[&[Pt]], u: f64) -> Pt {
+    let mut segs: Vec<(Pt, Pt, f64)> = Vec::new();
+    let mut total = 0.0;
+    for pts in strokes {
+        for w in pts.windows(2) {
+            let l = (w[1][0] - w[0][0]).hypot(w[1][1] - w[0][1]);
+            segs.push((w[0], w[1], l));
+            total += l;
+        }
+    }
+    let mut d = u * total;
+    for (k, &(a, b, l)) in segs.iter().enumerate() {
+        if d <= l || k == segs.len() - 1 {
             let f = if l != 0.0 { cl(d / l) } else { 0.0 };
-            let (a, b) = (pts[k], pts[k + 1]);
             return [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f];
         }
         d -= l;
     }
-    pts[0]
+    strokes[0][0]
 }
 
-/// Dot `i` of `orb` at `t` seconds into it.
-pub fn generate(orb: OrbKind, i: usize, t: f64) -> Dot {
-    match orb {
-        // Orbit: a slowly turning sphere with a lit comet (and a fainter twin opposite it)
-        // circling it on a tilted path, the tails fading. A spinner at 22px; at 88px the comets
-        // grow in front and shrink behind.
-        OrbKind::Working => {
-            let d = dir(i);
-            let r = 0.9 + 0.05 * (TAU * t / 2.8 + 3.0 * d[1]).sin();
-            let p = view(sc(d, r), t, 0.35);
-            let m = len_or_one(p);
-            // Orbit frame: the orbit is q.y ≈ 0, tilted toward the camera.
-            let q = rot_x([p[0] / m, p[1] / m, p[2] / m], -0.75);
-            let th = q[2].atan2(q[0]);
-            let head = TAU * t / 1.4;
-            let band = (-(q[1] / 0.5).powi(2)).exp();
-            let mut lit: f64 = 0.0;
-            for (off, gain) in [(0.0, 1.0), (PI, 0.55)] {
-                let lag = ((head + off - th) % TAU + TAU) % TAU;
-                let tail = if lag < 2.4 { 1.0 - lag / 2.4 } else { 0.0 };
-                lit = lit.max(tail * tail.sqrt() * gain);
-            }
-            let lit = cl(1.35 * band * lit);
-            dot(p, lit, 0.6 + 0.8 * lit, 0.38 + 0.62 * lit)
-        }
-        // Ping: the sphere stops turning and breathes; a lit ring pings outward from its face
-        // every 1.8s, and the face glows faintly with the breath in between.
-        OrbKind::Waiting => {
-            let d = dir(i);
-            let b = (TAU * t / 1.8).sin();
-            let p = view(sc(d, 0.86 * (1.0 + 0.04 * b)), 0.0, 0.0);
-            let m = len_or_one(p);
-            let g = (p[2] / m).clamp(-1.0, 1.0).acos();
-            let u = (t / 1.8) % 1.0;
-            let front = u * 2.2;
-            let ping = (-((g - front) / 0.28).powi(2)).exp() * (1.0 - u);
-            let lit = cl(ping * 1.4);
-            let glow = 0.25 * (b * 0.5 + 0.5) * (p[2] / m).max(0.0);
-            dot(p, lit, 0.5 + 0.8 * lit, 0.32 + 0.68 * lit.max(glow))
-        }
-        // Check: a faint ring around a check mark that draws itself once, pops, then holds.
-        OrbKind::Done => {
+/// `n + 1` points round an arc of `c`, radius `r`, from `a0` to `a1`.
+fn arc(c: Pt, r: f64, a0: f64, a1: f64, n: usize) -> Vec<Pt> {
+    (0..=n)
+        .map(|k| {
+            let a = a0 + (a1 - a0) * k as f64 / n as f64;
+            [c[0] + r * a.cos(), c[1] + r * a.sin()]
+        })
+        .collect()
+}
+
+const CHECK: &[Pt] = &[[-0.46, 0.02], [-0.14, -0.32], [0.48, 0.34]];
+const CROSS_A: &[Pt] = &[[-0.36, 0.36], [0.36, -0.36]];
+const CROSS_B: &[Pt] = &[[0.36, 0.36], [-0.36, -0.36]];
+const NOTES: &[&[Pt]] = &[
+    &[[-0.44, 0.26], [0.44, 0.26]],
+    &[[-0.44, 0.0], [0.44, 0.0]],
+    &[[-0.44, -0.26], [0.16, -0.26]],
+];
+const READ: &[&[Pt]] = &[
+    &[[-0.46, 0.3], [0.46, 0.3]],
+    &[[-0.46, 0.1], [0.46, 0.1]],
+    &[[-0.46, -0.1], [0.46, -0.1]],
+    &[[-0.46, -0.3], [0.2, -0.3]],
+];
+const PLAY: &[Pt] = &[[-0.2, 0.34], [-0.2, -0.34], [0.36, 0.0], [-0.2, 0.34]];
+const PAUSE: &[&[Pt]] = &[
+    &[[-0.17, 0.32], [-0.17, -0.32]],
+    &[[0.17, 0.32], [0.17, -0.32]],
+];
+
+/// The resting ring dot α.
+const RING_A: f64 = 0.55;
+
+/// Dot `i` of `state` at `t` seconds into the state.
+pub fn generate(state: ActivityState, i: usize, t: f64) -> Dot {
+    match state {
+        // A small dot sphere turns inside the ring while a lit arc sweeps round the ring.
+        ActivityState::Thinking => {
             if i < RING {
-                return dot(ring_at(i, RING, PI / 2.0), 0.0, 0.5, 0.3);
+                let g = behind(i, TAU * t / 1.6);
+                let tail = if g < 2.2 { 1.0 - g / 2.2 } else { 0.0 };
+                return ring(i, tail * tail, RING_A);
             }
-            let u = (i - RING) as f64 / (N_POINTS - RING - 1) as f64;
-            let xy = along(&CHECK, u);
+            let d = fib(i - RING, GLYPH);
+            let p = rot_x(
+                rot_y([d[0] * 0.46, d[1] * 0.46, d[2] * 0.46], t * 1.1),
+                0.45,
+            );
+            let lit = cl(p[2] / 0.46 * 0.8);
+            dot(p, lit * 0.7, 0.8 + 0.35 * lit, 0.4 + 0.6 * lit)
+        }
+        // Three lines write themselves left to right, then hold and start over.
+        ActivityState::Notes => {
+            if i < RING {
+                return ring(i, 0.0, RING_A);
+            }
+            let u = gu(i);
+            let w = cl((t % 2.6) / 1.9);
+            let on = u <= w;
+            let head = on && u > w - 0.04 && w < 1.0;
+            let s = if head {
+                1.5
+            } else if on {
+                1.0
+            } else {
+                0.45
+            };
+            flat(
+                along(NOTES, u),
+                if on { 1.0 } else { 0.0 },
+                s,
+                if on { 1.0 } else { 0.16 },
+            )
+        }
+        // Four lines of text; a lit band moves down the page one line at a time.
+        ActivityState::Reading => {
+            if i < RING {
+                return ring(i, 0.0, RING_A);
+            }
+            let xy = along(READ, gu(i));
+            let yb = 0.42 - 0.84 * ((t % 2.2) / 2.2);
+            let on = (-((xy[1] - yb) / 0.09).powi(2)).exp();
+            flat(xy, on, 0.7 + 0.5 * on, 0.28 + 0.72 * on)
+        }
+        // A magnifying glass circles slowly, scanning.
+        ActivityState::Searching => {
+            if i < RING {
+                return ring(i, 0.0, RING_A);
+            }
+            let a = TAU * t / 2.4;
+            let c = [-0.08 + 0.12 * a.cos(), 0.08 + 0.12 * a.sin()];
+            let u = gu(i);
+            let xy = if u < 0.74 {
+                along(&[&arc(c, 0.24, 0.0, TAU, 36)], u / 0.74)
+            } else {
+                let handle: &[Pt] = &[[c[0] + 0.17, c[1] - 0.17], [c[0] + 0.4, c[1] - 0.4]];
+                along(&[handle], (u - 0.74) / 0.26)
+            };
+            flat(xy, 1.0, 1.05, 1.0)
+        }
+        // A line types out behind a caret, which then blinks.
+        ActivityState::Editing => {
+            if i < RING {
+                return ring(i, 0.0, RING_A);
+            }
+            let ph = t % 2.4;
+            let w = cl(ph / 1.6);
+            let x = -0.46 + 0.92 * w;
+            let u = gu(i);
+            if u < 0.14 {
+                let y = -0.24 + 0.5 * (u / 0.14);
+                let blink = w >= 1.0 && ((ph - 1.6) / 0.2).floor() % 2.0 == 1.0;
+                return if blink {
+                    flat([x + 0.05, y], 0.0, 0.0, 0.0)
+                } else {
+                    flat([x + 0.05, y], 1.0, 0.95, 1.0)
+                };
+            }
+            let v = (u - 0.14) / 0.86;
+            let xx = -0.46 + 0.92 * v;
+            let on = xx <= x;
+            flat(
+                [xx, -0.2],
+                if on { 1.0 } else { 0.0 },
+                if on { 1.0 } else { 0.45 },
+                if on { 1.0 } else { 0.16 },
+            )
+        }
+        // A play triangle; two lit arcs chase each other round the ring.
+        ActivityState::Running => {
+            if i < RING {
+                let mut lit: f64 = 0.0;
+                for off in [0.0, PI] {
+                    let g = behind(i, TAU * t / 0.9 + off);
+                    lit = lit.max(if g < 1.4 { 1.0 - g / 1.4 } else { 0.0 });
+                }
+                return ring(i, lit, RING_A);
+            }
+            flat(along(&[PLAY], gu(i)), 1.0, 1.05, 1.0)
+        }
+        // Pause bars; the whole ring breathes, asking for you.
+        ActivityState::Waiting => {
+            let b = 0.5 + 0.5 * (TAU * t / 1.8).sin();
+            if i < RING {
+                return ring(i, 0.25 + 0.55 * b, RING_A);
+            }
+            flat(along(PAUSE, gu(i)), 1.0, 1.05 + 0.15 * b, 1.0)
+        }
+        // A check mark draws itself once, pops, then holds.
+        ActivityState::Done => {
+            if i < RING {
+                return ring(i, 0.0, RING_A);
+            }
+            let u = gu(i);
             let on = u <= cl((t - 0.25) / 0.45);
             let pop = if t > 0.7 && t < 0.95 {
                 (PI * (t - 0.7) / 0.25).sin()
             } else {
                 0.0
             };
-            dot(
-                [xy[0], xy[1], GLYPH_Z],
+            flat(
+                along(&[CHECK], u),
                 if on { 1.0 } else { 0.25 },
                 (if on { 1.15 } else { 0.6 }) * (1.0 + 0.2 * pop),
                 if on { 1.0 } else { 0.35 },
             )
         }
-        // Cross: a faint ring around a cross that shakes once, like a head saying no, then
-        // holds.
-        OrbKind::Error => {
+        // A cross that shakes once, like a head saying no, then holds.
+        ActivityState::Error => {
             let st = t - 0.3;
             let dx = if st > 0.0 && st < 0.9 {
                 0.13 * (-5.0 * st).exp() * (28.0 * st).sin()
@@ -193,39 +305,44 @@ pub fn generate(orb: OrbKind, i: usize, t: f64) -> Dot {
                 0.0
             };
             if i < RING {
-                let r = ring_at(i, RING, PI / 2.0);
-                return dot([r[0] + dx, r[1], r[2]], 0.0, 0.5, 0.3);
+                let mut r = ring(i, 0.0, RING_A);
+                r.p[0] += dx;
+                return r;
             }
-            let j = i - RING;
-            let n = N_POINTS - RING;
-            let half = n >> 1;
-            let (u, stroke) = if j < half {
-                (j as f64 / (half - 1) as f64, &CROSS_A)
-            } else {
-                ((j - half) as f64 / (n - half - 1) as f64, &CROSS_B)
-            };
-            let xy = along(stroke, u);
-            dot([xy[0] + dx, xy[1], GLYPH_Z], 1.0, 1.15, 1.0)
+            let xy = along(&[CROSS_A, CROSS_B], gu(i));
+            flat([xy[0] + dx, xy[1]], 1.0, 1.15, 1.0)
         }
-        // Dashed ring: six dashes turning slowly, the way a connection retries; each dash has a
-        // brighter middle. Nothing inside it.
-        OrbKind::Offline => {
-            let a = TAU * i as f64 / N_POINTS as f64 - TAU * t / 2.4;
-            let seg = (i as f64 / N_POINTS as f64 * 6.0) % 1.0;
-            let r = [
-                GLYPH_R * (a + PI / 2.0).cos(),
-                GLYPH_R * (a + PI / 2.0).sin(),
-                GLYPH_Z,
-            ];
-            if seg > 0.62 {
-                return dot(r, 0.0, 0.0, 0.0);
+        // The ring is broken at the top; a retry arrow inside turns slowly.
+        ActivityState::Offline => {
+            if i < RING {
+                let a = ring_angle(i);
+                let gap = !(0.55..=TAU - 0.55).contains(&a);
+                return if gap {
+                    dot(ring_at(i), 0.0, 0.0, 0.0)
+                } else {
+                    ring(i, 0.0, 0.4)
+                };
             }
-            let mid = (seg - 0.31).abs() < 0.08;
-            dot(
-                r,
-                if mid { 0.6 } else { 0.0 },
-                if mid { 0.9 } else { 0.65 },
-                if mid { 0.8 } else { 0.45 },
+            let u = gu(i);
+            let rot = -TAU * t / 2.4;
+            if u < 0.8 {
+                let a = rot + PI * 0.5 + 1.6 * PI * (u / 0.8);
+                return flat([0.4 * a.cos(), 0.4 * a.sin()], 0.7, 1.05, 0.9);
+            }
+            let tip = rot + PI * 0.5 + 1.6 * PI;
+            let v = (u - 0.8) / 0.2;
+            let side = if v < 0.5 { 1.0 } else { -1.0 };
+            let k = 0.24 * (if v < 0.5 { v } else { v - 0.5 }) * 2.0;
+            // The arrow travels anticlockwise; its barbs point back from the tip.
+            let back = tip - PI * 0.5 + side * 0.8;
+            flat(
+                [
+                    0.4 * tip.cos() + k * back.cos(),
+                    0.4 * tip.sin() + k * back.sin(),
+                ],
+                0.7,
+                1.05,
+                0.9,
             )
         }
     }
@@ -253,25 +370,31 @@ pub(crate) fn pulse(tin: f64) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
-
     use super::*;
+    use ActivityState::*;
 
-    fn frame(orb: OrbKind, t: f64) -> Vec<Dot> {
-        (0..N_POINTS).map(|i| generate(orb, i, t)).collect()
+    fn frame(state: ActivityState, t: f64) -> Vec<Dot> {
+        (0..N_POINTS).map(|i| generate(state, i, t)).collect()
+    }
+
+    fn xy_len(d: &Dot) -> f64 {
+        d.p[0].hypot(d.p[1])
     }
 
     #[test]
-    fn every_orb_is_finite() {
-        for orb in OrbKind::ALL {
+    fn every_state_is_finite() {
+        for state in ActivityState::ALL {
             for k in 0..200 {
                 let t = k as f64 * 0.037;
-                for d in frame(orb, t) {
+                for d in frame(state, t) {
                     let vals = [d.p[0], d.p[1], d.p[2], d.lit, d.s, d.a];
-                    assert!(vals.iter().all(|v| v.is_finite()), "{orb:?} t={t}: {d:?}");
-                    assert!(d.p.iter().all(|v| v.abs() < 2.0), "{orb:?} escaped: {d:?}");
-                    assert!((0.0..=1.0).contains(&d.lit), "{orb:?}: {d:?}");
-                    assert!((0.0..=1.0).contains(&d.a), "{orb:?}: {d:?}");
+                    assert!(vals.iter().all(|v| v.is_finite()), "{state:?} t={t}: {d:?}");
+                    assert!(
+                        d.p.iter().all(|v| v.abs() < 1.2),
+                        "{state:?} escaped: {d:?}"
+                    );
+                    assert!((0.0..=1.0).contains(&d.lit), "{state:?}: {d:?}");
+                    assert!((0.0..=1.0).contains(&d.a), "{state:?}: {d:?}");
                 }
             }
         }
@@ -279,9 +402,9 @@ mod tests {
 
     #[test]
     fn deterministic() {
-        for orb in OrbKind::ALL {
+        for state in ActivityState::ALL {
             for i in [0, 1, 59, 119] {
-                assert_eq!(generate(orb, i, 0.731), generate(orb, i, 0.731));
+                assert_eq!(generate(state, i, 0.731), generate(state, i, 0.731));
             }
         }
     }
@@ -289,41 +412,62 @@ mod tests {
     #[test]
     fn fib_is_on_unit_sphere() {
         for i in 0..N_POINTS {
-            assert!((hypot3(fib(i, N_POINTS)) - 1.0).abs() < 1e-12);
+            let f = fib(i, N_POINTS);
+            assert!(((f[0] * f[0] + f[1] * f[1] + f[2] * f[2]).sqrt() - 1.0).abs() < 1e-12);
         }
     }
 
-    /// Whole-orb checksums, Σ value·(1 + i/7) over all 120 dots, from the JS reference
+    /// Whole-cloud checksums, Σ value·(1 + i/7) over all 120 dots, from the JS reference
     /// (`docs/design/v7.4/reference/v7.4-orb.js`) at the same times.
     #[test]
     fn matches_the_reference() {
         #[rustfmt::skip]
-        let sums: [(OrbKind, f64, [f64; 6]); 20] = [
-            (OrbKind::Working, 0.0, [-0.3448376731681193, -276.1251884844912, -84.77270738267663, 149.73920259291538, 803.7913620743327, 526.0383056076075]),
-            (OrbKind::Working, 0.37, [-0.25221519733937825, -275.60338860310753, -84.59655614044176, 177.978357343883, 826.3826858751066, 543.5465815532076]),
-            (OrbKind::Working, 1.23, [-0.055589230341731355, -309.0926530893078, -94.88454550950327, 134.27273134863543, 791.4181850789089, 516.4490934361542]),
-            (OrbKind::Working, 4.9, [0.6982836155551402, -303.85830868088766, -93.71352143139049, 167.87960905186551, 818.3036872414924, 537.2853576121566]),
-            (OrbKind::Waiting, 0.0, [-0.3312412028439988, -281.84285564636644, -86.56566248834665, 22.990737558202508, 588.392590046562, 395.5516962153188]),
-            (OrbKind::Waiting, 0.37, [-0.34397758206042495, -292.6798453026354, -89.89415270968956, 100.9822851561251, 650.7858281249, 448.37312052404076]),
-            (OrbKind::Waiting, 1.23, [-0.3191370469943151, -271.5438052245762, -83.40239577818461, 121.25001865574683, 667.0000149245976, 448.20719126940185]),
-            (OrbKind::Waiting, 4.9, [-0.3181928466568822, -270.7404144715007, -83.15564106582019, 108.79953469691075, 657.0396277575286, 438.95031795408215]),
-            (OrbKind::Done, 0.0, [112.98222426186747, -10.621910649673456, 342.0, 245.67857142857144, 670.0928571428572, 394.7785714285714]),
-            (OrbKind::Done, 0.37, [112.98222426186747, -10.621910649673456, 342.0, 377.4642857142858, 766.7357142857145, 508.99285714285713]),
-            (OrbKind::Done, 1.23, [112.98222426186747, -10.621910649673456, 342.0, 960.8571428571429, 1194.5571428571432, 1014.6]),
-            (OrbKind::Done, 4.9, [112.98222426186747, -10.621910649673456, 342.0, 960.8571428571429, 1194.5571428571432, 1014.6]),
-            (OrbKind::Error, 0.0, [37.79088085580005, -28.108571428571462, 342.0, 960.8571428571429, 1194.5571428571432, 1014.6]),
-            (OrbKind::Error, 0.37, [134.41513776078816, -28.108571428571462, 342.0, 960.8571428571429, 1194.5571428571432, 1014.6]),
-            (OrbKind::Error, 1.23, [37.79088085580005, -28.108571428571462, 342.0, 960.8571428571429, 1194.5571428571432, 1014.6]),
-            (OrbKind::Error, 4.9, [37.79088085580005, -28.108571428571462, 342.0, 960.8571428571429, 1194.5571428571432, 1014.6]),
-            (OrbKind::Offline, 0.0, [281.50349996093166, -7.371428571428682, 342.0, 97.19999999999999, 496.7999999999999, 372.5999999999999]),
-            (OrbKind::Offline, 0.37, [153.37035076077015, -236.16962962446348, 342.0, 97.19999999999999, 496.7999999999999, 372.5999999999999]),
-            (OrbKind::Offline, 1.23, [-280.0573629976591, 29.4352149683911, 342.0, 97.19999999999999, 496.7999999999999, 372.5999999999999]),
-            (OrbKind::Offline, 4.9, [270.0036346991289, -79.97872028669418, 342.0, 97.19999999999999, 496.7999999999999, 372.5999999999999]),
+        let sums: [(ActivityState, f64, [f64; 6]); 40] = [
+            (Thinking, 0.0, [-38.10003945306034, -59.66857415682875, 26.257035293189794, 149.7327920203205, 992.6198246469887, 588.6462297101664]),
+            (Thinking, 0.37, [-38.06346560443972, -59.72079024502736, 26.36513081255245, 129.731228365492, 984.672700764301, 586.5057603163143]),
+            (Thinking, 1.23, [-37.82976403215396, -59.79012044062098, 26.50865522732102, 142.7916380430038, 989.8289487941374, 587.585320357731]),
+            (Thinking, 4.9, [-38.006980270831384, -59.55916953553002, 26.030550511047768, 136.61745335776249, 987.2851649589428, 584.0055500283909]),
+            (Notes, 0.0, [-73.77183323675257, -22.165714285714305, 342.0, 7.285714285714286, 592.3071428571428, 258.38571428571436]),
+            (Notes, 0.37, [-73.77183323675257, -22.165714285714305, 342.0, 124.28571428571429, 666.7285714285715, 356.6657142857143]),
+            (Notes, 1.23, [-73.77183323675257, -22.165714285714305, 342.0, 525.0, 894.4071428571428, 693.2657142857144]),
+            (Notes, 4.9, [-73.77183323675257, -22.165714285714305, 342.0, 960.8571428571429, 1113.1285714285714, 1059.3857142857144]),
+            (Reading, 0.0, [-50.08802371294276, -30.017142857142854, 342.0, 30.930189640375353, 840.3365233916161, 389.83830796964173]),
+            (Reading, 0.37, [-50.08802371294276, -30.017142857142854, 342.0, 177.56877677296816, 913.6558169579126, 495.4180907051086]),
+            (Reading, 1.23, [-50.08802371294276, -30.017142857142854, 342.0, 226.81664836292958, 938.2797527528935, 530.8765582498806]),
+            (Reading, 4.9, [-50.08802371294276, -30.017142857142854, 342.0, 128.12777086035143, 888.9353140016042, 459.8205664480244]),
+            (Searching, 0.0, [98.47954217188457, -39.59998967180963, 342.0, 960.8571428571429, 1161.1714285714286, 1059.3857142857144]),
+            (Searching, 0.37, [48.48494244999473, 55.42411452256196, 342.0, 960.8571428571429, 1161.1714285714286, 1059.3857142857144]),
+            (Searching, 1.23, [-131.77073188564148, -48.64654757807511, 342.0, 960.8571428571429, 1161.1714285714286, 1059.3857142857144]),
+            (Searching, 4.9, [94.55069258823207, -9.757414288502869, 342.0, 960.8571428571429, 1161.1714285714286, 1059.3857142857144]),
+            (Editing, 0.0, [-24.136883070639563, -176.6936054421769, 342.0, 88.0, 628.657142857143, 326.18571428571425]),
+            (Editing, 0.37, [-5.414883070639583, -176.6936054421769, 342.0, 235.8571428571429, 709.9785714285715, 450.38571428571424]),
+            (Editing, 1.23, [38.10111692936043, -176.6936054421769, 342.0, 705.8571428571429, 968.4785714285715, 845.1857142857142]),
+            (Editing, 4.9, [-19.07688307063949, -176.6936054421769, 342.0, 124.28571428571429, 648.6142857142858, 356.6657142857143]),
+            (Running, 0.0, [-29.910731209383144, 16.067388457659657, 342.0, 1011.8486746735757, 1181.5680412980016, 1070.2028823578087]),
+            (Running, 0.37, [-29.910731209383144, 16.067388457659657, 342.0, 1011.1355214578582, 1181.2827800117145, 1071.185356852144]),
+            (Running, 1.23, [-29.910731209383144, 16.067388457659657, 342.0, 1007.7138018111273, 1179.9140921530222, 1070.3011654370184]),
+            (Running, 4.9, [-29.910731209383144, 16.067388457659657, 342.0, 1008.2353444447855, 1180.1227092064855, 1069.2821147891475]),
+            (Waiting, 0.0, [-2.7223094272286716, -25.864761904761927, 342.0, 1054.9071428571428, 1270.8557142857144, 1059.3857142857144]),
+            (Waiting, 0.37, [-2.7223094272286716, -25.864761904761927, 342.0, 1102.2630136920473, 1359.070700121974, 1102.2630136920473]),
+            (Waiting, 1.23, [-2.7223094272286716, -25.864761904761927, 342.0, 1009.9019784188499, 1187.0196476378528, 1059.3857142857144]),
+            (Waiting, 4.9, [-2.7223094272286716, -25.864761904761927, 342.0, 1006.3912923391057, 1180.479906791784, 1059.3857142857144]),
+            (Done, 0.0, [37.400462550267264, -10.621910649673428, 342.0, 245.67857142857144, 732.7928571428574, 439.5642857142857]),
+            (Done, 0.37, [37.400462550267264, -10.621910649673428, 342.0, 377.4642857142858, 829.4357142857143, 553.7785714285714]),
+            (Done, 1.23, [37.400462550267264, -10.621910649673428, 342.0, 960.8571428571429, 1257.2571428571432, 1059.3857142857144]),
+            (Done, 4.9, [37.400462550267264, -10.621910649673428, 342.0, 960.8571428571429, 1257.2571428571432, 1059.3857142857144]),
+            (Error, 0.0, [-42.40299514151438, -28.759999999999998, 342.0, 960.8571428571429, 1257.2571428571432, 1059.3857142857144]),
+            (Error, 0.37, [54.2212617634737, -28.759999999999998, 342.0, 960.8571428571429, 1257.2571428571432, 1059.3857142857144]),
+            (Error, 1.23, [-42.40299514151438, -28.759999999999998, 342.0, 960.8571428571429, 1257.2571428571432, 1059.3857142857144]),
+            (Error, 4.9, [-42.40299514151438, -28.759999999999998, 342.0, 960.8571428571429, 1257.2571428571432, 1059.3857142857144]),
+            (Offline, 0.0, [63.466577130751176, -68.90277623683612, 342.0, 672.5999999999999, 1139.1928571428573, 926.0857142857144]),
+            (Offline, 0.37, [-34.99511212706994, -123.64782712161652, 342.0, 672.5999999999999, 1139.1928571428573, 926.0857142857144]),
+            (Offline, 1.23, [-133.54221010297692, 71.23755828298623, 342.0, 672.5999999999999, 1139.1928571428573, 926.0857142857144]),
+            (Offline, 4.9, [42.88251307202216, -92.85442727956617, 342.0, 672.5999999999999, 1139.1928571428573, 926.0857142857144]),
         ];
-        for (orb, t, want) in sums {
+        for (state, t, want) in sums {
             let mut got = [0.0; 6];
             for i in 0..N_POINTS {
-                let d = generate(orb, i, t);
+                let d = generate(state, i, t);
                 for (g, v) in got
                     .iter_mut()
                     .zip([d.p[0], d.p[1], d.p[2], d.lit, d.s, d.a])
@@ -332,118 +476,216 @@ mod tests {
                 }
             }
             for (g, w) in got.iter().zip(want) {
-                assert!((g - w).abs() < 1e-9, "{orb:?} t={t}: {got:?}");
+                assert!((g - w).abs() < 1e-9, "{state:?} t={t}: {got:?}");
             }
         }
     }
 
-    /// Lit dots of Working, as (count, mean angle around the view axis).
-    fn comet(t: f64) -> (usize, f64) {
-        let lit: Vec<Dot> = frame(OrbKind::Working, t)
-            .into_iter()
-            .filter(|d| d.lit > 0.6)
-            .collect();
-        let (sx, sy) = lit
-            .iter()
-            .fold((0.0, 0.0), |(x, y), d| (x + d.p[0], y + d.p[1]));
-        (lit.len(), sy.atan2(sx))
-    }
-
+    /// Every state keeps the full dotted ring in place (Offline's gap and Error's shake aside).
     #[test]
-    fn working_comet_is_always_visible_and_goes_round() {
-        let mut angles = vec![];
-        for k in 0..28 {
-            let t = k as f64 * 0.05;
-            let (n, a) = comet(t);
-            assert!(n >= 4, "only {n} lit dots at t={t}");
-            angles.push(a);
+    fn the_ring_is_shared() {
+        for state in ActivityState::ALL {
+            for t in [0.0, 0.7, 1.5, 3.3] {
+                let f = frame(state, t);
+                for (j, d) in f.iter().take(RING).enumerate() {
+                    let want = ring_at(j);
+                    if state == Offline && d.s == 0.0 {
+                        continue;
+                    }
+                    let dx = if state == Error {
+                        d.p[0] - want[0]
+                    } else {
+                        0.0
+                    };
+                    assert!(
+                        (d.p[0] - want[0] - dx).abs() < 1e-12
+                            && (d.p[1] - want[1]).abs() < 1e-12
+                            && d.p[2] == GLYPH_Z,
+                        "{state:?} ring dot {j} moved at t={t}: {d:?}"
+                    );
+                    assert!(
+                        d.s > 0.0 && d.a >= 0.4,
+                        "{state:?} ring dot {j} faded: {d:?}"
+                    );
+                }
+            }
         }
-        // Over one 1.4s loop the lit side covers every quadrant of the orb.
-        let quadrants: BTreeSet<i32> = angles
-            .iter()
-            .map(|a| ((a + PI) / (PI / 2.0)).floor() as i32)
-            .collect();
-        assert_eq!(quadrants.len(), 4, "{angles:?}");
     }
 
+    /// Each symbol is distinct: its still frame differs from every other state's.
     #[test]
-    fn working_is_a_sphere() {
-        for t in [0.0, 0.5, 1.3] {
-            for d in frame(OrbKind::Working, t) {
-                let r = hypot3(d.p);
-                assert!((0.84..=0.96).contains(&r), "t={t}: {r}");
+    fn symbols_differ() {
+        let stills: Vec<Vec<Dot>> = ActivityState::ALL
+            .iter()
+            .map(|s| frame(*s, s.reduced_motion_time())[RING..].to_vec())
+            .collect();
+        for (a, sa) in stills.iter().enumerate() {
+            for (b, sb) in stills.iter().enumerate().skip(a + 1) {
+                let diff: f64 = sa
+                    .iter()
+                    .zip(sb)
+                    .map(|(x, y)| (x.p[0] - y.p[0]).abs() + (x.p[1] - y.p[1]).abs())
+                    .sum();
+                assert!(
+                    diff > 3.0,
+                    "{:?} and {:?} look alike ({diff})",
+                    ActivityState::ALL[a],
+                    ActivityState::ALL[b]
+                );
             }
         }
     }
 
     #[test]
-    fn waiting_pings_from_the_face() {
-        // Early in a ping the lit dots face the camera; later they're near the rim.
-        let lit_z = |t: f64| {
-            let lit: Vec<Dot> = frame(OrbKind::Waiting, t)
-                .into_iter()
-                .filter(|d| d.lit > 0.5)
-                .collect();
-            assert!(!lit.is_empty(), "nothing lit at t={t}");
-            lit.iter().map(|d| d.p[2] / hypot3(d.p)).sum::<f64>() / lit.len() as f64
+    fn thinking_sweeps_the_ring_and_turns_the_sphere() {
+        let lit_angle = |t: f64| {
+            let f = frame(Thinking, t);
+            let (j, _) = f
+                .iter()
+                .take(RING)
+                .enumerate()
+                .max_by(|a, b| a.1.lit.total_cmp(&b.1.lit))
+                .unwrap();
+            ring_angle(j)
         };
-        assert!(lit_z(0.1) > 0.8);
-        assert!(lit_z(0.7) < lit_z(0.1) - 0.3);
-        // The sphere doesn't turn: the same dot is at the same direction a loop later.
-        let a = generate(OrbKind::Waiting, 17, 0.3);
-        let b = generate(OrbKind::Waiting, 17, 0.3 + 1.8);
-        assert!((a.p[0] - b.p[0]).abs() < 1e-9 && (a.p[1] - b.p[1]).abs() < 1e-9);
+        assert!(lit_angle(0.4) > lit_angle(0.0));
+        assert!(lit_angle(0.8) > lit_angle(0.4));
+        for d in &frame(Thinking, 0.3)[RING..] {
+            assert!((xy_len(d).hypot(d.p[2]) - 0.46).abs() < 1e-9, "{d:?}");
+        }
+        assert_ne!(frame(Thinking, 0.3)[RING].p, frame(Thinking, 0.6)[RING].p);
+    }
+
+    #[test]
+    fn notes_write_then_hold() {
+        let lit = |t: f64| {
+            frame(Notes, t)[RING..]
+                .iter()
+                .filter(|d| d.lit > 0.0)
+                .count()
+        };
+        assert!(lit(0.3) < lit(1.0));
+        assert!(lit(1.0) < lit(1.9));
+        assert_eq!(lit(1.9), GLYPH);
+        assert_eq!(lit(2.5), GLYPH);
+        assert!(lit(2.7) < GLYPH, "starts over");
+    }
+
+    #[test]
+    fn reading_band_moves_down() {
+        let band_y = |t: f64| {
+            let f = frame(Reading, t);
+            let (sum, n) = f[RING..]
+                .iter()
+                .filter(|d| d.lit > 0.5)
+                .fold((0.0, 0), |(s, n), d| (s + d.p[1], n + 1));
+            assert!(n > 0, "nothing lit at t={t}");
+            sum / n as f64
+        };
+        assert!(band_y(0.2) > band_y(1.0));
+        assert!(band_y(1.0) > band_y(1.9));
+    }
+
+    #[test]
+    fn searching_is_a_lit_magnifier() {
+        for t in [0.0, 1.2] {
+            let f = frame(Searching, t);
+            assert!(f[RING..].iter().all(|d| d.lit == 1.0));
+            // The lens is a circle of radius .24 round a centre that moves with t.
+            let lens: Vec<&Dot> = (RING..N_POINTS)
+                .filter(|&i| gu(i) < 0.74)
+                .map(|i| &f[i])
+                .collect();
+            let n = lens.len() as f64;
+            let cx = lens.iter().map(|d| d.p[0]).sum::<f64>() / n;
+            let cy = lens.iter().map(|d| d.p[1]).sum::<f64>() / n;
+            for d in lens {
+                assert!(
+                    ((d.p[0] - cx).hypot(d.p[1] - cy) - 0.24).abs() < 0.02,
+                    "{d:?}"
+                );
+            }
+        }
+        assert_ne!(frame(Searching, 0.0)[RING].p, frame(Searching, 0.6)[RING].p);
+    }
+
+    #[test]
+    fn editing_types_then_blinks() {
+        let typed = |t: f64| {
+            frame(Editing, t)[RING + 11..]
+                .iter()
+                .filter(|d| d.lit > 0.0)
+                .count()
+        };
+        assert!(typed(0.2) < typed(0.8));
+        assert!(typed(0.8) < typed(1.6));
+        let caret_on = |t: f64| frame(Editing, t)[RING].s > 0.0;
+        assert!(caret_on(1.0));
+        assert!(caret_on(1.7));
+        assert!(!caret_on(1.9), "the caret blinks off");
+        assert!(caret_on(2.1));
+    }
+
+    #[test]
+    fn running_has_two_arcs() {
+        let f = frame(Running, 0.3);
+        let lit: Vec<usize> = (0..RING).filter(|&j| f[j].lit > 0.3).collect();
+        assert!(lit.len() >= 6, "{lit:?}");
+        // Lit dots fall into two groups half a ring apart.
+        let a = ring_angle(lit[0]);
+        assert!(
+            lit.iter().any(|&j| (ring_angle(j) - a - PI).abs() < 0.5),
+            "{lit:?}"
+        );
+        assert!(f[RING..].iter().all(|d| d.lit == 1.0));
+    }
+
+    #[test]
+    fn waiting_breathes() {
+        let ring_lit = |t: f64| frame(Waiting, t)[0].lit;
+        assert!(ring_lit(0.45) > ring_lit(1.35));
+        assert!((0.25..=0.8).contains(&ring_lit(0.0)));
+        assert!(frame(Waiting, 0.0)[RING..].iter().all(|d| d.lit == 1.0));
     }
 
     #[test]
     fn done_draws_a_check_then_holds() {
-        let settled = frame(OrbKind::Done, 0.95);
+        let settled = frame(Done, 0.95);
         for t in [1.0, crate::SETTLE, 5.0] {
-            assert_eq!(frame(OrbKind::Done, t), settled, "t={t}");
+            assert_eq!(frame(Done, t), settled, "t={t}");
         }
-        for (i, d) in settled.iter().enumerate() {
-            if i < RING {
-                assert!((hypot3([d.p[0], d.p[1], 0.0]) - GLYPH_R).abs() < 1e-9);
-                assert_eq!(d.lit, 0.0);
-            } else {
-                assert_eq!(d.lit, 1.0, "check dot {i} unlit");
-                assert!(hypot3([d.p[0], d.p[1], 0.0]) < 0.62);
-            }
+        for d in &settled[RING..] {
+            assert_eq!(d.lit, 1.0, "check dot unlit: {d:?}");
+            assert!(xy_len(d) < 0.62);
         }
-        // Mid-draw, the start of the stroke is lit and its end isn't yet.
-        let mid = frame(OrbKind::Done, 0.45);
+        let mid = frame(Done, 0.45);
         assert_eq!(mid[RING].lit, 1.0);
         assert!(mid[N_POINTS - 1].lit < 1.0);
     }
 
     #[test]
     fn error_shakes_then_holds() {
-        let settled = frame(OrbKind::Error, 1.25);
+        let settled = frame(Error, 1.25);
         for t in [crate::SETTLE, 5.0, 60.0] {
-            assert_eq!(frame(OrbKind::Error, t), settled, "t={t}");
+            assert_eq!(frame(Error, t), settled, "t={t}");
         }
-        // Centred once settled, displaced mid-shake.
+        // Mid-shake the whole frame is shifted sideways relative to where it settles.
         let cx = |f: &[Dot]| f.iter().map(|d| d.p[0]).sum::<f64>() / f.len() as f64;
-        assert!(cx(&settled).abs() < 1e-9);
-        assert!(cx(&frame(OrbKind::Error, 0.36)).abs() > 0.05);
-        // The two strokes cross at the centre.
-        assert!(
-            settled[RING..]
-                .iter()
-                .any(|d| hypot3([d.p[0], d.p[1], 0.0]) < 0.02)
-        );
+        assert!((cx(&frame(Error, 0.36)) - cx(&settled)).abs() > 0.05);
+        assert_eq!(settled[0].p, ring_at(0), "the ring is back in place");
+        assert!(settled[RING..].iter().any(|d| xy_len(d) < 0.02));
     }
 
     #[test]
-    fn offline_is_a_dashed_ring() {
-        for t in [0.0, 0.7, 2.0] {
-            let f = frame(OrbKind::Offline, t);
-            let shown: Vec<&Dot> = f.iter().filter(|d| d.s > 0.02).collect();
-            assert!(shown.len() * 3 < N_POINTS * 2 && shown.len() * 2 > N_POINTS);
-            for d in shown {
-                assert!((hypot3([d.p[0], d.p[1], 0.0]) - GLYPH_R).abs() < 1e-9);
-            }
+    fn offline_has_a_gap_and_a_turning_arrow() {
+        let f = frame(Offline, 0.0);
+        let gap = f.iter().take(RING).filter(|d| d.s == 0.0).count();
+        assert!((4..=10).contains(&gap), "{gap} gap dots");
+        assert_eq!(f[0].s, 0.0, "the gap is at 12 o'clock");
+        for d in &f[RING..RING + 60] {
+            assert!((xy_len(d) - 0.4).abs() < 1e-9, "{d:?}");
         }
+        assert_ne!(frame(Offline, 0.0)[RING].p, frame(Offline, 0.5)[RING].p);
     }
 
     #[test]
@@ -455,8 +697,8 @@ mod tests {
 
     #[test]
     fn along_hits_the_ends() {
-        assert_eq!(along(&CHECK, 0.0), CHECK[0]);
-        let end = along(&CHECK, 1.0);
+        assert_eq!(along(&[CHECK], 0.0), CHECK[0]);
+        let end = along(&[CHECK], 1.0);
         assert!((end[0] - CHECK[2][0]).abs() < 1e-12 && (end[1] - CHECK[2][1]).abs() < 1e-12);
     }
 }
