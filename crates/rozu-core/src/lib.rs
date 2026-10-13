@@ -25,8 +25,8 @@ pub use approval::{
 pub use audit::{AUDIT_LOG_ENV, AuditLog, audit_path_from_env, default_audit_path, new_session_id};
 pub use exec::{ToolExecutor, log_decision};
 pub use model::{
-    Billing, ChatRequest, ContentPart, LongContextPrices, Message, ModelInfo, Role, StopReason,
-    StreamEvent, ToolSpec, Usage,
+    Billing, ChatRequest, ContentPart, LongContextPrices, MemoryFeatures, Message, ModelInfo,
+    ProviderCaps, Role, StopReason, StreamEvent, ToolSpec, Usage,
 };
 pub use provider::{EventStream, Provider, ProviderError, ProviderKind, ProviderResult};
 pub use telemetry::{LogTarget, default_log_path, init_tracing, redact};

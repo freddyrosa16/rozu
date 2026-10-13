@@ -1,7 +1,8 @@
 # rozu
 
 A native Rust desktop coding agent (in the spirit of Codex / Grok Bot): an agent loop with tool calling,
-an embedded terminal, multiple LLM providers (OpenAI, Anthropic, xAI) and, later, web search.
+an embedded terminal, multiple LLM providers (OpenAI, Anthropic, xAI by API key; Claude, ChatGPT and SuperGrok
+subscriptions through the vendors' official CLIs) and, later, web search.
 
 **Status:** fresh start. See [PLAN.md](PLAN.md) for the implementation plan and
 [docs/gui-spike.md](docs/gui-spike.md) for the GUI stack decision.
@@ -95,6 +96,39 @@ and no API key, rozu uses `claude-cli`, or `codex` if only the Codex CLI is inst
 a specific `codex` binary; otherwise it looks on `PATH` and in `/opt/homebrew/bin`. `OPENAI_API_KEY` and
 `CODEX_API_KEY` are removed from Codex's environment so it uses your ChatGPT login.
 
+### Grok on your subscription (`grok`)
+With a SuperGrok plan and no API key, rozu drives xAI's official Grok Build CLI over ACP (`grok agent stdio`).
+Grok Build does its own login (`grok login`); rozu never reads `~/.grok/auth.json` or any token, never uses an API
+key for it, and never points it at a proxy.
+
+```sh
+npm install -g @xai-official/grok           # or xAI's standalone installer (~/.grok/bin/grok)
+./target/release/rozu auth login grok       # runs the official `grok login`
+./target/release/rozu auth status           # grok: /…/grok-native (1.0.x), login status unknown (…)
+
+./target/release/rozu chat --provider grok "list the files and summarize README"
+./target/release/rozu chat --provider grok --model grok-4.7   # `default` = Grok Build's own default model
+```
+
+rozu runs the **native** binary directly (`grok` on `PATH` resolved through its symlinks to `grok-native`; never
+`node grok-bootstrap.js`), as one long-lived `grok --no-auto-update agent [-m <model>] --agent-profile <profile>
+stdio`. The agent profile rozu writes allows only Grok's `use_tool` meta-tool, so **Grok's built-in tools are off**;
+its only tools are rozu's (`rozu__read_file`, …, `rozu__shell`) through rozu's MCP server, under the same approval
+modes, workspace checks and sandbox. Grok's permission requests are approved once only for those tools (the call is
+then decided by rozu's MCP server) and denied for anything else; file-system and terminal requests are refused.
+Decisions land in the audit log with `"provider": "grok"`. Turns are appended to one Grok session (its prompt cache
+is per session); a new session in the same process starts only when rozu rewrites the history it sent. Token usage
+(input incl. cached, cached, output) is shown without a cost. Grok Build has no login-status command, so
+`rozu auth status` can't tell whether it is signed in; a chat says "not logged in … run `rozu auth login grok`" when
+it isn't. **Memory features are limited with grok** (Grok adds its own system-prompt block and tool schemas, so rozu
+has no per-turn control of the prompt prefix; cache writes aren't reported); `rozu models` and `rozu chat` say so.
+`--grok-headless` (or `ROZU_GROK_HEADLESS=true`) switches to a fallback that runs `grok -p … --output-format
+streaming-json` per turn; it has no way to pass rozu's MCP server, so rozu's tools only work there if you registered
+`rozu mcp-serve` with Grok yourself. `ROZU_GROK_BIN` points rozu at a specific (native) binary; otherwise it looks on
+`PATH`, in `~/.grok/bin` and `/opt/homebrew/bin`. `XAI_API_KEY` and `GROK_CLI_CHAT_PROXY_BASE_URL` are removed from
+Grok's environment. Without `--provider`/`--model` and no API key, rozu uses the first installed of `claude-cli`,
+`codex` and `grok`.
+
 ### Approvals and sandbox
 Every tool call gets a risk class (read, write in workspace, write outside, network, opaque, destructive) and is
 either auto-approved or shown as an approval card with the exact command or diff, the sandbox and the network state:
@@ -154,6 +188,10 @@ Environment variables:
 - `ROZU_PROVIDER`, `ROZU_MODEL`: defaults for `--provider` / `--model`.
 - `ROZU_CLAUDE_BIN`: the `claude` binary for `claude-cli`.
 - `ROZU_CODEX_BIN`: the `codex` binary for `codex`.
+- `ROZU_GROK_BIN`: the native Grok Build binary for `grok` (used as given).
+- `ROZU_GROK_HEADLESS`: `true` = the headless fallback for `grok` (same as `--grok-headless`).
+- `ROZU_GROK_HOOK_MAX_BYTES`: if set, Grok gets rozu's PostToolUse hook (`rozu grok-hook`), which keeps the head and
+  tail of rozu tool results longer than this; off by default (unverified with Grok Build, see PLAN.md).
 - `RUST_LOG`: log filter (default `info`). Logs go to `~/Library/Logs/rozu/rozu.log` (`ROZU_LOG_FILE` moves it,
   `ROZU_LOG_STDERR=1` sends them to stderr). API keys are redacted from logs. Approval decisions are logged under
   the `rozu::approval` target and, structured, in the audit log.
@@ -166,7 +204,9 @@ Environment variables:
   (`--provider claude-cli`, above). rozu never reads Claude Code's credential files or tokens.
 - ChatGPT subscription: Sign in with ChatGPT through the official Codex CLI (`rozu auth login codex` runs
   `codex login`; `--provider codex`, above). rozu never reads `~/.codex/auth.json` or handles ChatGPT tokens.
-- No Grok subscription login is implemented.
+- SuperGrok subscription: through xAI's official Grok Build CLI (`rozu auth login grok` runs `grok login`;
+  `--provider grok`, above). rozu never reads `~/.grok/auth.json`, never uses an xAI API key or the CLI chat proxy for
+  it, and implements no OAuth of its own.
 
 ## License
 MIT, see [LICENSE](LICENSE).

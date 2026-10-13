@@ -1,0 +1,9 @@
+# ACP handshake: initialize (offers the cached login and an API key; rozu must pick only
+# cached_token), then authenticate. Shapes adapted from Grok Build 1.0.52 transcripts; ids scrubbed.
+< initialize
+> {"jsonrpc":"2.0","id":__ID__,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true,"promptCapabilities":{"image":true,"audio":false,"embeddedContext":true},"mcpCapabilities":{"http":true,"sse":true}},"authMethods":[{"id":"xai_api_key","name":"xAI API key"},{"id":"cached_token","name":"Cached Grok login"}],"agentInfo":{"name":"grok","version":"1.0.52"},"_meta":{"x.ai/hooks":true}}}
+< authenticate
+> {"jsonrpc":"2.0","id":__ID__,"result":{}}
+< session/new
+> {"jsonrpc":"2.0","id":__ID__,"result":{"sessionId":"sess-0001","models":{"currentModelId":"grok-4.7","availableModels":[{"modelId":"grok-4.7","name":"Grok 4.7"}]}}}
+> {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-0001","update":{"sessionUpdate":"available_commands_update","availableCommands":[{"name":"compact","description":"Compact the conversation"}]}}}

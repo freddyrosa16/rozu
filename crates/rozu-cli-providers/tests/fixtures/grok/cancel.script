@@ -1,0 +1,5 @@
+# A turn rozu cancels: a chunk, then rozu's session/cancel; Grok ends the prompt `cancelled`.
+< session/prompt
+> {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-0001","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Working on it"}}}}
+< session/cancel
+> {"jsonrpc":"2.0","id":__ID__,"result":{"stopReason":"cancelled"}}

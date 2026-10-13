@@ -1,6 +1,6 @@
 //! `rozu auth`: manage provider API keys in the OS keychain, report the vendor CLIs' logins
 //! (which the CLIs manage themselves; rozu never sees their credentials), and start the official
-//! `codex login`.
+//! `codex login` / `grok login`.
 
 use std::io::{self, IsTerminal, Read};
 use std::path::PathBuf;
@@ -14,7 +14,8 @@ use rozu_cli_providers::claude::install::{
 use rozu_cli_providers::codex::install::{
     CODEX_BIN_ENV, LoginStatus, codex_login_status, codex_version, find_codex_binary,
 };
-use rozu_providers::registry::{self, CLAUDE_CLI_ID, CODEX_ID};
+use rozu_cli_providers::grok::install::{find_grok_binary, grok_version};
+use rozu_providers::registry::{self, CLAUDE_CLI_ID, CODEX_ID, GROK_ID};
 use rozu_secrets::{KeyringStore, SERVICE, SecretStore, env_var_for};
 use secrecy::SecretString;
 
@@ -28,8 +29,8 @@ pub enum AuthCommand {
     /// Remove a provider API key from the OS keychain.
     Delete { provider: ProviderName },
     /// Log in to a subscription with the vendor's own CLI (`codex`: runs the official
-    /// `codex login`, which opens the browser for Sign in with ChatGPT). rozu never sees the
-    /// credentials.
+    /// `codex login`, which opens the browser for Sign in with ChatGPT; `grok`: runs xAI's
+    /// official `grok login`). rozu never sees the credentials.
     Login { cli: LoginCli },
 }
 
@@ -37,6 +38,7 @@ pub enum AuthCommand {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum LoginCli {
     Codex,
+    Grok,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -90,7 +92,30 @@ pub fn run(command: AuthCommand) -> anyhow::Result<ExitCode> {
         AuthCommand::Login {
             cli: LoginCli::Codex,
         } => codex_login(),
+        AuthCommand::Login {
+            cli: LoginCli::Grok,
+        } => grok_login(),
     }
+}
+
+/// Runs xAI's official `grok login` with the terminal attached (inherited stdio). Grok Build
+/// does the whole login and stores its own credentials; rozu only passes its exit status on.
+fn grok_login() -> anyhow::Result<ExitCode> {
+    let binary = find_grok_binary().map_err(|err| anyhow!(err))?;
+    eprintln!(
+        "Running the official `grok login` ({}). Grok Build keeps its own credentials; rozu \
+         never sees them.",
+        binary.display()
+    );
+    let status = std::process::Command::new(&binary)
+        .arg("login")
+        .status()
+        .with_context(|| format!("could not run {}", binary.display()))?;
+    Ok(match status.code() {
+        Some(0) => ExitCode::SUCCESS,
+        Some(code) => ExitCode::from(u8::try_from(code).unwrap_or(1)),
+        None => ExitCode::FAILURE,
+    })
 }
 
 /// Runs the official `codex login` with the terminal attached. Codex does the whole login and
@@ -189,7 +214,28 @@ fn status(store: &dyn SecretStore) -> anyhow::Result<ExitCode> {
         "{}",
         runtime.block_on(codex_cli_status(find_codex_binary()))
     );
+    println!("{}", runtime.block_on(grok_cli_status(find_grok_binary())));
     Ok(ExitCode::SUCCESS)
+}
+
+/// One line about Grok Build: found where (the native binary) and which version. Grok Build
+/// has no login-status command, so whether it is signed in stays unknown here; rozu never
+/// reads its credential file to find out.
+async fn grok_cli_status(binary: Result<PathBuf, String>) -> String {
+    let id = GROK_ID;
+    let binary = match binary {
+        Ok(binary) => binary,
+        Err(err) => return format!("{id}: {err}"),
+    };
+    let version = match grok_version(&binary).await {
+        Ok(version) => version,
+        Err(err) => return format!("{id}: {} doesn't run ({err})", binary.display()),
+    };
+    format!(
+        "{id}: {} ({version}), login status unknown (Grok Build has no status command); run \
+         `rozu auth login grok` if a chat says it isn't signed in",
+        binary.display()
+    )
 }
 
 /// One line about the Codex CLI: found where, which version, logged in or not (and how). Only
@@ -333,6 +379,25 @@ mod tests {
             missing.contains("not found") && missing.contains(CODEX_BIN_ENV),
             "{missing}"
         );
+    }
+
+    #[tokio::test]
+    async fn grok_cli_status_shows_binary_and_version_only() {
+        let fake = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../rozu-cli-providers/tests/fixtures/grok/fake_grok.sh"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("grok");
+        std::fs::copy(fake, &bin).unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let line = grok_cli_status(Ok(bin)).await;
+        assert!(line.starts_with("grok: "), "{line}");
+        assert!(line.contains("(1.0.52), login status unknown"), "{line}");
+        assert!(line.contains("rozu auth login grok"), "{line}");
+
+        let missing = grok_cli_status(Err("Grok Build isn't installed".into())).await;
+        assert_eq!(missing, "grok: Grok Build isn't installed");
     }
 }
 

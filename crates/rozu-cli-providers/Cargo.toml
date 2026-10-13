@@ -1,6 +1,6 @@
 [package]
 name = "rozu-cli-providers"
-description = "CLI-backed providers for rozu: drive official vendor CLIs (Claude Code) on the user's subscription"
+description = "CLI-backed providers for rozu: drive official vendor CLIs (Claude Code, Codex, Grok Build) on the user's subscription"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

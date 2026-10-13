@@ -1,0 +1,6 @@
+# Grok Build 1.0.52 signed out: only the browser login is offered (rozu picks none), and
+# session/new fails with "Authentication required".
+< initialize
+> {"jsonrpc":"2.0","id":__ID__,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true},"authMethods":[{"id":"grok.com","name":"Grok"}]}}
+< session/new
+> {"jsonrpc":"2.0","id":__ID__,"error":{"code":-32000,"message":"Authentication required"}}
