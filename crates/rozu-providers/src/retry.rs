@@ -1,8 +1,14 @@
-//! Retry policy for transient HTTP failures (429 and 5xx).
+//! Retries for transient HTTP failures (429, 5xx including Anthropic's 529, connect errors and
+//! timeouts), shared by every adapter, plus the mapping of failed responses to typed errors.
 
 use std::time::Duration;
 
 use reqwest::header::HeaderMap;
+use reqwest::{RequestBuilder, Response, StatusCode};
+use rozu_core::{ProviderError, ProviderResult};
+use serde_json::Value;
+use tokio_util::sync::CancellationToken;
+use tracing::warn;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RetryPolicy {
@@ -54,11 +60,92 @@ impl RetryPolicy {
     }
 }
 
+fn is_retryable(status: StatusCode) -> bool {
+    status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
+}
+
+/// Sends the request `build` makes (a fresh one per attempt), retrying per `policy`. Returns the
+/// first successful response; failures become typed [`ProviderError`]s. `provider` only labels
+/// log lines.
+pub(crate) async fn send_with_retry(
+    policy: RetryPolicy,
+    provider: &str,
+    cancel: &CancellationToken,
+    build: impl Fn() -> ProviderResult<RequestBuilder>,
+) -> ProviderResult<Response> {
+    let mut attempt = 0;
+    loop {
+        let request = build()?.send();
+        let result = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Err(ProviderError::Cancelled),
+            result = request => result,
+        };
+
+        let delay = match result {
+            Ok(response) if response.status().is_success() => return Ok(response),
+            Ok(response) => {
+                let status = response.status();
+                if !is_retryable(status) || attempt >= policy.max_retries {
+                    return Err(error_from_response(response, attempt + 1).await);
+                }
+                let delay = policy
+                    .retry_after(response.headers())
+                    .unwrap_or_else(|| policy.backoff(attempt));
+                warn!(provider, %status, attempt = attempt + 1, ?delay, "retrying request");
+                delay
+            }
+            Err(err) if (err.is_connect() || err.is_timeout()) && attempt < policy.max_retries => {
+                let delay = policy.backoff(attempt);
+                warn!(provider, error = %err, attempt = attempt + 1, ?delay, "retrying request");
+                delay
+            }
+            Err(err) => return Err(ProviderError::Network(err.to_string())),
+        };
+        attempt += 1;
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Err(ProviderError::Cancelled),
+            _ = tokio::time::sleep(delay) => {}
+        }
+    }
+}
+
+/// The typed error for a failed response. OpenAI, xAI and Anthropic all put the human-readable
+/// message at `error.message`; otherwise the raw body (or the status text) is used.
+async fn error_from_response(response: Response, attempts: u32) -> ProviderError {
+    let status = response.status();
+    let text = response.text().await.unwrap_or_default();
+    let message = serde_json::from_str::<Value>(&text)
+        .ok()
+        .and_then(|v| v["error"]["message"].as_str().map(str::to_owned))
+        .unwrap_or_else(|| {
+            if text.is_empty() {
+                status
+                    .canonical_reason()
+                    .unwrap_or("request failed")
+                    .to_owned()
+            } else {
+                text
+            }
+        });
+    ProviderError::from_status(status.as_u16(), attempts, message)
+}
+
 #[cfg(test)]
 mod tests {
     use reqwest::header::HeaderValue;
 
     use super::*;
+
+    #[test]
+    fn retries_rate_limits_and_server_errors_only() {
+        assert!(is_retryable(StatusCode::TOO_MANY_REQUESTS));
+        assert!(is_retryable(StatusCode::SERVICE_UNAVAILABLE));
+        assert!(is_retryable(StatusCode::from_u16(529).unwrap()));
+        assert!(!is_retryable(StatusCode::BAD_REQUEST));
+        assert!(!is_retryable(StatusCode::UNAUTHORIZED));
+    }
 
     #[test]
     fn backoff_grows_and_is_capped() {

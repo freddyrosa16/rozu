@@ -2,6 +2,7 @@
 
 mod auth;
 mod chat;
+mod models;
 
 use std::process::ExitCode;
 
@@ -23,8 +24,11 @@ enum Command {
         #[command(subcommand)]
         command: auth::AuthCommand,
     },
-    /// Chat with the agent. OPENAI_API_KEY, if set, overrides the keychain.
+    /// Chat with the agent. OPENAI_API_KEY / ANTHROPIC_API_KEY / XAI_API_KEY, if set, override
+    /// the keychain.
     Chat(chat::ChatArgs),
+    /// List known models with context window and prices.
+    Models,
 }
 
 /// Name and version of every crate linked into this binary.
@@ -53,9 +57,10 @@ fn main() -> ExitCode {
         }
         Some(Command::Auth { command }) => auth::run(command),
         Some(Command::Chat(args)) => chat::run(args),
+        Some(Command::Models) => models::run(),
         None => {
             println!(
-                "rozu {}: try `rozu chat`, `rozu auth set openai` or `rozu --help`.",
+                "rozu {}: try `rozu chat`, `rozu models`, `rozu auth set openai|anthropic|xai` or `rozu --help`.",
                 env!("CARGO_PKG_VERSION")
             );
             Ok(ExitCode::SUCCESS)
@@ -88,6 +93,25 @@ mod tests {
         let debug = format!("{args:?}");
         assert!(
             debug.contains("gpt-5") && debug.contains("\"files\""),
+            "{debug}"
+        );
+    }
+
+    #[test]
+    fn chat_takes_provider_and_model() {
+        let cli = Cli::try_parse_from([
+            "rozu",
+            "chat",
+            "--provider",
+            "anthropic",
+            "--model",
+            "claude-haiku-4-5",
+            "hi",
+        ])
+        .unwrap();
+        let debug = format!("{:?}", cli.command);
+        assert!(
+            debug.contains("\"anthropic\"") && debug.contains("\"claude-haiku-4-5\""),
             "{debug}"
         );
     }

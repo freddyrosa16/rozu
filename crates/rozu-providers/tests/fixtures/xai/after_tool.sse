@@ -1,0 +1,9 @@
+event: response.created
+data: {"type":"response.created","sequence_number":0,"response":{"id":"resp_xai_after","object":"response","status":"in_progress","model":"grok-4","output":[]}}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","sequence_number":1,"item_id":"msg_xai_2","output_index":0,"content_index":0,"delta":"The answer is 42."}
+
+event: response.completed
+data: {"type":"response.completed","sequence_number":2,"response":{"id":"resp_xai_after","object":"response","status":"completed","model":"grok-4","usage":{"input_tokens":110,"input_tokens_details":{"cached_tokens":88},"output_tokens":6,"total_tokens":116}}}
+

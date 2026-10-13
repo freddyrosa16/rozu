@@ -1,0 +1,18 @@
+event: response.created
+data: {"type":"response.created","sequence_number":0,"response":{"id":"resp_xai_tool","object":"response","status":"in_progress","model":"grok-4","output":[]}}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","sequence_number":1,"output_index":0,"item":{"id":"fc_xai_1","type":"function_call","status":"in_progress","arguments":"","call_id":"call_xai_1","name":"lookup"}}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","sequence_number":2,"item_id":"fc_xai_1","output_index":0,"delta":"{\"key\":\"answer\"}"}
+
+event: response.function_call_arguments.done
+data: {"type":"response.function_call_arguments.done","sequence_number":3,"item_id":"fc_xai_1","output_index":0,"arguments":"{\"key\":\"answer\"}"}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","sequence_number":4,"output_index":0,"item":{"id":"fc_xai_1","type":"function_call","status":"completed","arguments":"{\"key\":\"answer\"}","call_id":"call_xai_1","name":"lookup"}}
+
+event: response.completed
+data: {"type":"response.completed","sequence_number":5,"response":{"id":"resp_xai_tool","object":"response","status":"completed","model":"grok-4","usage":{"input_tokens":90,"input_tokens_details":{"cached_tokens":0},"output_tokens":15,"total_tokens":105}}}
+

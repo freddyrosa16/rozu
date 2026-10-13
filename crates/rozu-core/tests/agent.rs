@@ -9,8 +9,8 @@ use async_trait::async_trait;
 use futures::stream::{self, StreamExt};
 use rozu_core::{
     Agent, AgentConfig, AgentError, AgentEvent, ChatRequest, ContentPart, EventStream, Message,
-    Provider, ProviderError, ProviderResult, Role, Session, StopReason, StreamEvent, TurnOutcome,
-    Usage,
+    ModelInfo, Provider, ProviderError, ProviderResult, Role, Session, StopReason, StreamEvent,
+    TurnOutcome, Usage,
 };
 use rozu_tools::{Risk, Tool, ToolCtx, ToolOutput, ToolRegistry, Workspace};
 use serde_json::{Value, json};
@@ -342,6 +342,73 @@ async fn plain_text_turn_completes() {
 }
 
 #[tokio::test]
+async fn usage_and_cost_aggregate_per_turn() {
+    let usage = |input, output, cached| {
+        StreamEvent::Usage(Usage {
+            input_tokens: input,
+            output_tokens: output,
+            cached_input_tokens: cached,
+        })
+    };
+    let done = StreamEvent::Done(StopReason::EndTurn);
+    let mut h = Harness::with_config(
+        [
+            tool_step(&[("call_1", "echo", r#"{"path":"a"}"#)]),
+            ok(vec![usage(1_000_000, 0, 0), done.clone()]),
+            ok(vec![usage(1_000_000, 100_000, 1_000_000), done.clone()]),
+        ],
+        |config| {
+            config.model_info = Some(ModelInfo {
+                id: "test-model".into(),
+                provider: "test".into(),
+                context_window: 1_000_000,
+                supports_tools: true,
+                price_in_per_mtok: 2.0,
+                price_out_per_mtok: 10.0,
+                price_cached_in_per_mtok: 0.5,
+            });
+        },
+        |_| {},
+    );
+
+    // Turn 1: a tool step (no usage reported) then 1M uncached input tokens.
+    h.run("first").await.0.unwrap();
+    assert_eq!(h.session.last_turn.usage.input_tokens, 1_000_000);
+    assert!((h.session.last_turn.cost_usd.unwrap() - 2.0).abs() < 1e-9);
+
+    // Turn 2: 1M cached input + 100k output = 0.5 + 1.0.
+    h.run("second").await.0.unwrap();
+    let last = h.session.last_turn;
+    assert_eq!(
+        last.usage,
+        Usage {
+            input_tokens: 1_000_000,
+            output_tokens: 100_000,
+            cached_input_tokens: 1_000_000
+        }
+    );
+    assert!((last.cost_usd.unwrap() - 1.5).abs() < 1e-9);
+    assert_eq!(h.session.usage.input_tokens, 2_000_000);
+    assert!((h.session.cost_usd - 3.5).abs() < 1e-9);
+}
+
+#[tokio::test]
+async fn unknown_prices_leave_cost_empty() {
+    let mut h = Harness::new([ok(vec![
+        StreamEvent::Usage(Usage {
+            input_tokens: 5,
+            output_tokens: 1,
+            cached_input_tokens: 0,
+        }),
+        StreamEvent::Done(StopReason::EndTurn),
+    ])]);
+    h.run("hi").await.0.unwrap();
+    assert_eq!(h.session.last_turn.usage.input_tokens, 5);
+    assert_eq!(h.session.last_turn.cost_usd, None);
+    assert_eq!(h.session.cost_usd, 0.0);
+}
+
+#[tokio::test]
 async fn tool_call_round_trip() {
     let mut h = Harness::new([
         tool_step(&[("call_1", "echo", r#"{"path":"README.md"}"#)]),
@@ -523,14 +590,14 @@ async fn write_tools_are_denied_without_approval() {
 async fn provider_error_keeps_partial_text() {
     let mut h = Harness::new([Script::Events(vec![
         Ok(text("half an ")),
-        Err(ProviderError::Transport("connection reset".into())),
+        Err(ProviderError::Network("connection reset".into())),
     ])]);
 
     let (result, _) = h.run("hi").await;
 
     assert!(matches!(
         result,
-        Err(AgentError::Provider(ProviderError::Transport(_)))
+        Err(AgentError::Provider(ProviderError::Network(_)))
     ));
     assert_eq!(h.last(), &Message::assistant("half an "));
 }
