@@ -49,8 +49,8 @@ fn js_round(v: f32) -> f32 {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ProjectOptions {
     /// Multiply each dot's radius by its state size multiplier `s` (`base · s · k · …`), and
-    /// skip dots with `s ≤ .02`. On by default, as in the v7.3 reference `drawOrb`; this is what
-    /// draws the 1.3× cue dots, Editing's empty wedge and Offline's sparse cloud. Off reproduces
+    /// skip dots with `s ≤ .02`. On by default, as in the v7.3+ reference `drawOrb`; this is what
+    /// draws the lit comet and glyph dots larger and leaves Offline's dash gaps empty. Off reproduces
     /// the v7.2 reference bug, where the perspective factor shadowed `s` (`{...b, s: F/(F-z)}`).
     pub apply_state_size: bool,
 }
@@ -63,7 +63,7 @@ impl Default for ProjectOptions {
     }
 }
 
-/// [`project_with`] with the default (v7.3 reference) options.
+/// [`project_with`] with the default (v7.4 reference) options.
 pub fn project(points: &[Sample], size_px: f32, scale: f32) -> Vec<DrawDot> {
     project_with(points, size_px, scale, ProjectOptions::default())
 }
@@ -167,7 +167,7 @@ mod tests {
         for state in ActivityState::ALL {
             let pts = Orb::new(state, 0.0).sample(0.8);
             let dots = project(&pts, 88.0, 2.0);
-            // Dots with a state size of 0 (Editing's wedge, Offline's hidden cloud) are skipped.
+            // Dots with a state size of 0 (Offline's dash gaps) are skipped.
             let shown: Vec<_> = pts.iter().filter(|p| p.s > 0.02).collect();
             assert_eq!(dots.len(), shown.len());
             // The nearest drawn sample is drawn last.
@@ -180,7 +180,6 @@ mod tests {
             for d in &dots {
                 assert!(d.alpha >= 0.0 && d.alpha <= 1.0, "{state:?}: {d:?}");
                 assert!(d.radius > 0.0 && d.x.is_finite() && d.y.is_finite());
-                // Error's scatter overshoots the sphere (as in the reference renders).
                 assert!(
                     d.x > -30.0 && d.x < 118.0 && d.y > -30.0 && d.y < 118.0,
                     "{state:?}: {d:?}"
@@ -212,6 +211,7 @@ mod tests {
     fn light_and_depth_brighten_the_front() {
         let mut near = Orb::new(ActivityState::Done, 0.0).sample(5.0)[0];
         near.lit = 0.0;
+        near.s = 1.0;
         near.p = [0.0, 0.0, 1.0];
         let mut far = near;
         far.p = [0.0, 0.0, -1.0];
@@ -224,14 +224,14 @@ mod tests {
     #[test]
     fn state_size_is_applied_by_default() {
         assert!(ProjectOptions::default().apply_state_size);
-        // Editing's wedge (s = 0) is empty by default; the v7.2 legacy mode draws every dot.
-        let pts = Orb::new(ActivityState::Editing, 0.0).sample(0.06);
+        // Offline's dash gaps (s = 0) are empty by default; the v7.2 legacy mode draws every dot.
+        let pts = Orb::new(ActivityState::Offline, 0.0).sample(0.0);
         let shown = project(&pts, 88.0, 2.0).len();
         let legacy = ProjectOptions {
             apply_state_size: false,
         };
         assert_eq!(project_with(&pts, 88.0, 2.0, legacy).len(), MAX_POINTS);
-        assert!(shown < MAX_POINTS, "the wedge's dots have s = 0");
+        assert!(shown < MAX_POINTS, "the gaps' dots have s = 0");
     }
 
     #[test]

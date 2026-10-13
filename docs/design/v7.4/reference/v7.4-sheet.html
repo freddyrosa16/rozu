@@ -1,0 +1,44 @@
+<!doctype html><html><head><meta charset=utf-8><title>rozu v7.4 orbs</title>
+<style>
+[data-theme=dark]{--bg-app:#0E0E10;--bg-surface:#151517;--border-subtle:#232327;--text-primary:#F4F1EA;--text-secondary:#B4B4BB;--text-muted:#7A7A82;
+  --orb-dot:#F4F1EA;--orb-pill-bg:#1B1B1D;--orb-pill-border:#2A2A2E;--orb-label:#F4F1EA;--orb-meta:#9A9AA2;--warning:#FBBF24;--success:#4ADE80;--danger:#F87171}
+[data-theme=light]{--bg-app:#F7F7F8;--bg-surface:#FFFFFF;--border-subtle:#E4E4E7;--text-primary:#18181B;--text-secondary:#46464D;--text-muted:#6B6B73;
+  --orb-dot:#25242A;--orb-pill-bg:#ECECEF;--orb-pill-border:#DCDCE0;--orb-label:#25242A;--orb-meta:#55555C;--warning:#8A5206;--success:#126B33;--danger:#B91C1C}
+*{box-sizing:border-box;margin:0}
+body{width:1400px;background:var(--bg-app);color:var(--text-primary);font:13px/1.5 Inter,system-ui,sans-serif;padding:28px 36px}
+.eyebrow{font:600 12px/1 system-ui;letter-spacing:.06em;text-transform:uppercase;color:var(--text-muted)}
+h1{font-size:26px;font-weight:600;margin:6px 0 4px}.sub{color:var(--text-secondary);max-width:1000px}
+.grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:12px;margin-top:18px}
+.card{border-radius:14px;background:var(--bg-surface);border:1px solid var(--border-subtle);padding:14px;display:flex;flex-direction:column;gap:12px}
+.name{font-weight:600}.big{width:120px;height:120px;display:block;margin:0 auto}
+.pill{display:inline-flex;align-items:center;gap:8px;height:32px;padding:0 12px 0 6px;border-radius:999px;align-self:flex-start;max-width:100%;white-space:nowrap;
+  background:var(--orb-pill-bg);border:1px solid var(--orb-pill-border)}
+.pill canvas{width:22px;height:22px;flex:none}.pill .l{font-weight:500;color:var(--orb-label);overflow:hidden;text-overflow:ellipsis}
+.pill .t{font:11px ui-monospace,monospace;color:var(--orb-meta)}
+.l.warning{color:var(--warning)}.l.success{color:var(--success)}.l.danger{color:var(--danger)}
+.meta{font:11px/1.5 ui-monospace,monospace;color:var(--text-muted)}
+.uses{font:11px/1.5 ui-monospace,monospace;color:var(--text-secondary)}
+</style></head>
+<body data-theme="dark">
+<div class="eyebrow">rozu v7.4 · activity orbs</div>
+<h1>Five orbs, one for each thing you need to know</h1>
+<div class="sub">Every busy state shares the Working orb and the label says what it's doing, so a fast agent loop no longer morphs on every tool call. Waiting, Done, Error and Offline each get a shape that reads at 22px.</div>
+<div class="grid" id="grid"></div>
+<script src="v7.4-orb.js"></script><script>
+const CARDS=[
+ {orb:"working",name:"Working",label:"Running cargo test",t:"0:08",uses:"thinking · notes · reading · searching · editing · running",meta:"ORBIT · a lit comet circles a turning sphere"},
+ {orb:"waiting",name:"Waiting",label:"Waiting for approval",tone:"warning",t:"Y / N",uses:"waiting",meta:"PING · the sphere holds still and pings for you"},
+ {orb:"done",name:"Done",label:"Done",tone:"success",t:"42s · 2 files",uses:"done",meta:"CHECK · draws itself once, then holds"},
+ {orb:"error",name:"Error",label:"Command failed",tone:"danger",t:"R retry",uses:"error",meta:"CROSS · one shake, then holds"},
+ {orb:"offline",name:"Offline",label:"Offline · retrying",t:"in 3s",uses:"offline",meta:"DASHED RING · turns slowly while it retries"},
+];
+const g=document.getElementById('grid');
+for(const c of CARDS){g.insertAdjacentHTML('beforeend',`<div class="card"><div class="name">${c.name}</div><canvas class="big" data-orb="${c.orb}"></canvas>
+ <div class="pill"><canvas data-orb="${c.orb}"></canvas><span class="l ${c.tone||''}">${c.label}</span><span class="t">${c.t}</span></div>
+ <div class="meta">${c.meta}</div><div class="uses">used for: ${c.uses}</div></div>`)}
+const q=new URLSearchParams(location.search);document.body.dataset.theme=q.get('theme')||'dark';
+const still=q.has('still'),fixed=q.get('T');
+function frame(T){for(const cv of document.querySelectorAll('canvas[data-orb]')){const o=cv.dataset.orb;
+  const tt=fixed!=null?(+fixed):still?STILL[o]:(ORBS[o].loop?T:Math.min(T%3.2,3.2));drawOrb(cv,[{orb:o,start:0}],tt)}}
+if(fixed!=null||still)frame(0);else{const t0=performance.now();(function loop(now){frame((now-t0)/1000);requestAnimationFrame(loop)})(t0)}
+</script></body></html>
