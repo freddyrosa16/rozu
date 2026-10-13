@@ -27,6 +27,11 @@ rpassword.workspace = true
 secrecy.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
+tracing.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+signal-hook-registry.workspace = true
 
 [dev-dependencies]
 assert_cmd.workspace = true
@@ -35,3 +40,6 @@ serde_json.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
 wiremock.workspace = true
+
+[target.'cfg(unix)'.dev-dependencies]
+libc.workspace = true

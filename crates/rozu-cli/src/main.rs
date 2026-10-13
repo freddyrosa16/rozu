@@ -3,6 +3,7 @@
 mod approve;
 mod auth;
 mod chat;
+mod interrupt;
 mod models;
 mod term;
 
@@ -19,7 +20,7 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Print versions of the rozu crates.
+    /// Print versions of the rozu crates and where logs go.
     Doctor,
     /// Manage provider API keys (stored in the OS keychain).
     Auth {
@@ -49,13 +50,20 @@ fn crate_versions() -> [(&'static str, &'static str); 7] {
 }
 
 fn main() -> ExitCode {
-    rozu_core::init_tracing();
+    let log = rozu_core::init_tracing();
     let cli = Cli::parse();
 
     let result = match cli.command {
         Some(Command::Doctor) => {
             for (name, version) in crate_versions() {
                 println!("{name:<16}{version}");
+            }
+            match log {
+                rozu_core::LogTarget::File(path) => {
+                    println!("{:<16}{}", "log file", path.display())
+                }
+                rozu_core::LogTarget::Stderr => println!("{:<16}stderr", "log file"),
+                rozu_core::LogTarget::Off => println!("{:<16}off", "log file"),
             }
             Ok(ExitCode::SUCCESS)
         }
@@ -100,6 +108,20 @@ mod tests {
             debug.contains("gpt-5") && debug.contains("\"files\""),
             "{debug}"
         );
+    }
+
+    #[test]
+    fn max_steps_must_be_1_to_200() {
+        for bad in ["0", "201"] {
+            let err = Cli::try_parse_from(["rozu", "chat", "--max-steps", bad, "hi"]).unwrap_err();
+            assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation, "{bad}");
+            assert!(err.to_string().contains("1..=200"), "{err}");
+        }
+        for good in ["1", "200"] {
+            let cli = Cli::try_parse_from(["rozu", "chat", "--max-steps", good, "hi"]).unwrap();
+            let debug = format!("{:?}", cli.command);
+            assert!(debug.contains(&format!("max_steps: {good}")), "{debug}");
+        }
     }
 
     #[test]

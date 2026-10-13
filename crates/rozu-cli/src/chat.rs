@@ -9,7 +9,7 @@
 use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use anyhow::{Context, anyhow};
 use clap::Args;
@@ -21,9 +21,12 @@ use rozu_providers::{ModelChoice, registry};
 use rozu_secrets::{KeyringStore, env_var_for, resolve_api_key};
 use rozu_tools::{Risk, ToolRegistry, Workspace, platform_sandbox};
 use tokio::sync::mpsc;
-use tokio_util::sync::CancellationToken;
 
 use crate::approve::{self, ApprovalArg, Ask, CliGate, Input};
+use crate::interrupt::{EXIT_INTERRUPTED, Interrupts};
+
+/// Upper bound for `--max-steps`.
+const MAX_STEPS_LIMIT: u64 = 200;
 
 #[derive(Debug, Args)]
 pub struct ChatArgs {
@@ -41,8 +44,12 @@ pub struct ChatArgs {
     /// writes), full (everything except destructive commands, unsandboxed).
     #[arg(long, value_enum, default_value_t = ApprovalArg::Auto)]
     approval: ApprovalArg,
-    /// Maximum model requests per turn.
-    #[arg(long, default_value_t = DEFAULT_MAX_STEPS)]
+    /// Maximum model requests per turn (1-200).
+    #[arg(
+        long,
+        default_value_t = DEFAULT_MAX_STEPS,
+        value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..=MAX_STEPS_LIMIT),
+    )]
     max_steps: usize,
     /// Prompt to run once. Without it, rozu starts an interactive session.
     #[arg(trailing_var_arg = true)]
@@ -144,7 +151,7 @@ async fn chat(args: ChatArgs) -> anyhow::Result<ExitCode> {
     if !prompt.trim().is_empty() {
         let outcome = turn(&agent, &mut session, prompt, &mut asks, &io).await?;
         return Ok(match outcome {
-            TurnOutcome::Cancelled => ExitCode::from(130),
+            TurnOutcome::Cancelled => ExitCode::from(EXIT_INTERRUPTED as u8),
             _ => ExitCode::SUCCESS,
         });
     }
@@ -286,45 +293,6 @@ async fn turn(
 fn command_arg<'a>(input: &'a str, name: &str) -> Option<&'a str> {
     let rest = input.strip_prefix(name)?;
     (rest.is_empty() || rest.starts_with(char::is_whitespace)).then(|| rest.trim())
-}
-
-/// First Ctrl-C cancels the running turn; a second one (or one at the prompt) exits.
-#[derive(Clone, Default)]
-struct Interrupts {
-    current: Arc<Mutex<Option<CancellationToken>>>,
-}
-
-impl Interrupts {
-    fn install() -> Self {
-        let this = Self::default();
-        let current = this.current.clone();
-        tokio::spawn(async move {
-            while tokio::signal::ctrl_c().await.is_ok() {
-                let active = current.lock().expect("interrupt lock").clone();
-                match active {
-                    Some(token) if !token.is_cancelled() => {
-                        token.cancel();
-                        eprintln!("\n^C cancelling; press Ctrl-C again to exit");
-                    }
-                    _ => {
-                        eprintln!();
-                        std::process::exit(130);
-                    }
-                }
-            }
-        });
-        this
-    }
-
-    fn begin_turn(&self) -> CancellationToken {
-        let token = CancellationToken::new();
-        *self.current.lock().expect("interrupt lock") = Some(token.clone());
-        token
-    }
-
-    fn end_turn(&self) {
-        *self.current.lock().expect("interrupt lock") = None;
-    }
 }
 
 /// Output styling shared by all turns.
@@ -523,8 +491,8 @@ mod tests {
     #[test]
     fn model_switch_accepts_provider_spec_or_id() {
         let spec = |arg| parse_model_switch(arg).unwrap().spec();
-        assert_eq!(spec("anthropic"), "anthropic/claude-sonnet-4-5");
-        assert_eq!(spec("xai/grok-4"), "xai/grok-4");
+        assert_eq!(spec("anthropic"), "anthropic/claude-sonnet-5-5");
+        assert_eq!(spec("xai/grok-4.7"), "xai/grok-4.7");
         assert_eq!(spec("gpt-5-mini"), "openai/gpt-5-mini");
         assert!(parse_model_switch("mystery").is_err());
     }
