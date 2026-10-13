@@ -1,9 +1,9 @@
-//! v7.3 activity pill demo: the dot orb (22px in the pill, 88px large), the label and a mono
+//! v7.4 activity pill demo: the dot orb (22px in the pill, 88px large), the label and a mono
 //! timer, cycling all ten states. Labels come from a scripted agent turn run through
 //! `rozu_activity::ActivityTracker`.
 //!
 //! Keys: M reduced motion · Space pause cycle · ←/→ previous/next state · T theme ·
-//! B low power (30fps) · S state size (on by default as in v7.3; off shows the v7.2 bug, where
+//! B low power (30fps) · S state size (on by default since v7.3; off shows the v7.2 bug, where
 //! every dot is drawn at size 1). Rendering pauses (0fps) when the window
 //! loses focus and after Done/Error settle; the animation clock stops with it, so it resumes
 //! with no jump.
@@ -246,7 +246,7 @@ impl Render for Demo {
             fps,
             if self.orb.reduced_motion() { "on" } else { "off" },
             if self.policy.low_power { "low power" } else { "mains" },
-            if self.opts.apply_state_size { "on (v7.3)" } else { "off (v7.2 bug)" },
+            if self.opts.apply_state_size { "on" } else { "off (v7.2 bug)" },
             if self.paused { " · cycle paused" } else { "" },
         )
         .into();

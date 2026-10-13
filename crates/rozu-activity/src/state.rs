@@ -1,4 +1,5 @@
-//! The ten activity states (handoff §3) and their static properties.
+//! The ten activity states (handoff §3), the five orbs that show them, and their static
+//! properties.
 
 /// Dot and label colour role. Hue is only used for Waiting, Done and Error.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
@@ -66,57 +67,108 @@ impl ActivityState {
         }
     }
 
+    /// The orb this state shows. Every busy state shares [`OrbKind::Working`]; the label says
+    /// which kind of work it is.
+    pub fn orb(self) -> OrbKind {
+        match self {
+            ActivityState::Thinking
+            | ActivityState::Notes
+            | ActivityState::Reading
+            | ActivityState::Searching
+            | ActivityState::Editing
+            | ActivityState::Running => OrbKind::Working,
+            ActivityState::Waiting => OrbKind::Waiting,
+            ActivityState::Done => OrbKind::Done,
+            ActivityState::Error => OrbKind::Error,
+            ActivityState::Offline => OrbKind::Offline,
+        }
+    }
+
     /// Dot and label colour.
     pub fn tone(self) -> Tone {
+        self.orb().tone()
+    }
+
+    /// Offline dots are drawn at α×.85.
+    pub fn dim(self) -> bool {
+        self.orb().dim()
+    }
+
+    /// Done and Error play once and then settle (frame policy: 0fps after [`crate::SETTLE`]).
+    pub fn plays_once(self) -> bool {
+        self.orb().plays_once()
+    }
+}
+
+/// One of the five orbs (handoff §3). Each [`ActivityState`] shows one; the orb only morphs when
+/// this changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum OrbKind {
+    /// Orbit: a lit comet circles a turning sphere.
+    Working,
+    /// Ping (amber): the sphere holds still and pings outward from its face.
+    Waiting,
+    /// Check (green): draws itself once inside a faint ring, then holds.
+    Done,
+    /// Cross (red): shakes once inside a faint ring, then holds.
+    Error,
+    /// Dashed ring (dim): turns slowly while the connection retries.
+    Offline,
+}
+
+impl OrbKind {
+    pub const ALL: [OrbKind; 5] = [
+        OrbKind::Working,
+        OrbKind::Waiting,
+        OrbKind::Done,
+        OrbKind::Error,
+        OrbKind::Offline,
+    ];
+
+    /// Dot colour. Hue is only used for Waiting, Done and Error.
+    pub fn tone(self) -> Tone {
         match self {
-            ActivityState::Waiting => Tone::Warning,
-            ActivityState::Done => Tone::Success,
-            ActivityState::Error => Tone::Danger,
-            _ => Tone::Neutral,
+            OrbKind::Waiting => Tone::Warning,
+            OrbKind::Done => Tone::Success,
+            OrbKind::Error => Tone::Danger,
+            OrbKind::Working | OrbKind::Offline => Tone::Neutral,
         }
     }
 
     /// Offline dots are drawn at α×.85.
     pub fn dim(self) -> bool {
-        self == ActivityState::Offline
+        self == OrbKind::Offline
     }
 
-    /// The state's loop period in seconds (`loop` in the reference); 0 for the play-once states.
-    /// Reading's band sweeps at twice this (4.4s); Notes' stroke writes round every 1.5s;
-    /// Offline advances in .3s ticks.
+    /// The loop period in seconds (`loop` in the reference); 0 for the play-once orbs.
     pub fn tempo(self) -> f64 {
         match self {
-            ActivityState::Thinking => 1.6,
-            ActivityState::Searching => 2.4,
-            ActivityState::Reading => 2.2,
-            ActivityState::Notes => 3.0,
-            ActivityState::Editing => 1.06,
-            ActivityState::Running => 0.8,
-            ActivityState::Waiting => 2.6,
-            ActivityState::Done | ActivityState::Error => 0.0,
-            ActivityState::Offline => 2.4,
+            OrbKind::Working => 1.4,
+            OrbKind::Waiting => 1.8,
+            OrbKind::Done | OrbKind::Error => 0.0,
+            OrbKind::Offline => 2.4,
         }
     }
 
-    /// Done and Error play once and then settle (frame policy: 0fps after [`crate::SETTLE`]).
+    /// Done and Error play once and then settle.
     pub fn plays_once(self) -> bool {
-        matches!(self, ActivityState::Done | ActivityState::Error)
+        matches!(self, OrbKind::Done | OrbKind::Error)
     }
 
-    /// The time (s) of the static frame drawn in reduced-motion mode (handoff §3). Each one shows
-    /// the state's signature cue.
+    /// The time (s) of the still frame drawn in reduced-motion mode (handoff §5). Each one shows
+    /// the orb's signature: the comet, the ping ring, the finished check or cross, the dashes.
     pub fn reduced_motion_time(self) -> f64 {
         match self {
-            ActivityState::Thinking => 0.9,
-            ActivityState::Searching => 0.5,
-            ActivityState::Reading => 0.5,
-            ActivityState::Notes => 1.1,
-            ActivityState::Editing => 0.06,
-            ActivityState::Running => 0.35,
-            ActivityState::Waiting => 0.65,
-            ActivityState::Done => 1.6,
-            ActivityState::Error => 1.0,
-            ActivityState::Offline => 0.35,
+            OrbKind::Working => 0.45,
+            OrbKind::Waiting => 0.5,
+            OrbKind::Done | OrbKind::Error => 1.5,
+            OrbKind::Offline => 0.0,
         }
+    }
+}
+
+impl From<ActivityState> for OrbKind {
+    fn from(state: ActivityState) -> Self {
+        state.orb()
     }
 }
