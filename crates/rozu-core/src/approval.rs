@@ -70,9 +70,17 @@ pub enum SandboxMode {
     InProcess,
 }
 
+/// [`SandboxMode::Enforced`] name for commands the Codex CLI runs under its own sandbox
+/// (workspace-write, network off). rozu decides whether they run; it can't lift that sandbox,
+/// so "unsandboxed" there means a one-time approval only.
+pub const CODEX_SANDBOX: &str = "codex";
+
 impl fmt::Display for SandboxMode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            SandboxMode::Enforced(CODEX_SANDBOX) => {
+                f.write_str("codex's own (writes: workspace + tmp; network off)")
+            }
             SandboxMode::Enforced(name) => write!(f, "{name} (writes: workspace + session tmp)"),
             SandboxMode::Off => f.write_str("off (no OS sandbox here)"),
             SandboxMode::InProcess => f.write_str("n/a (in-process, workspace paths only)"),
@@ -149,6 +157,10 @@ pub enum DecisionSource {
     /// Denied by rule without asking: a request rozu can't map to a tool and risk class
     /// (default-deny), or a write to `.rozu/`.
     Policy,
+    /// Passed on to rozu's own MCP server (`rozu mcp-serve`), which applies the policy,
+    /// sandbox and audit log itself when the call runs: a CLI's approval prompt for one of
+    /// rozu's own tools.
+    Delegated,
 }
 
 impl fmt::Display for DecisionSource {
@@ -159,6 +171,7 @@ impl fmt::Display for DecisionSource {
             DecisionSource::Gate => f.write_str("user"),
             DecisionSource::Cancelled => f.write_str("cancelled"),
             DecisionSource::Policy => f.write_str("rozu policy (default-deny)"),
+            DecisionSource::Delegated => f.write_str("delegated to rozu mcp-serve"),
         }
     }
 }

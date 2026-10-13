@@ -215,7 +215,11 @@ pub fn generate(state: ActivityState, i: usize, t: f64) -> Dot {
         ActivityState::Waiting => {
             let ph = h * 0.85;
             let b = (TAU * t / 2.6).sin();
-            let p = view(sc(dir(i), (1.0 - 0.5 * ph * ph) * (1.0 + 0.06 * b)), 0.0, 0.0);
+            let p = view(
+                sc(dir(i), (1.0 - 0.5 * ph * ph) * (1.0 + 0.06 * b)),
+                0.0,
+                0.0,
+            );
             let on = (p[0].abs() - 0.32).abs() < 0.12 && p[1].abs() < 0.7;
             let mut q = cue(p, on, 1.3, 0.5, 0.22);
             if on {
@@ -404,7 +408,10 @@ mod tests {
             let mut got = [0.0; 6];
             for i in 0..N_POINTS {
                 let d = generate(state, i, t);
-                for (g, v) in got.iter_mut().zip([d.p[0], d.p[1], d.p[2], d.lit, d.s, d.a]) {
+                for (g, v) in got
+                    .iter_mut()
+                    .zip([d.p[0], d.p[1], d.p[2], d.lit, d.s, d.a])
+                {
                     *g += v * (1.0 + i as f64 / 7.0);
                 }
             }
@@ -439,7 +446,10 @@ mod tests {
             let cue_n = dots.iter().filter(|d| is_cue(d)).count();
             let faded_n = dots.iter().filter(|d| is_faded(d)).count();
             assert!(cue_n >= 4, "{state:?}: only {cue_n} cue dots at t={t}");
-            assert!(faded_n >= 4, "{state:?}: only {faded_n} faded dots at t={t}");
+            assert!(
+                faded_n >= 4,
+                "{state:?}: only {faded_n} faded dots at t={t}"
+            );
             // Every drawn dot is one or the other.
             for d in dots.iter().filter(|d| d.s > 0.02) {
                 assert!(is_cue(d) || is_faded(d), "{state:?}: {d:?}");

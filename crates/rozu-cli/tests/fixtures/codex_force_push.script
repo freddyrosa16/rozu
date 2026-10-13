@@ -1,0 +1,9 @@
+# Codex wants to force push: destructive, so rozu shows its approval card (and, without a
+# terminal, denies).
+< turn/start
+> {"id":__ID__,"result":{"turn":{"id":"turn_1","items":[],"status":"inProgress"}}}
+> {"id":"srv-1","method":"item/commandExecution/requestApproval","params":{"itemId":"call_1","threadId":"thr_1","turnId":"turn_1","startedAtMs":1,"command":"/bin/zsh -lc 'git push --force origin main'"}}
+<
+> {"method":"item/completed","params":{"item":{"type":"commandExecution","id":"call_1","command":"/bin/zsh -lc 'git push --force origin main'","commandActions":[],"cwd":"__CWD__","status":"declined"},"threadId":"thr_1","turnId":"turn_1"}}
+> {"method":"item/completed","params":{"item":{"type":"agentMessage","id":"msg_1","text":"I won't force push."},"threadId":"thr_1","turnId":"turn_1"}}
+> {"method":"turn/completed","params":{"threadId":"thr_1","turn":{"id":"turn_1","items":[],"status":"completed"}}}

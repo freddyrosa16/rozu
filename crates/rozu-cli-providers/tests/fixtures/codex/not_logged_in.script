@@ -1,0 +1,6 @@
+# Codex is installed but not logged in.
+< initialize
+> {"id":__ID__,"result":{"codexHome":"/fake/.codex","platformFamily":"unix","platformOs":"macos","userAgent":"codex_cli_rs/0.147.0 (fake)"}}
+< initialized
+< account/read
+> {"id":__ID__,"result":{"account":null,"requiresOpenaiAuth":true}}

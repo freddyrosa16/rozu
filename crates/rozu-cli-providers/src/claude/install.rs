@@ -12,6 +12,8 @@ use std::time::Duration;
 use serde_json::Value;
 use tokio::process::Command;
 
+use crate::which::find_program_in;
+
 /// Overrides where rozu looks for the `claude` binary.
 pub const CLAUDE_BIN_ENV: &str = "ROZU_CLAUDE_BIN";
 /// How long `claude --version` / `claude auth status` may take.
@@ -33,34 +35,15 @@ pub fn find_binary_in(
     path_var: Option<&OsStr>,
     home: Option<&Path>,
 ) -> Option<PathBuf> {
-    if let Some(path) = override_path.filter(|p| !p.is_empty()) {
-        return Some(PathBuf::from(path));
-    }
-    path_var
+    let fallbacks: Vec<PathBuf> = home
+        .map(|home| home.join(".local/bin/claude"))
         .into_iter()
-        .flat_map(std::env::split_paths)
-        .map(|dir| dir.join("claude"))
-        .chain(home.map(|home| home.join(".local/bin/claude")))
-        .find(|candidate| is_executable(candidate))
-}
-
-fn is_executable(path: &Path) -> bool {
-    let Ok(meta) = std::fs::metadata(path) else {
-        return false;
-    };
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        meta.is_file() && meta.permissions().mode() & 0o111 != 0
-    }
-    #[cfg(not(unix))]
-    {
-        meta.is_file()
-    }
+        .collect();
+    find_program_in("claude", override_path, path_var, &fallbacks)
 }
 
 /// Runs `binary args…` and returns its stdout (stderr is discarded).
-async fn query(binary: &Path, args: &[&str]) -> io::Result<String> {
+pub(crate) async fn query(binary: &Path, args: &[&str]) -> io::Result<String> {
     let output = tokio::time::timeout(
         QUERY_TIMEOUT,
         Command::new(binary)

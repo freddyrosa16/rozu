@@ -5,13 +5,19 @@
 //!   cancel/drop, stderr to the log file only).
 //! - [`claude`]: Claude Code (`claude -p` with stream-json), an agent backend whose tools are
 //!   rozu's own, reached over rozu's MCP server.
+//! - [`codex`]: the Codex CLI's `codex app-server` (JSON-RPC), an agent backend whose own
+//!   commands and patches are approved by rozu, with rozu's tools added over MCP.
 //!
 //! The HTTP (API-key) adapters live in `rozu-providers` and are unaffected.
 
 pub mod claude;
+pub mod codex;
 pub mod process;
+pub mod turn;
+pub mod which;
 
 pub use claude::{ClaudeCliConfig, ClaudeCliProvider};
+pub use codex::{CodexAppServerProvider, CodexConfig};
 pub use process::{CliCommand, CliProcess};
 
 /// Version of this crate.

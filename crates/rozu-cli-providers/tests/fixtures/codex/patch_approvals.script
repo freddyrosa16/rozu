@@ -1,0 +1,20 @@
+# File-change approvals: a new workspace file (auto-approved), a write into .rozu/ (denied by
+# policy), a legacy patch outside the workspace (the user), a delete (destructive: the user), and
+# an approval for an item rozu never saw (denied by default).
+< turn/start
+> {"id":__ID__,"result":{"turn":{"id":"turn_1","items":[],"status":"inProgress"}}}
+> {"method":"item/started","params":{"item":{"type":"fileChange","id":"fc_1","changes":[{"path":"notes.md","kind":{"type":"add"},"diff":"+hello\n"}],"status":"inProgress"},"startedAtMs":1,"threadId":"thr_1","turnId":"turn_1"}}
+> {"id":"srv-1","method":"item/fileChange/requestApproval","params":{"itemId":"fc_1","threadId":"thr_1","turnId":"turn_1","startedAtMs":2}}
+<
+> {"method":"item/completed","params":{"item":{"type":"fileChange","id":"fc_1","changes":[{"path":"notes.md","kind":{"type":"add"},"diff":"+hello\n"}],"status":"completed"},"threadId":"thr_1","turnId":"turn_1"}}
+> {"method":"item/started","params":{"item":{"type":"fileChange","id":"fc_2","changes":[{"path":".rozu/approvals.json","kind":{"type":"add"},"diff":"+{}\n"}],"status":"inProgress"},"startedAtMs":3,"threadId":"thr_1","turnId":"turn_1"}}
+> {"id":"srv-2","method":"item/fileChange/requestApproval","params":{"itemId":"fc_2","threadId":"thr_1","turnId":"turn_1","startedAtMs":4}}
+<
+> {"id":"srv-3","method":"applyPatchApproval","params":{"callId":"legacy_patch","conversationId":"thr_1","fileChanges":{"/etc/hosts":{"type":"update","unified_diff":"@@ -1 +1 @@\n-a\n+b\n","move_path":null}}}}
+<
+> {"method":"item/started","params":{"item":{"type":"fileChange","id":"fc_4","changes":[{"path":"README.md","kind":{"type":"delete"},"diff":"-# demo\n"}],"status":"inProgress"},"startedAtMs":5,"threadId":"thr_1","turnId":"turn_1"}}
+> {"id":"srv-4","method":"item/fileChange/requestApproval","params":{"itemId":"fc_4","threadId":"thr_1","turnId":"turn_1","startedAtMs":6}}
+<
+> {"id":"srv-5","method":"item/fileChange/requestApproval","params":{"itemId":"fc_unknown","threadId":"thr_1","turnId":"turn_1","startedAtMs":7}}
+<
+> {"method":"turn/completed","params":{"threadId":"thr_1","turn":{"id":"turn_1","items":[],"status":"completed"}}}
