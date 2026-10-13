@@ -2,7 +2,7 @@
 //! own point set), the label and a mono timer.
 //!
 //! Two modes (key A switches; `-- --agent` starts in the second):
-//! - **cycle** (default): all ten states, 3.2s each. Labels come from a scripted turn run through
+//! - **cycle** (default): all nine states, 3.2s each. Labels come from a scripted turn run through
 //!   `rozu_activity::ActivityTracker`; Offline is set directly.
 //! - **agent**: replays `rozu_activity::replay::demo_turn()`, a real `rozu_core::AgentEvent`
 //!   turn, through the AgentEvent → ActivityState mapping and the pill's debouncer

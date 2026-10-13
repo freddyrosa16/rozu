@@ -313,7 +313,7 @@ mod tests {
     #[test]
     fn pulse_peaks_then_decays_by_150ms() {
         let mut orb = Orb::new(Reading, 0.0);
-        orb.set_state(Notes, 5.0);
+        orb.set_state(Searching, 5.0);
         // Dot 0 is about a fifth of the way through its morph at 75ms, and the pulse is at its
         // .8 peak on top of that.
         let base = generate(OrbSize::Large, Reading, 0, 5.075).lit;

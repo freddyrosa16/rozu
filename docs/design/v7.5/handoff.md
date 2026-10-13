@@ -1,9 +1,9 @@
 # rozu: Handoff spec (CURRENT: v7.5, live activity, a dotted globe per state)
-**Status:** current spec as of 2026-10-13. **v7.5** replaces the v7.4 ring-and-symbol orbs with one object for all ten states: a globe of small matte dots on lines of latitude, and the state is what the globe is doing (sparks rippling out, lines being written round it, a reading band, a roaming lens, a caret revising a full line, a fast helical spin, a breath, dropped rings). Done and Error gather the dots into the v7.4 check and cross, with the rest resting on a faint ring. The 22px pill draws its own smaller point set, tuned rather than scaled. The look is inspired by dotted-globe loading indicators (libraries.dev/orbs), with rozu's own motions, projection, light and morph. The pill itself (orb, label, timer, `3/5` step text, no progress bar) is unchanged from v7.2.
+**Status:** current spec as of 2026-10-13. **v7.5** replaces the v7.4 ring-and-symbol orbs with one object for all nine states: a globe of small matte dots on lines of latitude, and the state is what the globe is doing (sparks rippling out, a reading band, a roaming lens, a caret writing the globe from the bottom up, a fast helical spin, a breath, dropped rings). Done and Error gather the dots into the v7.4 check and cross, with the rest resting on a faint ring. The 22px pill draws its own smaller point set, tuned rather than scaled. The look is inspired by dotted-globe loading indicators (libraries.dev/orbs), with rozu's own motions, projection, light and morph. The pill itself (orb, label, timer, `3/5` step text, no progress bar) is unchanged from v7.2.
 - Everything v7.5 doesn't redefine comes from v5 (Appendix B: chrome ramp, type, spacing, focus) and then v1 (Appendix A: layout, keyboard map, approvals, accessibility).
 - **Superseded:** the v7.2/v7.3 per-state clouds and the v7.4 ring-and-symbol orbs (removed from the repo; see git history), and v6.x (Appendix C), meaning the bead family, the bead tokens and the v5 progress line under the pill.
-- **Screens:** `screens/v7.5-sheet-{dark,light}.png` (all ten states, 96px and in the 22px pill), `screens/v7.5-strip-{dark,light}.png` (each state over one loop at 96px and at 22px) and `screens/v7.5-morphs.png` (Running into Waiting, Done, Error and Offline).
-- **Source:** `reference/v7.5-orb.js` is the reference implementation. It's pure and deterministic: `sample(timeline, T, size)` → points, then `drawOrb`. `reference/v7.5-sheet.html` animates all ten (`?still` for the reduced-motion frames, `?T=` for a fixed time, `?theme=light`).
+- **Screens:** `screens/v7.5-sheet-{dark,light}.png` (all nine states, 96px and in the 22px pill), `screens/v7.5-strip-{dark,light}.png` (each state over one loop at 96px and at 22px) and `screens/v7.5-morphs.png` (Running into Waiting, Done, Error and Offline).
+- **Source:** `reference/v7.5-orb.js` is the reference implementation. It's pure and deterministic: `sample(timeline, T, size)` → points, then `drawOrb`. `reference/v7.5-sheet.html` animates all nine (`?still` for the reduced-motion frames, `?T=` for a fixed time, `?theme=light`).
 - **Spec:** `motion-spec-v7.5.md`.
 - **Contrast:** `contrast-v7.3.md` (the colours are unchanged in v7.5), 0 failures.
 - **Tokens:** CSS load order `tokens.css` → `tokens-v4.css` → `tokens-v5.css` → `tokens-v6.css` → **`tokens-v7.css`**. JSON: `tokens.json` + `tokens-v5.json` + `tokens-v6.json` + **`tokens-v7.json`**.
@@ -38,7 +38,7 @@
 | orb.litBoost | r×1.55, α+.5 | Lit dots |
 | motion.orbMorph / orbStagger / orbLift | 600ms crit. spring ω7 / 300ms across the cloud / .55 | Morph |
 | motion.orbPulse | 150ms, lit + .8·sin(πt/.15) | On every change |
-| motion.orbTempo.* | thinking 1.6s, notes 2.6s, reading 2.2s, searching 2.4s, editing 2.4s, running 900ms, waiting 1.8s, offline 2.4s; done draw 450ms, error shake 900ms; settle 1.3s | Per state |
+| motion.orbTempo.* | thinking 1.6s, reading 2.2s, searching 2.4s, editing 2.6s, running 900ms, waiting 1.8s, offline 2.4s; done draw 450ms, error shake 900ms; settle 1.3s | Per state |
 | size.orb / orbLg / activityPill | 22px / 88px / 32px (34px in the dock) | Sizes |
 **Deprecated (v6):** `bead.*`, `size.beadDiameter22`, `motion.morph` 480ms, `trail`, `arcBow`, and the v5 line tokens (`size.seg*`, sweep, notch) as pill companions.
 
@@ -58,10 +58,9 @@
 | State | Label | What the globe does | Tempo | Reduced-motion frame (T) |
 |---|---|---|---|---|
 | Thinking | Thinking… | Sparks flash on its front and ripples spread out from them while it turns slowly | 1.6s | .55s |
-| Notes | Jotting down notes… | Seen from above (tilt .8): three lines of latitude write themselves all the way round, from the front, one after another, hold, then start over | 2.6s | 1.2s |
 | Reading | Reading `<file>` | A lit band reads down it, pole to pole, while it turns slowly | 2.2s | .6s |
 | Searching | Searching "`<q>`" | A lens roams its front; the dots under it swell and light | 2.4s | .3s |
-| Editing | Editing `<file>` | Seen from above: one full line of the page is always there; a caret sweeps round it, and the dots behind it brighten and swell as revised text, settling back over half a lap | 2.4s | 1.1s |
+| Editing | Editing `<file>` | A caret writes every dot of the globe, ring by ring, from the bottom to the top over 2s; the newest ring and a half is brighter; held, then cleared in .3s | 2.6s | 1.1s |
 | Running | Running `<cmd>` | It spins fast with a helical stripe racing round it | .9s | .3s |
 | Waiting (amber) | Waiting for approval · Y / N | It stops and breathes | 1.8s | .45s |
 | Done (green) | Done · 42s · 2 files | 42% of the dots draw a check (450ms from 250ms, one pop); the rest rest on a faint ring | once | 1.5s |
@@ -101,7 +100,7 @@
 
 ## 7. Acceptance criteria (v7.5)
 1. While the agent runs, the pill shows the orb, the action in words, the timer and the step text. There's no bar, line or hero card.
-2. All ten states are distinct at a glance at 22px (see `screens/v7.5-strip-{dark,light}.png`), at 1× and 2×, in both themes, by what the globe does and (for Waiting, Done, Error) hue.
+2. All nine states are distinct at a glance at 22px (see `screens/v7.5-strip-{dark,light}.png`), at 1× and 2×, in both themes, by what the globe does and (for Waiting, Done, Error) hue.
 3. The globe reads as a dotted sphere at both sizes: the far side dim and small, the lines of latitude visible, no dot larger than the gaps between dots at rest.
 4. State changes morph point-to-point in 600ms with no restart, plus a 150ms brighten pulse. Each state runs at its own tempo.
 5. Every pair in `contrast-v7.3.md` passes. Labels ≥4.5:1. Front dots ≥3:1 at the worst light; the tightest are light amber 3.27, light green 3.36, light red 3.76, and dark red 3.96.

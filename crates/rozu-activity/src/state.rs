@@ -14,7 +14,6 @@ pub enum Tone {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ActivityState {
     Thinking,
-    Notes,
     Reading,
     Searching,
     Editing,
@@ -27,9 +26,8 @@ pub enum ActivityState {
 
 impl ActivityState {
     /// All states, in the reference sheet's order.
-    pub const ALL: [ActivityState; 10] = [
+    pub const ALL: [ActivityState; 9] = [
         ActivityState::Thinking,
-        ActivityState::Notes,
         ActivityState::Reading,
         ActivityState::Searching,
         ActivityState::Editing,
@@ -44,7 +42,6 @@ impl ActivityState {
     pub fn label(self) -> &'static str {
         match self {
             ActivityState::Thinking => "Thinking…",
-            ActivityState::Notes => "Jotting down notes…",
             ActivityState::Reading => "Reading…",
             ActivityState::Searching => "Searching…",
             ActivityState::Editing => "Editing…",
@@ -85,10 +82,9 @@ impl ActivityState {
     pub fn tempo(self) -> f64 {
         match self {
             ActivityState::Thinking => 1.6,
-            ActivityState::Notes => 2.6,
             ActivityState::Reading => 2.2,
             ActivityState::Searching => 2.4,
-            ActivityState::Editing => 2.4,
+            ActivityState::Editing => 2.6,
             ActivityState::Running => 0.9,
             ActivityState::Waiting => 1.8,
             ActivityState::Done | ActivityState::Error => 0.0,
@@ -106,7 +102,6 @@ impl ActivityState {
     pub fn reduced_motion_time(self) -> f64 {
         match self {
             ActivityState::Thinking => 0.55,
-            ActivityState::Notes => 1.2,
             ActivityState::Reading => 0.6,
             ActivityState::Searching => 0.3,
             ActivityState::Editing => 1.1,

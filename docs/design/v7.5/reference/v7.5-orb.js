@@ -1,9 +1,8 @@
 // rozu v7.5 activity orbs: a dotted globe for every state.
 //
 // Every state is the same object, a sphere of small matte dots laid out on lines of latitude, and the state
-// is what the globe is doing: thought weather drifting over it (thinking), lines of text being written round
-// it (notes), a reading band descending it (reading), a lens roaming its surface (searching), a caret retyping
-// one full line of the page (editing), a fast helical spin (running), a slow breath (waiting), a flicker of dropped rings
+// is what the globe is doing: sparks rippling over it (thinking), a reading band descending it (reading), a lens
+// roaming its surface (searching), a caret writing every dot from the bottom to the top (editing), a fast helical spin (running), a slow breath (waiting), a flicker of dropped rings
 // (offline). Done and Error gather the dots into the check and the cross from v7.4, with the rest of the dots
 // resting as a faint ring. Same perspective, light, depth and morph as v7.3/v7.4.
 //
@@ -30,8 +29,6 @@ const SMALL=profile(9,15,{dot:1.15,speed:1.15}); // 87 dots
 const dir=(P,i)=>{const [phi,lam]=P.grid[i];const c=Math.cos(phi);return [c*Math.cos(lam),Math.sin(phi),c*Math.sin(lam)]};
 // Dot i on the globe, radius r, spun by `yaw` radians and tilted toward the camera.
 const globe=(P,i,yaw,r=R,tilt=TILT)=>{const d=dir(P,i);return rX(rY([d[0]*r,d[1]*r,d[2]*r],yaw),tilt)};
-// Notes and Editing look down on the globe, so a line of latitude reads as a whole ellipse.
-const PAGE_TILT=.8;
 // Fraction 0..1 round a ring, starting at the front and going round the back (writing order).
 const roundFrom=(P,i)=>((-front(P,i,0))%TAU+TAU)%TAU/TAU;
 // Geodesic angle (rad) between dot i and a surface point (phi0, lam0).
@@ -56,11 +53,6 @@ const ORBS={
      const d=geo(P,i,(2*h1-1)*.6,yaw+Math.PI/2+(2*h2-1)*1.1),ring=Math.exp(-Math.pow((d-a*1.1)/.3,2))*Math.pow(1-a/T,1.5),spark=d<.25?Math.max(0,1-a/.4):0;
      lit=Math.max(lit,ring,spark)}
    return Q(p,lit,(.85+.45*lit)*P.dot,.45+.55*lit)}},
- notes:{tone:"none",tempo:2.6,gen(i,t,P){ // three lines of text write themselves round the globe, hold, then start over
-   const [phi,lam,j]=P.grid[i],p=globe(P,i,0,R,PAGE_TILT),mid=(P.rings-1)/2,lines=[mid-2,mid,mid+2].map(Math.round),li=lines.indexOf(j);
-   if(li<0)return Q(p,0,.75*P.dot,.3);
-   const ph=(t%2.6)/1.9,w=cl(ph*3-li),u=roundFrom(P,i),on=u<=w,head=on&&w<1&&u>w-.06;
-   return Q(p,on?1:0,(head?1.6:on?1.15:.75)*P.dot,on?1:.35)}},
  reading:{tone:"none",tempo:2.2,gen(i,t,P){ // a lit band reads down the globe, line by line
    const [phi]=P.grid[i],p=globe(P,i,.25*t*P.speed),yb=Math.PI/2-Math.PI*((t%2.2)/2.2)*1.15+.07,on=Math.exp(-Math.pow((phi-yb)/.17,2));
    return Q(p,on,(.8+.5*on)*P.dot,.35+.65*on)}},
@@ -68,13 +60,12 @@ const ORBS={
    const [phi,lam]=P.grid[i],yaw=.3*t*P.speed,p=globe(P,i,yaw),a=TAU*t/2.4,cphi=.35*Math.sin(a*.7),clam=front(P,i,yaw)-(.9*Math.sin(a));
    const d=Math.hypot(phi-cphi,clam*Math.cos(cphi)),inside=cl((.42-d)/.12),lit=inside;
    return Q(p,lit,(.85+.55*lit)*P.dot,.4+.6*lit)}},
- editing:{tone:"none",tempo:2.4,gen(i,t,P){ // a caret sweeps round one full line of the page, revising the dots as it passes
-   const [phi,lam,j]=P.grid[i],p=globe(P,i,0,R,PAGE_TILT),line=Math.round((P.rings-1)/2)-1;
-   if(j!==line)return Q(p,0,.75*P.dot,.35);
-   const cx=(t/2.4)%1,u=roundFrom(P,i),du=Math.abs(u-cx);
-   if(Math.min(du,1-du)<.5/P.lon)return Q(p,1,1.7*P.dot,1);
-   const d=((cx-u)%1+1)%1,k=Math.max(0,1-d/.5); // the revised dots behind the caret settle back over half a lap
-   return Q(p,.6+.4*k,(1.15+.45*k)*P.dot,.85+.15*k)}},
+ editing:{tone:"none",tempo:2.6,gen(i,t,P){ // a caret writes every dot, ring by ring, from the bottom of the globe to the top
+   const [phi,lam,j]=P.grid[i],p=globe(P,i,0),ph=t%2.6,u=roundFrom(P,i),o=(j+u)/P.rings,w=Math.min(1,ph/2); // written over 2s, held, cleared over the last .3s
+   if(ph>=2.3){const q=(ph-2.3)/.3;return Q(p,.75*(1-q),(1.15-.4*q)*P.dot,.9-.6*q)}
+   if(o>=w)return Q(p,0,.75*P.dot,.3);
+   const f=Math.max(0,1-(w-o)*P.rings/1.5),head=ph<2&&(w-o)*P.rings*Math.max(3,Math.round(P.lon*Math.cos(phi)))<1; // the last ring and a half is fresh; the newest dot is the caret
+   return Q(p,head?1:.75+.25*f,(head?1.7:1.15+.5*f)*P.dot,.9+.1*f)}},
  running:{tone:"none",tempo:.9,gen(i,t,P){ // the globe spins fast with a helical stripe racing round it
    const [phi,lam]=P.grid[i],yaw=2.4*t*P.speed,p=globe(P,i,yaw),s=.5+.5*Math.sin(2*phi+lam-TAU*t/.9),lit=cl(s*1.4-.4);
    return Q(p,lit*.75,(.9+.25*lit)*P.dot,.5+.5*lit)}},
@@ -88,8 +79,8 @@ const ORBS={
    const [phi,lam,j]=P.grid[i],p=globe(P,i,.12*t,R*.92),slot=Math.floor(t/.4),off=hash2(j,slot)<.42||hash2(i,slot)<.12;
    return Q(p,0,(off?0:.85)*P.dot,off?0:.45)}},
 };
-const ORDER=["thinking","notes","reading","searching","editing","running","waiting","done","error","offline"];
-const STILL={thinking:.55,notes:1.2,reading:.6,searching:.3,editing:1.1,running:.3,waiting:.45,done:1.5,error:1.5,offline:.3};
+const ORDER=["thinking","reading","searching","editing","running","waiting","done","error","offline"];
+const STILL={thinking:.55,reading:.6,searching:.3,editing:1.1,running:.3,waiting:.45,done:1.5,error:1.5,offline:.3};
 const MORPH=.6,STAG_TOTAL=.3; // dot i starts hash(i)·STAG_TOTAL late: a dissolve across the globe, whatever its size
 const crit=u=>u<=0?0:u>=1.6?1:1-(1+7*u)*Math.exp(-7*u);
 // tl: [{orb, start}], consecutive entries with different orbs. P: LARGE or SMALL.
