@@ -200,8 +200,8 @@
       },
       "editing": {
         "$type": "duration",
-        "$value": "2.6s",
-        "$description": "a caret types a line (1.2s), deletes the last third (.3s), retypes it (.6s), then blinks at 250ms"
+        "$value": "2.4s",
+        "$description": "a caret laps one full line of the page every 2.4s, revising the dots behind it"
       },
       "running": {
         "$type": "duration",

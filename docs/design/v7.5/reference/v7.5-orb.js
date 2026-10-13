@@ -3,7 +3,7 @@
 // Every state is the same object, a sphere of small matte dots laid out on lines of latitude, and the state
 // is what the globe is doing: thought weather drifting over it (thinking), lines of text being written round
 // it (notes), a reading band descending it (reading), a lens roaming its surface (searching), a caret retyping
-// its equator (editing), a fast helical spin (running), a slow breath (waiting), a flicker of dropped rings
+// one full line of the page (editing), a fast helical spin (running), a slow breath (waiting), a flicker of dropped rings
 // (offline). Done and Error gather the dots into the check and the cross from v7.4, with the rest of the dots
 // resting as a faint ring. Same perspective, light, depth and morph as v7.3/v7.4.
 //
@@ -68,16 +68,13 @@ const ORBS={
    const [phi,lam]=P.grid[i],yaw=.3*t*P.speed,p=globe(P,i,yaw),a=TAU*t/2.4,cphi=.35*Math.sin(a*.7),clam=front(P,i,yaw)-(.9*Math.sin(a));
    const d=Math.hypot(phi-cphi,clam*Math.cos(cphi)),inside=cl((.42-d)/.12),lit=inside;
    return Q(p,lit,(.85+.55*lit)*P.dot,.4+.6*lit)}},
- editing:{tone:"none",tempo:2.4,gen(i,t,P){ // a caret moves along the equator, retyping the dots behind it
-   // One line of a page is edited: the caret types it, deletes the last third, retypes it, then blinks.
+ editing:{tone:"none",tempo:2.4,gen(i,t,P){ // a caret sweeps round one full line of the page, revising the dots as it passes
    const [phi,lam,j]=P.grid[i],p=globe(P,i,0,R,PAGE_TILT),line=Math.round((P.rings-1)/2)-1;
    if(j!==line)return Q(p,0,.75*P.dot,.35);
-   const ph=t%2.6,u=roundFrom(P,i);
-   const cx=ph<1.2?ph/1.2:ph<1.5?1-.4*((ph-1.2)/.3):ph<2.1?.6+.4*((ph-1.5)/.6):1,retyping=ph>=1.5&&ph<2.1,blink=ph>=2.1&&Math.floor((ph-2.1)/.25)%2===1;
-   const du=Math.abs(u-cx),caret=Math.min(du,1-du)<.5/P.lon;if(caret)return Q(p,blink?0:1,(blink?.6:1.7)*P.dot,blink?.3:1);
-   const on=u<cx,fresh=on&&cx-u<.12?1-(cx-u)/.12:0,redone=on&&u>.6&&ph>=1.5;
-   const gone=!on&&u>.6&&ph>=1.2&&ph<1.5&&u-cx<.1; // the deleted dots flare for a moment as the caret backs over them
-   return Q(p,on?.85+.15*fresh:gone?.6:0,(on?1.3+.4*fresh+(redone?.2:0):gone?1.1:.8)*P.dot,on?1:gone?.7:.3)}},
+   const cx=(t/2.4)%1,u=roundFrom(P,i),du=Math.abs(u-cx);
+   if(Math.min(du,1-du)<.5/P.lon)return Q(p,1,1.7*P.dot,1);
+   const d=((cx-u)%1+1)%1,k=Math.max(0,1-d/.5); // the revised dots behind the caret settle back over half a lap
+   return Q(p,.6+.4*k,(1.15+.45*k)*P.dot,.85+.15*k)}},
  running:{tone:"none",tempo:.9,gen(i,t,P){ // the globe spins fast with a helical stripe racing round it
    const [phi,lam]=P.grid[i],yaw=2.4*t*P.speed,p=globe(P,i,yaw),s=.5+.5*Math.sin(2*phi+lam-TAU*t/.9),lit=cl(s*1.4-.4);
    return Q(p,lit*.75,(.9+.25*lit)*P.dot,.5+.5*lit)}},

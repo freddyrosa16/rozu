@@ -29,7 +29,7 @@ cd spikes/gpui-spike && cargo run --bin activity_orb
 - `matches_the_reference`: whole-cloud checksums (Σ value·(1 + i/7) over all dots) for each state at four times and both sizes, generated from `v7.5-orb.js` in node, to 1e-9.
 - `grids_match_the_reference`: 284 and 86 dots, rings in order, dots in order round each ring.
 - `busy_states_stay_on_the_globe`, `states_differ`.
-- Per state: `thinking_sparks_ripple_on_the_front`, `notes_write_three_lines_then_hold`, `reading_band_moves_down`, `searching_lens_roams_the_front`, `editing_types_deletes_retypes_then_blinks`, `running_spins_fast`, `waiting_breathes`, `done_draws_a_check_then_holds` (both sizes), `error_shakes_then_holds`, `offline_dims_and_drops_rings` (both sizes).
+- Per state: `thinking_sparks_ripple_on_the_front`, `notes_write_three_lines_then_hold`, `reading_band_moves_down`, `searching_lens_roams_the_front`, `editing_revises_one_full_line`, `running_spins_fast`, `waiting_breathes`, `done_draws_a_check_then_holds` (both sizes), `error_shakes_then_holds`, `offline_dims_and_drops_rings` (both sizes).
 - The morph, pulse, interrupt, settle, reduced-motion, projection and frame-policy tests carry over.
 
 ## Previews
