@@ -18,6 +18,13 @@ pub fn run() -> anyhow::Result<ExitCode> {
             model.id,
             if is_default { " *" } else { "" }
         );
+        if !model.is_metered() {
+            println!(
+                "{name:<38}{:>9}   subscription (no per-token cost)",
+                tokens(model.context_window)
+            );
+            continue;
+        }
         println!(
             "{name:<38}{:>9}{:>9}{:>9}{:>12}{:>14}",
             tokens(model.context_window),
@@ -42,7 +49,9 @@ pub fn run() -> anyhow::Result<ExitCode> {
         "\n* default for its provider. Prices are USD per million tokens, copied by hand from the \
          providers' pricing pages (as of 2026-10-13); verify them before relying on cost \
          estimates. An indented `prompt` row is a long-context tier: a request with that many \
-         prompt tokens pays those prices for all of its tokens."
+         prompt tokens pays those prices for all of its tokens. claude-cli models run on your \
+         Claude subscription through the official claude CLI: tokens are counted, cost isn't; \
+         any model id the CLI accepts works."
     );
     Ok(ExitCode::SUCCESS)
 }

@@ -6,22 +6,20 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use rozu_tools::{
-    MAX_OUTPUT_BYTES, Risk, Sandbox, ToolCtx, ToolOutput, ToolRegistry, Workspace,
-    platform_sandbox, truncate_head_tail,
+    MAX_OUTPUT_BYTES, Sandbox, ToolOutput, ToolRegistry, Workspace, platform_sandbox,
+    truncate_head_tail,
 };
-use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use tracing::{Instrument, debug, info, info_span, warn};
+use tracing::{Instrument, debug, info_span, warn};
 
-use crate::approval::{
-    ApprovalGate, ApprovalMode, ApprovalPolicy, ApprovalRequest, Decision, DecisionSource,
-    ReadOnlyGate, SandboxMode,
-};
+pub use crate::approval::ApprovalRecord;
+use crate::approval::{ApprovalGate, ApprovalMode, ApprovalPolicy, ReadOnlyGate};
+use crate::exec::ToolExecutor;
 use crate::model::{
     ChatRequest, ContentPart, Message, ModelInfo, Role, StreamEvent, ToolSpec, Usage,
 };
-use crate::provider::{Provider, ProviderError};
+use crate::provider::{Provider, ProviderError, ProviderKind};
 
 /// Default cap on model requests per user turn.
 pub const DEFAULT_MAX_STEPS: usize = 20;
@@ -38,7 +36,7 @@ pub struct AgentConfig {
     /// Tool results longer than this are cut to head + tail before going back to the model.
     pub max_tool_output_bytes: usize,
     /// Prices for cost accounting. `None` (an unlisted model) means tokens are counted but cost
-    /// is unknown.
+    /// is unknown; so does a subscription model ([`ModelInfo::is_metered`] is false).
     pub model_info: Option<ModelInfo>,
 }
 
@@ -58,13 +56,18 @@ impl AgentConfig {
         self.model_info = info;
         self
     }
+
+    /// The model info, if its usage has a USD cost.
+    fn priced_model(&self) -> Option<&ModelInfo> {
+        self.model_info.as_ref().filter(|info| info.is_metered())
+    }
 }
 
 /// Tokens and estimated cost of one user turn (all of its model requests).
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct TurnUsage {
     pub usage: Usage,
-    /// `None` when the model has no known prices.
+    /// `None` when the model has no known prices or is covered by a subscription.
     pub cost_usd: Option<f64>,
 }
 
@@ -93,7 +96,7 @@ impl Session {
         }
     }
 
-    /// Adds one response's usage to the totals, pricing it with `model`.
+    /// Adds one response's usage to the totals, pricing it with `model` (`None`: unpriced).
     fn record_usage(&mut self, usage: Usage, model: Option<&ModelInfo>) {
         self.usage += usage;
         self.last_turn.usage += usage;
@@ -124,22 +127,9 @@ pub enum AgentEvent {
     },
     /// An approval decision for a tool call (every call gets one, auto-approved or not).
     Approval(ApprovalRecord),
-    /// Usage for one model response.
+    /// Usage for one model response (for an agent backend: for the whole turn).
     Usage(Usage),
     TurnFinished(TurnOutcome),
-}
-
-/// The decision log entry for one tool call.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ApprovalRecord {
-    pub call_id: String,
-    pub tool: String,
-    pub risk: Risk,
-    pub preview: String,
-    pub sandbox: SandboxMode,
-    pub network: bool,
-    pub decision: Decision,
-    pub source: DecisionSource,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -160,11 +150,8 @@ pub enum AgentError {
 
 pub struct Agent {
     provider: Arc<dyn Provider>,
-    tools: Arc<ToolRegistry>,
+    exec: ToolExecutor,
     workspace: Workspace,
-    approvals: Arc<dyn ApprovalGate>,
-    policy: Arc<ApprovalPolicy>,
-    sandbox: Arc<dyn Sandbox>,
     config: AgentConfig,
 }
 
@@ -199,34 +186,38 @@ impl Agent {
         workspace: Workspace,
         config: AgentConfig,
     ) -> Self {
+        let mut exec = ToolExecutor::new(
+            tools,
+            Arc::new(ReadOnlyGate),
+            Arc::new(ApprovalPolicy::new(ApprovalMode::ReadOnly)),
+            platform_sandbox(),
+        );
+        exec.default_timeout = config.tool_timeout;
         Self {
             provider,
-            tools,
+            exec,
             workspace,
-            approvals: Arc::new(ReadOnlyGate),
-            policy: Arc::new(ApprovalPolicy::new(ApprovalMode::ReadOnly)),
-            sandbox: platform_sandbox(),
             config,
         }
     }
 
     pub fn with_approval_gate(mut self, gate: Arc<dyn ApprovalGate>) -> Self {
-        self.approvals = gate;
+        self.exec.gate = gate;
         self
     }
 
     pub fn with_approval_policy(mut self, policy: Arc<ApprovalPolicy>) -> Self {
-        self.policy = policy;
+        self.exec.policy = policy;
         self
     }
 
     pub fn with_sandbox(mut self, sandbox: Arc<dyn Sandbox>) -> Self {
-        self.sandbox = sandbox;
+        self.exec.sandbox = sandbox;
         self
     }
 
     pub fn approval_policy(&self) -> &ApprovalPolicy {
-        &self.policy
+        &self.exec.policy
     }
 
     pub fn config(&self) -> &AgentConfig {
@@ -239,7 +230,8 @@ impl Agent {
 
     /// The registry's tools in the provider-neutral form sent with each request.
     pub fn tool_specs(&self) -> Vec<ToolSpec> {
-        self.tools
+        self.exec
+            .tools
             .iter()
             .map(|tool| ToolSpec {
                 name: tool.name().to_owned(),
@@ -278,11 +270,13 @@ impl Agent {
         session.messages.push(Message::user(user_input));
         session.last_turn = TurnUsage {
             usage: Usage::default(),
-            cost_usd: self.config.model_info.as_ref().map(|_| 0.0),
+            cost_usd: self.config.priced_model().map(|_| 0.0),
         };
+        if self.provider.kind() == ProviderKind::AgentBackend {
+            return self.backend_turn(session, events, cancel).await;
+        }
         let specs = self.tool_specs();
-        let ctx =
-            ToolCtx::new(self.workspace.clone(), cancel.clone()).with_sandbox(self.sandbox.clone());
+        let ctx = self.exec.ctx(self.workspace.clone(), cancel.clone());
 
         for step in 1..=self.config.max_steps {
             debug!(step, "requesting model response");
@@ -338,7 +332,9 @@ impl Agent {
                             args_json: call.args_json.clone(),
                         })
                         .await;
-                    self.execute(call, &ctx, events).await
+                    self.exec
+                        .execute(&call.id, &call.name, &call.args_json, &ctx, events)
+                        .await
                 };
                 let text = truncate_head_tail(&result.content, self.config.max_tool_output_bytes)
                     .into_owned();
@@ -413,8 +409,14 @@ impl Agent {
                     }
                     StreamEvent::ToolCallEnd { .. } => {}
                     StreamEvent::Usage(usage) => {
-                        session.record_usage(usage, self.config.model_info.as_ref());
+                        session.record_usage(usage, self.config.priced_model());
                         let _ = events.send(AgentEvent::Usage(usage)).await;
+                    }
+                    StreamEvent::ToolResult { id, .. } => {
+                        warn!(%id, "a model provider sent a tool result; ignored");
+                    }
+                    StreamEvent::Approval(record) => {
+                        warn!(call_id = %record.call_id, "a model provider sent an approval; ignored");
                     }
                     StreamEvent::Done(reason) => {
                         debug!(?reason, "model response done");
@@ -425,129 +427,132 @@ impl Agent {
         }
     }
 
-    /// Runs one tool call: lookup, argument parsing, validation, approval, then the call itself
-    /// under the timeout and the turn's cancellation.
-    async fn execute(
+    /// One turn with an agent backend ([`ProviderKind::AgentBackend`]): a single stream for the
+    /// whole turn, whose tool calls, results and approvals are forwarded as [`AgentEvent`]s. The
+    /// backend runs the tools (rozu's own, through MCP), so nothing executes here.
+    ///
+    /// Only the assistant's text is kept in the session; the backend keeps its own record of
+    /// the tool calls.
+    async fn backend_turn(
         &self,
-        call: &PendingCall,
-        ctx: &ToolCtx,
+        session: &mut Session,
         events: &mpsc::Sender<AgentEvent>,
-    ) -> ToolOutput {
-        let Some(tool) = self.tools.get(&call.name) else {
-            return ToolOutput::error(format!("unknown tool: {}", call.name));
+        cancel: CancellationToken,
+    ) -> Result<TurnOutcome, AgentError> {
+        let request = ChatRequest {
+            model: self.config.model.clone(),
+            messages: session.messages.clone(),
+            tools: Vec::new(),
+            max_output_tokens: self.config.max_output_tokens,
         };
-        let args: Value = if call.args_json.trim().is_empty() {
-            Value::Object(Default::default())
-        } else {
-            match serde_json::from_str(&call.args_json) {
-                Ok(args) => args,
-                Err(err) => return ToolOutput::error(format!("invalid JSON arguments: {err}")),
-            }
-        };
-        if let Err(output) = tool.validate(&args, ctx) {
-            return output;
-        }
-
-        let risk = tool.risk(&args, ctx);
-        let wants_network = tool.wants_network(&args, ctx);
-        let (sandbox, permissions) =
-            self.policy
-                .confinement(tool.as_ref(), risk, wants_network, self.sandbox.as_ref());
-        let request = ApprovalRequest {
-            call_id: call.id.clone(),
-            tool: call.name.clone(),
-            allow_prefix: self.policy.allow_prefix(tool.as_ref(), &args, risk),
-            preview: tool.preview(&args),
-            args: args.clone(),
-            risk,
-            sandbox,
-            network: permissions.network,
-        };
-        let (decision, source) = match self.policy.auto_approval(&request, tool.as_ref()) {
-            Some(source) => (Decision::Approve, source),
-            None => tokio::select! {
-                biased;
-                _ = ctx.cancel.cancelled() => (
-                    Decision::Deny { reason: "cancelled by the user".into() },
-                    DecisionSource::Cancelled,
-                ),
-                decision = self.approvals.decide(request.clone()) => (decision, DecisionSource::Gate),
-            },
-        };
-        self.log_decision(&request, &decision, &source, events)
+        let mut output = StepOutput::default();
+        let end = self
+            .stream_backend(request, session, events, &cancel, &mut output)
             .await;
-
-        match decision {
-            Decision::Approve => {}
-            Decision::AlwaysAllowPrefix => {
-                if let Err(err) = self.policy.remember(&request) {
-                    warn!(error = %err, "could not save the always-allow rule");
-                }
+        keep_partial_text(session, output.text);
+        match end {
+            StreamEnd::Done => Ok(finish(events, TurnOutcome::Completed).await),
+            StreamEnd::Cancelled => Ok(finish(events, TurnOutcome::Cancelled).await),
+            StreamEnd::Failed(err) => {
+                warn!(error = %err, "agent backend turn failed");
+                Err(err.into())
             }
-            Decision::Deny { reason } if source == DecisionSource::Cancelled => {
-                return ToolOutput::error(reason);
-            }
-            Decision::Deny { reason } => {
-                return ToolOutput::error(format!("denied: {reason}"));
-            }
-        }
-
-        let ctx = ctx.clone().with_permissions(permissions);
-        let timeout = tool.timeout(&args).unwrap_or(self.config.tool_timeout);
-        tokio::select! {
-            biased;
-            _ = ctx.cancel.cancelled() => ToolOutput::error("cancelled by the user"),
-            result = tokio::time::timeout(timeout, tool.call(args, &ctx)) => match result {
-                Ok(output) => output,
-                Err(_) => ToolOutput::error(format!("timed out after {}s", timeout.as_secs_f64())),
-            },
         }
     }
 
-    /// Records a decision in the trace log and as an [`AgentEvent::Approval`].
-    async fn log_decision(
+    async fn stream_backend(
         &self,
-        request: &ApprovalRequest,
-        decision: &Decision,
-        source: &DecisionSource,
+        request: ChatRequest,
+        session: &mut Session,
         events: &mpsc::Sender<AgentEvent>,
-    ) {
-        let verdict = match decision {
-            Decision::Approve => "approved",
-            Decision::AlwaysAllowPrefix => "approved (always allow)",
-            Decision::Deny { .. } => "denied",
+        cancel: &CancellationToken,
+        output: &mut StepOutput,
+    ) -> StreamEnd {
+        let stream = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return StreamEnd::Cancelled,
+            stream = self.provider.stream(request, cancel.clone()) => stream,
         };
-        let reason = match decision {
-            Decision::Deny { reason } => reason.as_str(),
-            _ => "",
+        let mut stream = match stream {
+            Ok(stream) => stream,
+            Err(ProviderError::Cancelled) => return StreamEnd::Cancelled,
+            Err(err) => return StreamEnd::Failed(err),
         };
-        if request.risk == Risk::Read && matches!(source, DecisionSource::Mode(_)) {
-            debug!(tool = %request.tool, call_id = %request.call_id, "read auto-approved");
-        } else {
-            info!(
-                target: "rozu::approval",
-                tool = %request.tool,
-                call_id = %request.call_id,
-                risk = %request.risk,
-                sandbox = %request.sandbox,
-                network = request.network,
-                decided_by = %source,
-                reason,
-                "{verdict}"
-            );
+        loop {
+            let event = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => return StreamEnd::Cancelled,
+                event = stream.next() => event,
+            };
+            let event = match event {
+                None if cancel.is_cancelled() => return StreamEnd::Cancelled,
+                None => return StreamEnd::Failed(ProviderError::UnexpectedEof),
+                Some(Err(ProviderError::Cancelled)) => return StreamEnd::Cancelled,
+                Some(Err(err)) => return StreamEnd::Failed(err),
+                Some(Ok(event)) => event,
+            };
+            let forward = match event {
+                StreamEvent::TextDelta(delta) => {
+                    output.text.push_str(&delta);
+                    AgentEvent::TextDelta(delta)
+                }
+                StreamEvent::ToolCallStart { id, name } => {
+                    output.calls.push(PendingCall {
+                        id,
+                        name,
+                        args_json: String::new(),
+                    });
+                    continue;
+                }
+                StreamEvent::ToolCallArgsDelta { id, json } => {
+                    if let Some(call) = output.calls.iter_mut().rev().find(|c| c.id == id) {
+                        call.args_json.push_str(&json);
+                    }
+                    continue;
+                }
+                StreamEvent::ToolCallEnd { id } => {
+                    let Some(call) = output.calls.iter().rev().find(|c| c.id == id) else {
+                        warn!(%id, "end of an unknown tool call");
+                        continue;
+                    };
+                    AgentEvent::ToolCallStarted {
+                        id: call.id.clone(),
+                        name: call.name.clone(),
+                        args_json: call.args_json.clone(),
+                    }
+                }
+                StreamEvent::ToolResult {
+                    id,
+                    output: text,
+                    is_error,
+                } => {
+                    let name = output
+                        .calls
+                        .iter()
+                        .rev()
+                        .find(|c| c.id == id)
+                        .map(|c| c.name.clone())
+                        .unwrap_or_default();
+                    AgentEvent::ToolCallFinished {
+                        id,
+                        name,
+                        output: truncate_head_tail(&text, self.config.max_tool_output_bytes)
+                            .into_owned(),
+                        is_error,
+                    }
+                }
+                StreamEvent::Approval(record) => AgentEvent::Approval(record),
+                StreamEvent::Usage(usage) => {
+                    session.record_usage(usage, self.config.priced_model());
+                    AgentEvent::Usage(usage)
+                }
+                StreamEvent::Done(reason) => {
+                    debug!(?reason, "agent backend turn done");
+                    return StreamEnd::Done;
+                }
+            };
+            let _ = events.send(forward).await;
         }
-        let _ = events
-            .send(AgentEvent::Approval(ApprovalRecord {
-                call_id: request.call_id.clone(),
-                tool: request.tool.clone(),
-                risk: request.risk,
-                preview: request.preview.clone(),
-                sandbox: request.sandbox,
-                network: request.network,
-                decision: decision.clone(),
-                source: source.clone(),
-            }))
-            .await;
     }
 }
 

@@ -8,6 +8,8 @@ use std::ops::AddAssign;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::approval::ApprovalRecord;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Role {
@@ -173,8 +175,29 @@ pub enum StreamEvent {
         id: String,
     },
     Usage(Usage),
+    /// The result of a tool call the provider ran itself. Only agent-backend providers (see
+    /// [`crate::ProviderKind::AgentBackend`]) send this; model providers leave tools to rozu.
+    ToolResult {
+        id: String,
+        output: String,
+        is_error: bool,
+    },
+    /// An approval decision rozu made for a tool an agent backend asked to run.
+    Approval(ApprovalRecord),
     /// Always the last event of a successful stream.
     Done(StopReason),
+}
+
+/// How a model's usage is paid for.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Billing {
+    /// Per token at the listed prices (API key).
+    #[default]
+    Metered,
+    /// Covered by the user's subscription (a CLI-backed provider): tokens are counted, but there
+    /// is no per-request cost, so cost is reported as `None`.
+    Subscription,
 }
 
 /// What the UI needs to know about a model: limits, capabilities and list prices.
@@ -197,6 +220,8 @@ pub struct ModelInfo {
     /// Higher prices for requests with a long prompt, if the model has them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub long_context: Option<LongContextPrices>,
+    #[serde(default)]
+    pub billing: Billing,
 }
 
 /// A long-context price tier: a request whose prompt (all input tokens, including cache reads and
@@ -216,6 +241,31 @@ impl ModelInfo {
     pub fn with_long_context(mut self, prices: LongContextPrices) -> Self {
         self.long_context = Some(prices);
         self
+    }
+
+    /// A model covered by a subscription: no prices, and cost is always `None`.
+    pub fn subscription(
+        provider: impl Into<String>,
+        id: impl Into<String>,
+        context_window: u32,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            provider: provider.into(),
+            context_window,
+            supports_tools: true,
+            price_in_per_mtok: 0.0,
+            price_out_per_mtok: 0.0,
+            price_cached_in_per_mtok: 0.0,
+            price_cache_write_per_mtok: 0.0,
+            long_context: None,
+            billing: Billing::Subscription,
+        }
+    }
+
+    /// Whether this model's usage has a USD cost, i.e. [`ModelInfo::cost_usd`] means something.
+    pub fn is_metered(&self) -> bool {
+        self.billing == Billing::Metered
     }
 
     /// Estimated USD cost of **one response's** `usage` at list prices: cache reads at the
@@ -310,6 +360,7 @@ mod tests {
             price_cached_in_per_mtok: 0.1,
             price_cache_write_per_mtok: 1.25,
             long_context: None,
+            billing: Billing::Metered,
         };
         assert!((model.cost_usd(&total) - 3.0).abs() < 1e-9);
 
@@ -337,6 +388,7 @@ mod tests {
             price_cached_in_per_mtok: 0.1,
             price_cache_write_per_mtok: 1.25,
             long_context: None,
+            billing: Billing::Metered,
         }
         .with_long_context(LongContextPrices {
             threshold_tokens: 200_000,
@@ -386,5 +438,19 @@ mod tests {
         let tiered = tiered_model();
         let json = serde_json::to_string(&tiered).unwrap();
         assert_eq!(serde_json::from_str::<ModelInfo>(&json).unwrap(), tiered);
+    }
+
+    #[test]
+    fn billing_defaults_to_metered() {
+        let mut json = serde_json::to_value(tiered_model()).unwrap();
+        json.as_object_mut().unwrap().remove("billing");
+        let model: ModelInfo = serde_json::from_value(json).unwrap();
+        assert!(model.is_metered());
+        let sub = ModelInfo::subscription("claude-cli", "sonnet", 200_000);
+        assert!(!sub.is_metered());
+        assert_eq!(
+            serde_json::to_value(&sub).unwrap()["billing"],
+            "subscription"
+        );
     }
 }

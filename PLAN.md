@@ -59,8 +59,8 @@ rozu/
 ├─ Cargo.toml              # workspace
 ├─ crates/
 │  ├─ rozu-core/           # agent loop, session model, events, policy (no UI, no HTTP)
-│  ├─ rozu-providers/      # Provider trait + openai / anthropic / xai HTTP adapters, SSE, retries,
-│  │                       #   CLI-backed providers (claude stream-json, codex app-server) [M3.5]
+│  ├─ rozu-providers/      # openai / anthropic / xai HTTP adapters, SSE, retries, provider/model registry
+│  ├─ rozu-cli-providers/  # CLI-backed providers: CliProcess, claude stream-json [M3.5], codex app-server
 │  ├─ rozu-mcp/            # stdio MCP server exposing rozu's tools + permission-prompt tool [M3.5]
 │  ├─ rozu-tools/          # Tool trait, registry, fs tools, shell, approvals, sandbox
 │  ├─ rozu-pty/            # PTY sessions (portable-pty) + vt parser (alacritty_terminal)
@@ -282,24 +282,69 @@ Notes:
 
 ### M3.5: CLI-backed providers (≈2–3 weeks) — Claude CLI first, then Codex app-server
 See [Providers](#providers-http-adapters-and-cli-backed-providers).
-- [ ] `CliProvider` plumbing: spawn the official binary (path lookup + `--version` check), process-group kill on
-      cancel/drop, stderr to the log file, typed errors (not installed, not logged in, rate/usage limit, protocol)
-- [ ] Claude: stream-json transport and event mapping (deltas, tool_use/tool_result, result usage); fixture tests
+- [x] `CliProcess` plumbing: spawn the official binary (path lookup; `--version` shown by `rozu auth status`),
+      process-group kill on cancel/drop, stderr to the log file, typed errors (not installed, not logged in,
+      rate/usage limit, protocol)
+- [x] Claude: stream-json transport and event mapping (deltas, tool_use/tool_result, result usage); fixture tests
       with a fake `claude` binary; `rozu chat --provider claude-cli`
-- [ ] rozu stdio MCP server (`rozu mcp serve`): rozu's tools + the `approve` permission-prompt tool, all through
+- [x] rozu stdio MCP server (`rozu mcp-serve`): rozu's tools + the `approve` permission-prompt tool, all through
       `ApprovalPolicy`; Claude launched with `--mcp-config --strict-mcp-config --permission-prompt-tool` and its
       built-in mutating tools disallowed
 - [ ] Codex: `codex app-server` JSON-RPC client (initialize, thread/turn, item events, token usage), approval
       requests answered by `ApprovalPolicy` (default-deny for unmapped requests); sandbox/approval config overrides
 - [ ] Sign in with ChatGPT via `codex app-server` (account status, prompt the user to run `codex login`); no
       custom OAuth, no reading of Codex's credential files
-- [ ] Usage: map Claude `result.usage` and Codex token-count events into `Usage`; `cost_usd` is `None` for
-      subscription providers (CLI's `total_cost_usd` kept raw only)
+- [x] Usage (Claude): `result.usage` → `Usage`; `cost_usd` is `None` for subscription models (`Billing::Subscription`);
+      the CLI's `total_cost_usd` is only logged (target `rozu::usage`) with the raw usage
+- [ ] Usage (Codex): token-count events → `Usage` (verify the fields first)
 - [ ] Investigation: Seatbelt-wrap the whole CLI subprocess (workspace + CLI state dir writes, vendor-host network)
+- [ ] Live smoke test on the Mac (Fred): `rozu auth status`, then `rozu chat --provider claude-cli "list the files and
+      summarize README"`; a write and a `git push --force` requested by Claude show rozu's approval prompt
 
 **Done when:** on the Mac, `rozu chat` works end-to-end with Claude (Max) and Codex (ChatGPT) without any API key;
 a write and a destructive command requested by each CLI go through rozu's approval prompt (and an unmappable
 request is denied); fixture tests cover both protocols in CI; no test or code path touches a credential file.
+
+Notes (part 1, Claude, 2026-10-13):
+- **Crates:** `rozu-cli-providers` (`CliProcess`: own process group, `kill_on_drop`, `killpg` on cancel/drop,
+  JSON-lines stdout capped at 16 MiB per line, stderr only to the log file under `rozu::cli`; `ClaudeCliProvider`)
+  and `rozu-mcp` (MCP server, approval bridge, Claude permission mapping). The HTTP adapters are untouched; the
+  registry lists `claude-cli` (models `sonnet` (default), `opus`, `haiku`, plus any id the CLI accepts, all
+  `Billing::Subscription`).
+- **Agent integration:** `Provider::kind()` → `ProviderKind::AgentBackend`. `Agent::run_turn` then makes one
+  stream per user turn and forwards tool calls, `StreamEvent::ToolResult` and `StreamEvent::Approval` as the same
+  `AgentEvent`s the HTTP path emits; it executes nothing. Only the assistant text goes into the session (Claude
+  keeps its own tool history). Tool execution was factored out of the agent into `rozu_core::ToolExecutor`, which
+  both the agent and `rozu mcp-serve` use, so policy, sandbox and decision logging are identical.
+- **Process:** one long-lived `claude -p` per chat (stream-json in and out, user turns as `{"type":"user",…}` lines).
+  Cancel, a dropped stream or a model switch kill the process group; the next turn restarts it with
+  `--resume <session_id>`. A fresh session after talking to another model gets the earlier text turns as a
+  transcript. `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN` are removed from its environment so the subscription
+  login is used. Command line:
+  `claude -p --input-format stream-json --output-format stream-json --include-partial-messages --verbose
+  --model <m> --permission-mode default --permission-prompt-tool mcp__rozu__approve --mcp-config <tmp>/mcp.json
+  --strict-mcp-config --disallowedTools Bash,BashOutput,KillShell,Edit,MultiEdit,Write,NotebookEdit,WebFetch,WebSearch,Task
+  --append-system-prompt <rozu system prompt + tool note> [--resume <id>]`, cwd = workspace.
+- **Approvals:** the MCP config starts `rozu mcp-serve --workspace <ws> --approval <mode>` with
+  `ROZU_APPROVAL_SOCKET` = a Unix socket in a 0700 dir under `/tmp`. mcp-serve decides with the project's
+  `ApprovalPolicy`; prompts go over the socket to the parent's gate (the normal approval card), decision records
+  come back for display, and every decision is logged (`rozu::approval`) in both processes' log. Socket
+  missing/unreachable → deny. `approve` mapping: `mcp__rozu__*` → allow (gated when the tool runs); Read/Glob/
+  Grep/LS → read (outside the workspace always asks); Bash → rozu's shell classifier, unsandboxed (destructive
+  always asks); Write/Edit/… → write in/outside workspace, `.rozu/` denied; WebFetch/WebSearch → network;
+  anything else → denied without asking (`DecisionSource::Policy`).
+- **Usage:** `input_tokens = input + cache_creation + cache_read` (rozu's convention: all prompt tokens), with
+  reads/writes also carried separately; the raw `usage` and the notional `total_cost_usd` are logged under
+  `rozu::usage` (M4 stores them as `usage_raw`).
+- **Errors:** `CliNotFound` (binary missing; `ROZU_CLAUDE_BIN` overrides the lookup on `PATH` then
+  `~/.local/bin/claude`), `NotLoggedIn` ("run `claude` and use /login"; detected in `result` text or the CLI's
+  stderr when it exits early), `UsageLimit`, `Api { code: <result subtype> }`, `Decode` for protocol trouble.
+- `claude-cli` is the default provider when no API key is configured (env or keychain) and neither `--provider`
+  nor `--model` is given. `rozu auth status` reports the binary, `claude --version` and `claude auth status`
+  (only `loggedIn`/`authMethod` are read).
+- **Unverified against the real CLI** (fixtures are hand-recorded from the documented format): the exact
+  stream-json input envelope (`session_id: ""`, `parent_tool_use_id: null`), the not-logged-in and usage-limit
+  texts, and that MCP servers stay in Claude's process group. The live smoke test above checks these.
 
 ### M4: Sessions, memory, evals (≈2–3 weeks)
 - [ ] JSONL sessions + SQLite index, resume; ROZU.md memory; compaction
