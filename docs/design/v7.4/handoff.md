@@ -1,9 +1,9 @@
-# rozu: Handoff spec (CURRENT: v7.4, live activity, five orbs)
-**Status:** current spec as of 2026-10-13. **v7.4** cuts the ten per-state orbs of v7.3 down to five. Every busy state (Thinking, Notes, Reading, Searching, Editing, Running) shares one Working orb and the label says what the agent is doing; Waiting, Done, Error and Offline each get their own orb. The pill itself (orb, label, timer, `3/5` step text, no progress bar) is unchanged from v7.2.
+# rozu: Handoff spec (CURRENT: v7.4, live activity, one dotted ring with ten symbols)
+**Status:** current spec as of 2026-10-13. **v7.4** replaces the v7.3 flow clouds with one frame for all ten states: a fully dotted ring that never moves, with a symbol inside it (a turning sphere, lines being written, a reading band, a magnifier, a typing caret, play, pause, check, cross, a broken ring with a retry arrow). Every state is distinct at 22px and a change only reshapes the symbol. The pill itself (orb, label, timer, `3/5` step text, no progress bar) is unchanged from v7.2.
 - Everything v7.4 doesn't redefine comes from v5 (Appendix B: chrome ramp, type, spacing, focus) and then v1 (Appendix A: layout, keyboard map, approvals, accessibility).
 - **Superseded:** the v7.2/v7.3 per-state orbs (removed from the repo; see git history), and v6.x (Appendix C), meaning the bead family, the bead tokens and the v5 progress line under the pill.
-- **Screens:** `screens/v7.4-sheet-{dark,light}.png` (all five orbs, 120px and in the 22px pill), `screens/v7.4-22px.png` (the 22px orbs over one loop at 2× device px, 5× nearest-neighbour) and `screens/v7.4-morphs.png` (Working into each of the other four).
-- **Source:** `reference/v7.4-orb.js` is the reference implementation. It's pure and deterministic: `sample(timeline, T)` → points, then `drawOrb`. `reference/v7.4-sheet.html` animates all five (`?still` for the reduced-motion frames, `?T=` for a fixed time, `?theme=light`).
+- **Screens:** `screens/v7.4-sheet-{dark,light}.png` (all ten states, 96px and in the 22px pill), `screens/v7.4-22px-{dark,light}.png` (each state over one loop at 96px and at 22px, 3× nearest-neighbour) and `screens/v7.4-morphs.png` (Running into Waiting, Done, Error and Offline).
+- **Source:** `reference/v7.4-orb.js` is the reference implementation. It's pure and deterministic: `sample(timeline, T)` → points, then `drawOrb`. `reference/v7.4-sheet.html` animates all ten (`?still` for the reduced-motion frames, `?T=` for a fixed time, `?theme=light`).
 - **Spec:** `motion-spec-v7.4.md`.
 - **Contrast:** `contrast-v7.3.md` (the colours are unchanged in v7.4), 0 failures.
 - **Tokens:** CSS load order `tokens.css` → `tokens-v4.css` → `tokens-v5.css` → `tokens-v6.css` → **`tokens-v7.css`**. JSON: `tokens.json` + `tokens-v5.json` + `tokens-v6.json` + **`tokens-v7.json`**.
@@ -19,7 +19,7 @@
 | v7.1 | Oct 13 | One language: every state is a spherical radial-flow cloud. Converge becomes Thinking, and states vary only by flow | Folded into v7.2 |
 | v7.2 | Oct 13 | A bold signature cue per state (readable at 22px), stronger depth plus a top-left light, a distinct tempo per state, and a 150ms brighten pulse on change | Superseded by v7.4 |
 | v7.3 | Oct 13 | Six states redesigned to match the liked four (lens, ink stroke, pause bars, halo, break, broken ring). Fixes the JS bug that ignored per-state dot size | Superseded by v7.4 |
-| **v7.4** | Oct 13 | Five orbs instead of ten: Working (orbit) for every busy state, Waiting (ping), Done (check), Error (cross), Offline (dashed ring). Ten looked alike at 22px, and a fast agent loop morphed on every tool call | **Current** |
+| **v7.4** | Oct 13 | One fully dotted ring for every state, with a symbol per state inside it. The v7.3 clouds looked alike at 22px; Fred wanted a full dotted circle, every state distinct, and Done/Error kept | **Current** |
 
 ## 1. Tokens (tokens-v7, layered after v6; no new hues)
 | Token | Value | Use |
@@ -36,52 +36,57 @@
 | orb.litBoost | r×1.55, α+.5 | Cue dots |
 | motion.orbMorph / orbStagger / orbLift | 600ms crit. spring ω7 / 2.5ms per pt / .55 | Morph |
 | motion.orbPulse | 150ms, lit + .8·sin(πt/.15) | On every change |
-| motion.orbTempo.* | working 1.4s, waiting 1.8s, offline 2.4s; done draw 450ms, error shake 900ms; settle 1.3s | Per orb |
+| orb.ring | 44 dots, r .86, z .3, α .55, size .85 | The ring every state shares (dots 0..44) |
+| motion.orbTempo.* | thinking 1.6s, notes 2.6s, reading 2.2s, searching 2.4s, editing 2.4s, running 900ms, waiting 1.8s, offline 2.4s; done draw 450ms, error shake 900ms; settle 1.3s | Per state |
 | size.orb / orbLg / activityPill | 22px / 88px / 32px (34px in the dock) | Sizes |
 **Deprecated (v6):** `bead.*`, `size.beadDiameter22`, `motion.morph` 480ms, `trail`, `arcBow`, and the v5 line tokens (`size.seg*`, sweep, notch) as pill companions.
 
 ## 2. Activity pill + orb
 - **Placement:** in the chat dock, above the composer. Pill contents: [orb 22px] [label] [mono timer] [`· 3/5` step] [hint: Esc stop · Y / N · R retry]. There's no bar or line.
 - **Pill:** 32px (34px in the dock), fully rounded, `orbPillBg` with a 1px `orbPillBorder`. The label is 500 weight in `orbLabel`, or the status colour for Waiting, Done and Error. The timer and hint use `orbMeta`.
-- **Orb:** a spherical 3D cloud with 120 points (60 at 22px, via the subsample `((i>>1)+i)%2==0`). Working and Waiting are a sphere of dots (Fibonacci-sphere directions dᵢ); Done, Error and Offline gather the same dots into a flat glyph facing the camera.
+- **Orb:** a spherical 3D cloud with 120 points (60 at 22px, via the subsample `((i>>1)+i)%2==0`). Dots 0..44 are the ring, on the plane z = .3 facing the camera; dots 44..120 draw the state's symbol on that plane (Thinking's is a small Fibonacci sphere).
   - **Projection:** perspective k = 3.2/(3.2−z), depth-sorted every frame.
   - **Depth:** α .12→1, size .4→1.
   - **Light:** a top-left light term, then the lit boost, then the per-state α multiplier.
   - **Colour:** neutral dots, with hue only for Waiting, Done and Error. Offline is α×.85.
-  - **Five orbs:** each state shows one orb (§3). The orb only morphs when the orb changes, so Reading → Running keeps the Working orb turning and only the label changes.
 - **Accessibility:**
   - The pill is `role=status`, `aria-live=polite`, announced once per state.
   - The orb is `aria-hidden`; the label carries the state.
 
-## 3. Orbs (math in motion-spec-v7.4.md)
-| Orb | States | Signature (22px + still frame) | Motion / tempo | Reduced-motion frame (T) |
+## 3. States (math in motion-spec-v7.4.md)
+| State | Label | Symbol inside the ring | Motion / tempo | Reduced-motion frame (T) |
 |---|---|---|---|---|
-| Working | Thinking…, Jotting down notes…, Reading `<file>`, Searching "`<q>`", Editing `<file>`, Running `<cmd>` | Orbit: a lit comet (and a fainter twin opposite it) circling a turning sphere | Comet laps every 1.4s; the sphere yaws slowly and ripples ±5% | .45s |
-| Waiting (amber) | Waiting for approval · Y / N | Ping: a lit ring spreading from the sphere's face | The sphere stops turning and breathes ±4%; one ping every 1.8s | .5s |
-| Done (green) | Done · 42s · 2 files | Check mark inside a faint ring | The check draws itself (450ms from 250ms), pops once, then holds | 1.5s |
-| Error (red) | Command failed · R retry | Cross inside a faint ring | One damped shake (from 300ms, 900ms), then holds | 1.5s |
-| Offline (dim) | Offline · retrying in 3s | Dashed ring (six dashes), nothing inside | Turns once every 2.4s | 0s |
+| Thinking | Thinking… | A small dot sphere | The sphere turns; a lit arc sweeps the ring every 1.6s | .55s |
+| Notes | Jotting down notes… | Three lines | They write themselves over 1.9s, hold, repeat every 2.6s | 1.2s |
+| Reading | Reading `<file>` | Four lines of text | A lit band moves down the page every 2.2s | .6s |
+| Searching | Searching "`<q>`" | A magnifying glass | It circles slowly every 2.4s | .3s |
+| Editing | Editing `<file>` | A caret and a line | The line types out over 1.6s, then the caret blinks at 200ms | 1.1s |
+| Running | Running `<cmd>` | A play triangle | Two lit arcs chase round the ring every .9s | .3s |
+| Waiting (amber) | Waiting for approval · Y / N | Pause bars | The ring breathes every 1.8s | .45s |
+| Done (green) | Done · 42s · 2 files | A check mark | Draws itself (450ms from 250ms), pops once, then holds | 1.5s |
+| Error (red) | Command failed · R retry | A cross | One damped shake (from 300ms, 900ms), then holds | 1.5s |
+| Offline (dim) | Offline · retrying in 3s | A retry arrow; the ring has a gap at 12 o'clock | The arrow turns every 2.4s | .3s |
 
 ## 4. Motion
-- **Morph:** the same point set is used throughout, so a change interpolates point i to point i. Changes between states that share an orb don't morph.
+- **Morph:** the same point set is used throughout, so a change interpolates point i to point i. The ring dots are in the same place in every state, so only the symbol moves.
   - Critically damped spring, 600ms (ω=7), with a 2.5ms per-point stagger.
   - Mid-morph z lift of +.55·sin(πq) toward the camera.
   - Lit, size and α multiplier are interpolated. Tone and dim flip at q = .5.
-  - The previous orb keeps generating during the morph, so nothing restarts, and an interrupt starts from the live sample.
-- **Brighten pulse:** on every orb change, lit += .8·sin(π·t/.15) over the first 150ms.
-- **Tempo:** per orb, as in §3. Done and Error play once, then settle.
+  - The previous state keeps generating during the morph, so nothing restarts, and an interrupt starts from the live sample.
+- **Brighten pulse:** on every state change, lit += .8·sin(π·t/.15) over the first 150ms.
+- **Tempo:** per state, as in §3. Done and Error play once, then settle.
 - **Crispness:** at 22px, dots ≤1.6 device px are drawn as pixel-snapped squares; larger dots are AA discs. Text is regular AA text, never drawn into the orb.
 
 ## 5. Reduced motion
 - Triggered by the OS setting or `prefers-reduced-motion`.
-- Each orb shows one static frame (T in §3), and each still frame shows its signature.
-- Orb changes use a 150ms cross-fade instead of the morph. The brighten pulse becomes a single 150ms α bump with no movement.
-- The comet, the ping, the check's draw, the cross's shake and the dashes' turn are all off. The label carries the state.
+- Each state shows one static frame (T in §3), and each still frame shows its symbol.
+- State changes use a 150ms cross-fade instead of the morph. The brighten pulse becomes a single 150ms α bump with no movement.
+- The sweeps, the writing, the blink, the check's draw, the cross's shake and the arrow's turn are all off. The label carries the state.
 
 ## 6. GPUI notes
 - **One instanced draw:** a single quad pipeline with **at most 120 instances** per orb. Instance data: `{pos: vec2, radius, alpha, tone_idx}`.
 - **CPU per frame:**
-  - `gen(orb, i, t)` for each point, ported 1:1 from `v7.4-orb.js`: trig only, under 0.05ms.
+  - `gen(state, i, t)` for each point, ported 1:1 from `v7.4-orb.js`: trig only, under 0.05ms.
   - Morph blend and pulse, projection and light.
   - An insertion sort by z (nearly sorted from frame to frame).
 - **Fragment:** a disc SDF with a ~1 device-px smoothstep; at 22px, tiny dots take the pixel-snapped square branch. Snapping uses `window.scale_factor()`.
@@ -89,17 +94,17 @@
   - 60fps while visible and focused; 30fps on battery or thermal pressure.
   - **Pause (0fps) when the window is unfocused or occluded**, and once Done or Error has settled (1.3s). Resume from the current T with no jump.
   - Reduced motion: render only on state change.
-- **Testing:** sampling is deterministic. `generate()` is checked against the JS with whole-orb checksums at fixed T (`matches_the_reference`); a golden-image test of the 22px orbs against `screens/v7.4-22px.png` is still to do.
+- **Testing:** sampling is deterministic. `generate()` is checked against the JS with whole-orb checksums at fixed T (`matches_the_reference`); a golden-image test of the 22px orbs against `screens/v7.4-22px-dark.png` is still to do.
 - **Tauri:** the same JS on `<canvas>` at devicePixelRatio, paused on `visibilitychange` / blur.
 - **Theme:** generate from `tokens.json` + v5 + v6 + `tokens-v7.json`.
 
 ## 7. Acceptance criteria (v7.4)
 1. While the agent runs, the pill shows the orb, the action in words, the timer and the step text. There's no bar, line or hero card.
-2. All five orbs are distinct at a glance at 22px (see `screens/v7.4-22px.png`), at 1× and 2×, in both themes, by shape (spinner, ring, check, cross, dashes) and hue (status).
-3. Each orb has ≤120 points. Working and Waiting read as a lit 3D sphere (near/far size and brightness, top-left light).
-4. State changes morph point-to-point in 600ms with no restart, plus a 150ms brighten pulse. Moving between busy states doesn't morph. Each orb runs at its own tempo.
+2. All ten states are distinct at a glance at 22px (see `screens/v7.4-22px-{dark,light}.png`), at 1× and 2×, in both themes, by symbol and (for Waiting, Done, Error) hue. The dotted ring is complete in every state but Offline.
+3. Each orb has ≤120 points: 44 on the ring, 76 in the symbol.
+4. State changes morph point-to-point in 600ms with no restart, plus a 150ms brighten pulse. Each state runs at its own tempo.
 5. Every pair in `contrast-v7.3.md` passes. Labels ≥4.5:1. Front dots ≥3:1 at the worst light; the tightest are light amber 3.27, light green 3.36, light red 3.76, and dark red 3.96.
-6. Reduced motion: no animation apart from a 150ms cross-fade or α bump, and each still frame shows its signature.
+6. Reduced motion: no animation apart from a 150ms cross-fade or α bump, and each still frame shows its symbol.
 7. Frame policy holds: 60fps focused, 30fps on battery, 0fps when unfocused, occluded or settled. Under 0.2ms CPU and under 0.1ms GPU per frame.
 8. Components use only semantic tokens (tokens-v7 on top of v6/v5). No raw hex, and no deprecated bead or line tokens.
 
