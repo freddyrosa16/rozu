@@ -4,6 +4,7 @@ mod approve;
 mod auth;
 mod chat;
 mod interrupt;
+mod mcp_serve;
 mod models;
 mod term;
 
@@ -22,26 +23,31 @@ struct Cli {
 enum Command {
     /// Print versions of the rozu crates and where logs go.
     Doctor,
-    /// Manage provider API keys (stored in the OS keychain).
+    /// Manage provider API keys (stored in the OS keychain) and check the claude CLI login.
     Auth {
         #[command(subcommand)]
         command: auth::AuthCommand,
     },
     /// Chat with the agent. OPENAI_API_KEY / ANTHROPIC_API_KEY / XAI_API_KEY, if set, override
-    /// the keychain.
+    /// the keychain; `--provider claude-cli` uses your Claude subscription via the claude CLI.
     Chat(chat::ChatArgs),
     /// List known models with context window and prices.
     Models,
     /// Run your shell inside a rozu PTY session (a smoke test for the terminal layer).
     Term,
+    /// rozu's stdio MCP server, started by the claude CLI (internal).
+    #[command(hide = true)]
+    McpServe(mcp_serve::McpServeArgs),
 }
 
 /// Name and version of every crate linked into this binary.
-fn crate_versions() -> [(&'static str, &'static str); 7] {
+fn crate_versions() -> [(&'static str, &'static str); 9] {
     [
         ("rozu-cli", env!("CARGO_PKG_VERSION")),
         ("rozu-core", rozu_core::VERSION),
         ("rozu-providers", rozu_providers::VERSION),
+        ("rozu-cli-providers", rozu_cli_providers::VERSION),
+        ("rozu-mcp", rozu_mcp::VERSION),
         ("rozu-tools", rozu_tools::VERSION),
         ("rozu-pty", rozu_pty::VERSION),
         ("rozu-secrets", rozu_secrets::VERSION),
@@ -56,14 +62,14 @@ fn main() -> ExitCode {
     let result = match cli.command {
         Some(Command::Doctor) => {
             for (name, version) in crate_versions() {
-                println!("{name:<16}{version}");
+                println!("{name:<20}{version}");
             }
             match log {
                 rozu_core::LogTarget::File(path) => {
-                    println!("{:<16}{}", "log file", path.display())
+                    println!("{:<20}{}", "log file", path.display())
                 }
-                rozu_core::LogTarget::Stderr => println!("{:<16}stderr", "log file"),
-                rozu_core::LogTarget::Off => println!("{:<16}off", "log file"),
+                rozu_core::LogTarget::Stderr => println!("{:<20}stderr", "log file"),
+                rozu_core::LogTarget::Off => println!("{:<20}off", "log file"),
             }
             Ok(ExitCode::SUCCESS)
         }
@@ -71,9 +77,10 @@ fn main() -> ExitCode {
         Some(Command::Chat(args)) => chat::run(args),
         Some(Command::Models) => models::run(),
         Some(Command::Term) => term::run(),
+        Some(Command::McpServe(args)) => mcp_serve::run(args),
         None => {
             println!(
-                "rozu {}: try `rozu chat`, `rozu models`, `rozu auth set openai|anthropic|xai` or `rozu --help`.",
+                "rozu {}: try `rozu chat`, `rozu chat --provider claude-cli`, `rozu models`, `rozu auth status` or `rozu --help`.",
                 env!("CARGO_PKG_VERSION")
             );
             Ok(ExitCode::SUCCESS)

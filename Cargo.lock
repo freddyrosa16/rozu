@@ -1736,7 +1736,9 @@ dependencies = [
  "crossterm",
  "libc",
  "predicates",
+ "rozu-cli-providers",
  "rozu-core",
+ "rozu-mcp",
  "rozu-providers",
  "rozu-pty",
  "rozu-secrets",
@@ -1751,6 +1753,24 @@ dependencies = [
  "tokio-util",
  "tracing",
  "wiremock",
+]
+
+[[package]]
+name = "rozu-cli-providers"
+version = "0.1.0"
+dependencies = [
+ "async-stream",
+ "async-trait",
+ "futures",
+ "libc",
+ "rozu-core",
+ "rozu-mcp",
+ "rozu-tools",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "tracing",
 ]
 
 [[package]]
@@ -1770,6 +1790,22 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "rozu-mcp"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "rozu-core",
+ "rozu-tools",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "tracing",
 ]
 
 [[package]]

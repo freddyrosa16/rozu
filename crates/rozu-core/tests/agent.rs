@@ -9,10 +9,10 @@ use async_trait::async_trait;
 use futures::stream::{self, StreamExt};
 use rozu_core::{
     Agent, AgentConfig, AgentError, AgentEvent, ApprovalGate, ApprovalMode, ApprovalPolicy,
-    ApprovalRecord, ApprovalRequest, ApprovalRules, ChatRequest, ContentPart, Decision,
+    ApprovalRecord, ApprovalRequest, ApprovalRules, Billing, ChatRequest, ContentPart, Decision,
     DecisionSource, EventStream, LongContextPrices, Message, ModelInfo, PrefixRule, Provider,
-    ProviderError, ProviderResult, Role, SandboxMode, Session, StopReason, StreamEvent,
-    TurnOutcome, Usage, approvals_path,
+    ProviderError, ProviderKind, ProviderResult, Role, SandboxMode, Session, StopReason,
+    StreamEvent, TurnOutcome, Usage, approvals_path,
 };
 use rozu_tools::{NoSandbox, Risk, Shell, Tool, ToolCtx, ToolOutput, ToolRegistry, Workspace};
 use serde_json::{Value, json};
@@ -33,6 +33,8 @@ enum Script {
 struct ScriptedProvider {
     scripts: Mutex<VecDeque<Script>>,
     requests: Mutex<Vec<ChatRequest>>,
+    /// Report [`ProviderKind::AgentBackend`] (the provider runs the tools itself).
+    backend: AtomicBool,
 }
 
 impl ScriptedProvider {
@@ -40,6 +42,7 @@ impl ScriptedProvider {
         Arc::new(Self {
             scripts: Mutex::new(scripts.into_iter().collect()),
             requests: Mutex::default(),
+            backend: AtomicBool::new(false),
         })
     }
 
@@ -52,6 +55,14 @@ impl ScriptedProvider {
 impl Provider for ScriptedProvider {
     fn id(&self) -> &str {
         "scripted"
+    }
+
+    fn kind(&self) -> ProviderKind {
+        if self.backend.load(Ordering::SeqCst) {
+            ProviderKind::AgentBackend
+        } else {
+            ProviderKind::Model
+        }
     }
 
     async fn stream(
@@ -382,6 +393,7 @@ async fn usage_and_cost_aggregate_per_turn() {
                 price_cached_in_per_mtok: 0.5,
                 price_cache_write_per_mtok: 2.5,
                 long_context: None,
+                billing: Billing::Metered,
             });
         },
         |_| {},
@@ -447,6 +459,7 @@ async fn long_context_tier_applies_per_response_not_per_turn() {
                     price_cached_in_per_mtok: 1.0,
                     price_cache_write_per_mtok: 1.0,
                     long_context: None,
+                    billing: Billing::Metered,
                 }
                 .with_long_context(LongContextPrices {
                     threshold_tokens: 200_000,
@@ -923,4 +936,85 @@ async fn already_cancelled_turn_does_not_call_provider() {
 
     assert_eq!(outcome.unwrap(), TurnOutcome::Cancelled);
     assert!(provider.requests().is_empty());
+}
+
+#[tokio::test]
+async fn agent_backend_turn_forwards_tool_events_without_executing() {
+    let usage = Usage {
+        input_tokens: 1_000,
+        output_tokens: 20,
+        cache_read_tokens: 600,
+        cache_write_tokens: 300,
+    };
+    let record = ApprovalRecord {
+        call_id: "mcp-1".into(),
+        tool: "write".into(),
+        risk: Risk::WriteWorkspace,
+        preview: "x".into(),
+        sandbox: SandboxMode::InProcess,
+        network: false,
+        decision: Decision::Approve,
+        source: DecisionSource::Mode(ApprovalMode::AutoWorkspace),
+    };
+    let mut events = vec![text("Looking. ")];
+    events.extend(tool_call("tu_1", "write", r#"{"a":1}"#));
+    events.extend([
+        StreamEvent::Approval(record.clone()),
+        StreamEvent::ToolResult {
+            id: "tu_1".into(),
+            output: "wrote".into(),
+            is_error: false,
+        },
+        text("Done."),
+        StreamEvent::Usage(usage),
+        StreamEvent::Done(StopReason::EndTurn),
+    ]);
+    let wrote = Arc::new(AtomicBool::new(false));
+    let tool = Write(wrote.clone());
+    let mut h = Harness::with_config(
+        [ok(events)],
+        |config| {
+            config.model_info = Some(ModelInfo::subscription("cli", "test-model", 200_000));
+        },
+        |tools| tools.register(tool),
+    );
+    h.provider.backend.store(true, Ordering::SeqCst);
+
+    let (result, seen) = h.run("edit it").await;
+
+    assert_eq!(result.unwrap(), TurnOutcome::Completed);
+    assert!(
+        !wrote.load(Ordering::SeqCst),
+        "the backend runs tools, not rozu"
+    );
+    assert_eq!(
+        seen,
+        [
+            AgentEvent::TextDelta("Looking. ".into()),
+            AgentEvent::ToolCallStarted {
+                id: "tu_1".into(),
+                name: "write".into(),
+                args_json: r#"{"a":1}"#.into(),
+            },
+            AgentEvent::Approval(record),
+            AgentEvent::ToolCallFinished {
+                id: "tu_1".into(),
+                name: "write".into(),
+                output: "wrote".into(),
+                is_error: false,
+            },
+            AgentEvent::TextDelta("Done.".into()),
+            AgentEvent::Usage(usage),
+            AgentEvent::TurnFinished(TurnOutcome::Completed),
+        ]
+    );
+    // One request for the whole turn, no tools offered, and only the text kept in the session.
+    let requests = h.provider.requests();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].tools.is_empty());
+    assert_eq!(h.last(), &Message::assistant("Looking. Done."));
+    // Subscription: tokens are counted, cost is not.
+    assert_eq!(h.session.usage, usage);
+    assert_eq!(h.session.last_turn.cost_usd, None);
+    assert_eq!(h.session.cost_usd, 0.0);
 }

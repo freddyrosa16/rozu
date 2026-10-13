@@ -48,6 +48,27 @@ cargo build --release
 ./target/release/rozu term
 ```
 
+### Claude on your subscription (`claude-cli`)
+With a Claude Pro/Max subscription and no API key, rozu drives the official `claude` CLI (Claude Code). The CLI
+does its own login; rozu never reads or stores its credentials.
+
+```sh
+# One-time: install Claude Code and log in inside it (`claude`, then /login).
+./target/release/rozu auth status          # last line: claude-cli: /path/to/claude (2.x.y), logged in (claude.ai)
+
+./target/release/rozu chat --provider claude-cli "list the files and summarize README"
+./target/release/rozu chat --provider claude-cli --model opus   # sonnet (default), opus, haiku or any id claude accepts
+./target/release/rozu chat --model haiku "…"                    # the aliases imply claude-cli
+```
+
+Without `--provider`/`--model`, `claude-cli` is the default when no API key is configured. Claude runs its own
+agent loop, but its Bash/Edit/Write/web tools are disabled: it uses rozu's tools (`read_file`, `list_dir`, `grep`,
+`write_file`, `apply_patch`, `shell`) through rozu's MCP server, so the same approval modes, workspace checks and
+sandbox apply, and anything else it wants to do is decided by rozu (prompting you as needed, denied if rozu can't
+classify it). Token usage, including cache reads/writes, is shown after each turn without a cost (it's covered by the
+subscription). `ROZU_CLAUDE_BIN` points rozu at a specific `claude` binary; otherwise it looks on `PATH` and in
+`~/.local/bin`. `ANTHROPIC_API_KEY` is removed from the CLI's environment so it uses your subscription login.
+
 ### Approvals and sandbox
 Every tool call gets a risk class (read, write in workspace, write outside, network, destructive) and is either
 auto-approved or shown as an approval card with the exact command or diff, the sandbox and the network state:
@@ -82,6 +103,7 @@ Environment variables:
 - `OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL`, `XAI_BASE_URL`: API roots (defaults `https://api.openai.com/v1`,
   `https://api.anthropic.com`, `https://api.x.ai/v1`), for proxies and tests.
 - `ROZU_PROVIDER`, `ROZU_MODEL`: defaults for `--provider` / `--model`.
+- `ROZU_CLAUDE_BIN`: the `claude` binary for `claude-cli`.
 - `RUST_LOG`: log filter (default `info`, logs go to stderr). API keys are redacted from logs. Approval decisions
   are logged under the `rozu::approval` target (hidden by default since the CLI prints them; show them with
   `RUST_LOG=info,rozu::approval=info`).
@@ -89,8 +111,10 @@ Environment variables:
 
 ## Auth
 - API keys for OpenAI, Anthropic and xAI, stored in the OS keychain (never in files or logs).
-- OpenAI's official **Sign in with ChatGPT** is the only subscription login (planned, M4).
-  Claude and Grok subscription logins are not implemented and their tokens are not used.
+- Claude subscription: through the official `claude` CLI, which logs in and keeps its credentials itself
+  (`--provider claude-cli`, above). rozu never reads Claude Code's credential files or tokens.
+- ChatGPT subscription (Sign in with ChatGPT through the official Codex CLI) is planned (M3.5 part 2).
+  No Grok subscription login is implemented.
 
 ## License
 MIT, see [LICENSE](LICENSE).

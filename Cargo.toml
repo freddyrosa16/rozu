@@ -14,7 +14,9 @@ publish = false
 
 [workspace.dependencies]
 # Internal crates
+rozu-cli-providers = { path = "crates/rozu-cli-providers" }
 rozu-core = { path = "crates/rozu-core" }
+rozu-mcp = { path = "crates/rozu-mcp" }
 rozu-providers = { path = "crates/rozu-providers" }
 rozu-tools = { path = "crates/rozu-tools" }
 rozu-pty = { path = "crates/rozu-pty" }
