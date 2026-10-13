@@ -214,9 +214,14 @@ pub fn build(
     })
 }
 
-/// Builds [`ModelInfo`]s from `(id, context window, $/M in, $/M out, $/M cached in)` rows. All
-/// listed models support tool calling.
-pub(crate) fn model_table(provider: &str, rows: &[(&str, u32, f64, f64, f64)]) -> Vec<ModelInfo> {
+/// Builds [`ModelInfo`]s from `(id, context window, $/M in, $/M out, $/M cached in)` rows. The
+/// cache-write price is `cache_write_multiplier` times the input price. All listed models support
+/// tool calling.
+pub(crate) fn model_table(
+    provider: &str,
+    cache_write_multiplier: f64,
+    rows: &[(&str, u32, f64, f64, f64)],
+) -> Vec<ModelInfo> {
     rows.iter()
         .map(
             |&(id, context_window, price_in, price_out, price_cached)| ModelInfo {
@@ -227,6 +232,7 @@ pub(crate) fn model_table(provider: &str, rows: &[(&str, u32, f64, f64, f64)]) -
                 price_in_per_mtok: price_in,
                 price_out_per_mtok: price_out,
                 price_cached_in_per_mtok: price_cached,
+                price_cache_write_per_mtok: price_in * cache_write_multiplier,
             },
         )
         .collect()
@@ -256,7 +262,18 @@ mod tests {
                 assert_eq!(model.provider, provider.id);
                 assert!(model.context_window > 0 && model.supports_tools);
                 assert!(model.price_cached_in_per_mtok <= model.price_in_per_mtok);
+                assert!(model.price_cache_write_per_mtok >= model.price_in_per_mtok);
             }
+        }
+    }
+
+    #[test]
+    fn cache_write_prices() {
+        let sonnet = lookup("anthropic/claude-sonnet-4-5").unwrap();
+        assert!((sonnet.price_cache_write_per_mtok - 3.75).abs() < 1e-9);
+        for spec in ["openai/gpt-5.1", "xai/grok-4"] {
+            let model = lookup(spec).unwrap();
+            assert_eq!(model.price_cache_write_per_mtok, model.price_in_per_mtok);
         }
     }
 

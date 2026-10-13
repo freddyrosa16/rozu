@@ -124,17 +124,23 @@ pub struct ChatRequest {
 /// Token counts for one response (or, summed, for a session).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Usage {
+    /// Every prompt token the request was billed for, including the cache reads and cache writes
+    /// below. Uncached input is `input_tokens - cache_read_tokens - cache_write_tokens`.
     pub input_tokens: u64,
     pub output_tokens: u64,
     /// Part of `input_tokens` served from the provider's prompt cache.
-    pub cached_input_tokens: u64,
+    pub cache_read_tokens: u64,
+    /// Part of `input_tokens` written to the prompt cache (Anthropic bills these at a premium;
+    /// providers that cache implicitly report 0).
+    pub cache_write_tokens: u64,
 }
 
 impl AddAssign for Usage {
     fn add_assign(&mut self, other: Self) {
         self.input_tokens += other.input_tokens;
         self.output_tokens += other.output_tokens;
-        self.cached_input_tokens += other.cached_input_tokens;
+        self.cache_read_tokens += other.cache_read_tokens;
+        self.cache_write_tokens += other.cache_write_tokens;
     }
 }
 
@@ -185,17 +191,21 @@ pub struct ModelInfo {
     pub price_out_per_mtok: f64,
     /// USD per million input tokens served from the prompt cache.
     pub price_cached_in_per_mtok: f64,
+    /// USD per million input tokens written to the prompt cache. Equal to the input price for
+    /// providers without a write premium.
+    pub price_cache_write_per_mtok: f64,
 }
 
 impl ModelInfo {
-    /// Estimated USD cost of `usage` at list prices: cached input at the cache-read price, the
-    /// rest of the input at the normal price. Cache writes (Anthropic bills them at a premium)
-    /// are counted as normal input, so this can slightly underestimate.
+    /// Estimated USD cost of `usage` at list prices: cache reads at the cache-read price, cache
+    /// writes at the cache-write price, and the rest of the input at the normal price.
     pub fn cost_usd(&self, usage: &Usage) -> f64 {
-        let cached = usage.cached_input_tokens.min(usage.input_tokens);
-        let uncached = usage.input_tokens - cached;
+        let read = usage.cache_read_tokens.min(usage.input_tokens);
+        let write = usage.cache_write_tokens.min(usage.input_tokens - read);
+        let uncached = usage.input_tokens - read - write;
         (uncached as f64 * self.price_in_per_mtok
-            + cached as f64 * self.price_cached_in_per_mtok
+            + read as f64 * self.price_cached_in_per_mtok
+            + write as f64 * self.price_cache_write_per_mtok
             + usage.output_tokens as f64 * self.price_out_per_mtok)
             / 1_000_000.0
     }
@@ -244,12 +254,14 @@ mod tests {
         total += Usage {
             input_tokens: 1_000_000,
             output_tokens: 100_000,
-            cached_input_tokens: 0,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
         };
         total += Usage {
             input_tokens: 0,
             output_tokens: 100_000,
-            cached_input_tokens: 0,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
         };
         let model = ModelInfo {
             id: "m".into(),
@@ -259,11 +271,20 @@ mod tests {
             price_in_per_mtok: 1.0,
             price_out_per_mtok: 10.0,
             price_cached_in_per_mtok: 0.1,
+            price_cache_write_per_mtok: 1.25,
         };
         assert!((model.cost_usd(&total) - 3.0).abs() < 1e-9);
 
         // Half the input from the cache: 0.5 * 1.0 + 0.5 * 0.1 + 0.2 * 10.0.
-        total.cached_input_tokens = 500_000;
+        total.cache_read_tokens = 500_000;
         assert!((model.cost_usd(&total) - 2.55).abs() < 1e-9);
+
+        // Plus a fifth written to the cache: 0.3 * 1.0 + 0.5 * 0.1 + 0.2 * 1.25 + 0.2 * 10.0.
+        total.cache_write_tokens = 200_000;
+        assert!((model.cost_usd(&total) - 2.6).abs() < 1e-9);
+
+        // Over-reported cache counts never price more input than was billed.
+        total.cache_write_tokens = 900_000;
+        assert!((model.cost_usd(&total) - (0.5 * 0.1 + 0.5 * 1.25 + 2.0)).abs() < 1e-9);
     }
 }

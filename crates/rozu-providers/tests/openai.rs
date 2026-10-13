@@ -184,7 +184,8 @@ async fn streams_plain_text() {
             StreamEvent::Usage(Usage {
                 input_tokens: 12,
                 output_tokens: 4,
-                cached_input_tokens: 0
+                cache_read_tokens: 0,
+                cache_write_tokens: 0
             }),
             StreamEvent::Done(StopReason::EndTurn),
         ]
@@ -231,7 +232,8 @@ async fn tool_call_round_trip_through_agent() {
         "The answer is 42."
     );
     assert_eq!(h.session.usage.input_tokens, 200);
-    assert_eq!(h.session.usage.cached_input_tokens, 64);
+    assert_eq!(h.session.usage.cache_read_tokens, 64);
+    assert_eq!(h.session.usage.cache_write_tokens, 0);
 
     let requests = server.received_requests().await.unwrap();
     assert_eq!(requests.len(), 2);

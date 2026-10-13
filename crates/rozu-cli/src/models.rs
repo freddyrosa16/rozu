@@ -6,8 +6,8 @@ use rozu_providers::registry;
 
 pub fn run() -> anyhow::Result<ExitCode> {
     println!(
-        "{:<38}{:>9}{:>9}{:>9}{:>12}",
-        "MODEL", "CONTEXT", "IN $/M", "OUT $/M", "CACHED $/M"
+        "{:<38}{:>9}{:>9}{:>9}{:>12}{:>14}",
+        "MODEL", "CONTEXT", "IN $/M", "OUT $/M", "CACHED $/M", "CACHE WR $/M"
     );
     for model in registry::models() {
         let is_default = registry::provider_info(&model.provider)
@@ -19,11 +19,12 @@ pub fn run() -> anyhow::Result<ExitCode> {
             if is_default { " *" } else { "" }
         );
         println!(
-            "{name:<38}{:>9}{:>9}{:>9}{:>12}",
+            "{name:<38}{:>9}{:>9}{:>9}{:>12}{:>14}",
             tokens(model.context_window),
             price(model.price_in_per_mtok),
             price(model.price_out_per_mtok),
             price(model.price_cached_in_per_mtok),
+            price(model.price_cache_write_per_mtok),
         );
     }
     println!(
