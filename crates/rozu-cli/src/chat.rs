@@ -1,8 +1,10 @@
-//! `rozu chat`: run the agent against OpenAI, Anthropic or xAI with the read-only workspace tools.
+//! `rozu chat`: run the agent against OpenAI, Anthropic or xAI with the workspace tools (read,
+//! write/patch, shell) under an approval mode.
 //!
-//! Assistant text streams to stdout; tool calls, status and errors go to stderr (dimmed on a
-//! terminal), so `rozu chat "…" > answer.md` captures just the answer. In the interactive session,
-//! `/model <provider/model>` switches the model for the next turn while keeping the conversation.
+//! Assistant text streams to stdout; tool calls, approval prompts, status and errors go to stderr
+//! (dimmed on a terminal), so `rozu chat "…" > answer.md` captures just the answer. In the
+//! interactive session, `/model <provider/model>` switches the model for the next turn while
+//! keeping the conversation.
 
 use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
@@ -12,13 +14,16 @@ use std::sync::{Arc, Mutex};
 use anyhow::{Context, anyhow};
 use clap::Args;
 use rozu_core::{
-    Agent, AgentConfig, AgentError, AgentEvent, DEFAULT_MAX_STEPS, Session, TurnOutcome, TurnUsage,
+    Agent, AgentConfig, AgentError, AgentEvent, ApprovalMode, ApprovalPolicy, ApprovalRecord,
+    DEFAULT_MAX_STEPS, Decision, DecisionSource, Session, TurnOutcome, TurnUsage, approvals_path,
 };
 use rozu_providers::{ModelChoice, registry};
 use rozu_secrets::{KeyringStore, env_var_for, resolve_api_key};
-use rozu_tools::{ToolRegistry, Workspace};
+use rozu_tools::{Risk, ToolRegistry, Workspace, platform_sandbox};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
+
+use crate::approve::{self, ApprovalArg, Ask, CliGate, Input};
 
 #[derive(Debug, Args)]
 pub struct ChatArgs {
@@ -28,9 +33,14 @@ pub struct ChatArgs {
     /// Model id or provider/model (see `rozu models`). Defaults to the provider's default model.
     #[arg(long, env = "ROZU_MODEL")]
     model: Option<String>,
-    /// Directory the agent's tools may read. Paths outside it are rejected.
+    /// Directory the agent works in. File tools reject paths outside it, and sandboxed shell
+    /// commands can only write here and to temp directories.
     #[arg(long, default_value = ".")]
     workspace: PathBuf,
+    /// What runs without asking: read-only (only reads), auto (reads + sandboxed workspace
+    /// writes), full (everything except destructive commands, unsandboxed).
+    #[arg(long, value_enum, default_value_t = ApprovalArg::Auto)]
+    approval: ApprovalArg,
     /// Maximum model requests per turn.
     #[arg(long, default_value_t = DEFAULT_MAX_STEPS)]
     max_steps: usize,
@@ -50,6 +60,8 @@ struct AgentFactory {
     tools: Arc<ToolRegistry>,
     workspace: Workspace,
     max_steps: usize,
+    policy: Arc<ApprovalPolicy>,
+    gate: Arc<CliGate>,
 }
 
 impl AgentFactory {
@@ -71,12 +83,11 @@ impl AgentFactory {
         let provider = registry::build(provider, key, base_url.as_deref(), None)?;
         let mut config = AgentConfig::new(&choice.model).with_model_info(choice.info.clone());
         config.max_steps = self.max_steps;
-        Ok(Agent::new(
-            provider,
-            self.tools.clone(),
-            self.workspace.clone(),
-            config,
-        ))
+        Ok(
+            Agent::new(provider, self.tools.clone(), self.workspace.clone(), config)
+                .with_approval_policy(self.policy.clone())
+                .with_approval_gate(self.gate.clone()),
+        )
     }
 }
 
@@ -100,34 +111,53 @@ async fn chat(args: ChatArgs) -> anyhow::Result<ExitCode> {
     let mut choice = registry::resolve(args.provider.as_deref(), args.model.as_deref())?;
     let workspace = Workspace::new(&args.workspace)
         .with_context(|| format!("cannot open workspace {}", args.workspace.display()))?;
+    let mode = ApprovalMode::from(args.approval);
+    let policy = ApprovalPolicy::for_project(mode, workspace.root()).with_context(|| {
+        format!(
+            "cannot read the approval rules in {}; fix or delete the file",
+            approvals_path(workspace.root()).display()
+        )
+    })?;
+    let (gate, mut asks) = CliGate::new();
     let factory = AgentFactory {
         store: KeyringStore::default(),
-        tools: Arc::new(ToolRegistry::read_only()),
+        tools: Arc::new(ToolRegistry::standard()),
         workspace: workspace.clone(),
         max_steps: args.max_steps,
+        policy: Arc::new(policy),
+        gate,
     };
     let mut agent = factory.build(&choice)?;
-    let mut session = Session::with_system_prompt(system_prompt(&workspace));
+    let mut session = Session::with_system_prompt(system_prompt(&workspace, mode));
     let printer = Printer::new();
     let interrupts = Interrupts::install();
+    let input = Input::spawn();
+    let io = TurnIo {
+        input: &input,
+        interactive: approve::stdin_is_interactive(),
+        interrupts: &interrupts,
+        printer: &printer,
+    };
     printer.unpriced_note(&choice);
 
     let prompt = args.prompt.join(" ");
     if !prompt.trim().is_empty() {
-        let outcome = turn(&agent, &mut session, prompt, &interrupts, &printer).await?;
+        let outcome = turn(&agent, &mut session, prompt, &mut asks, &io).await?;
         return Ok(match outcome {
             TurnOutcome::Cancelled => ExitCode::from(130),
             _ => ExitCode::SUCCESS,
         });
     }
 
-    let interactive = io::stdin().is_terminal();
+    let interactive = io.interactive;
     if interactive {
         printer.status(&format!(
-            "rozu {} · {} · {}\nCtrl-C cancels a turn (twice exits) · /model <provider/model> switches · Ctrl-D or /exit quits",
+            "rozu {} · {} · {}\napprovals: {} · sandbox: {}\nCtrl-C cancels a turn (twice exits) · /model <provider/model> switches · Ctrl-D or /exit quits",
             env!("CARGO_PKG_VERSION"),
             choice.spec(),
-            workspace.root().display()
+            workspace.root().display(),
+            mode,
+            sandbox_label(mode),
         ));
     }
     loop {
@@ -135,7 +165,7 @@ async fn chat(args: ChatArgs) -> anyhow::Result<ExitCode> {
             eprint!("\n> ");
             let _ = io::stderr().flush();
         }
-        let Some(line) = read_line().await? else {
+        let Some(line) = input.line().await else {
             break;
         };
         let input = line.trim();
@@ -167,56 +197,77 @@ async fn chat(args: ChatArgs) -> anyhow::Result<ExitCode> {
             }
             continue;
         }
-        if let Err(err) = turn(
-            &agent,
-            &mut session,
-            input.to_owned(),
-            &interrupts,
-            &printer,
-        )
-        .await
-        {
+        if let Err(err) = turn(&agent, &mut session, input.to_owned(), &mut asks, &io).await {
             eprintln!("error: {err}");
         }
     }
     Ok(ExitCode::SUCCESS)
 }
 
-fn system_prompt(workspace: &Workspace) -> String {
+/// How shell commands will be confined in `mode` on this machine.
+fn sandbox_label(mode: ApprovalMode) -> String {
+    let sandbox = platform_sandbox();
+    if mode == ApprovalMode::FullAccess {
+        "off (full access)".to_owned()
+    } else if sandbox.enforced() {
+        format!("{} (writes: workspace + tmp, no network)", sandbox.name())
+    } else {
+        "unavailable on this OS (workspace writes by shell ask first)".to_owned()
+    }
+}
+
+fn system_prompt(workspace: &Workspace, mode: ApprovalMode) -> String {
     format!(
         "You are rozu, a coding agent running in the user's terminal.\n\
-         The workspace root is {}. Use the read_file, list_dir and grep tools to look at files; \
-         paths are relative to the workspace root. You cannot modify files or run commands yet.\n\
-         Be concise, and cite file paths when you refer to code.",
+         The workspace root is {}; tool paths are relative to it.\n\
+         Tools: read_file, list_dir and grep to look at files; apply_patch to edit a file \
+         (exact search/replace edits or a unified diff) and write_file to create one; shell to \
+         run commands (non-interactive, with a timeout). Shell commands run in a sandbox that \
+         only allows writes in the workspace and temp directories and blocks the network; set \
+         network: true when a command needs it.\n\
+         Approval mode: {mode}. Calls that need approval are shown to the user, who may deny \
+         them with a reason; respect it and adapt. Destructive commands (rm -rf, force push, \
+         git reset --hard, ...) always need approval, so prefer safer alternatives.\n\
+         Read files before editing them, keep changes minimal, and run the relevant tests after \
+         changing code. Be concise, and cite file paths when you refer to code.",
         workspace.root().display()
     )
 }
 
-/// Reads one line from stdin without blocking the runtime. `None` at end of input.
-async fn read_line() -> anyhow::Result<Option<String>> {
-    tokio::task::spawn_blocking(|| {
-        let mut line = String::new();
-        let read = io::stdin().read_line(&mut line)?;
-        Ok::<_, io::Error>((read > 0).then_some(line))
-    })
-    .await?
-    .context("could not read from stdin")
+/// Everything a turn needs to talk to the user.
+struct TurnIo<'a> {
+    input: &'a Input,
+    /// Whether approval prompts can be answered (stdin is a terminal).
+    interactive: bool,
+    interrupts: &'a Interrupts,
+    printer: &'a Printer,
 }
 
-/// Runs one turn while printing its events.
+/// Runs one turn while printing its events and answering approval prompts, in order.
 async fn turn(
     agent: &Agent,
     session: &mut Session,
     input: String,
-    interrupts: &Interrupts,
-    printer: &Printer,
+    asks: &mut mpsc::Receiver<Ask>,
+    io: &TurnIo<'_>,
 ) -> Result<TurnOutcome, AgentError> {
-    let cancel = interrupts.begin_turn();
+    let cancel = io.interrupts.begin_turn();
     let (tx, mut rx) = mpsc::channel(256);
-    let mut state = printer.start_turn();
-    let render = async move {
-        while let Some(event) = rx.recv().await {
-            state.handle(event);
+    let mut state = io.printer.start_turn();
+    let render = async {
+        loop {
+            tokio::select! {
+                // Events first, so the tool call line prints before its approval card.
+                biased;
+                event = rx.recv() => match event {
+                    Some(event) => state.handle(event),
+                    None => break,
+                },
+                Some(ask) = asks.recv() => {
+                    state.end_line();
+                    approve::answer(ask, io.input, io.interactive, io.printer.dim).await;
+                }
+            }
         }
         state.finish();
     };
@@ -226,8 +277,8 @@ async fn turn(
         result
     };
     let (result, ()) = tokio::join!(run, render);
-    interrupts.end_turn();
-    printer.usage_line(&session.last_turn);
+    io.interrupts.end_turn();
+    io.printer.usage_line(&session.last_turn);
     result
 }
 
@@ -371,6 +422,11 @@ impl TurnPrinter<'_> {
                 };
                 self.status(&summary);
             }
+            AgentEvent::Approval(record) => {
+                if let Some(line) = approval_line(&record) {
+                    self.status(&line);
+                }
+            }
             // Totals come from the session once the turn ends (see `Printer::usage_line`).
             AgentEvent::Usage(_) => {}
             AgentEvent::TurnFinished(outcome) => match outcome {
@@ -397,6 +453,34 @@ impl TurnPrinter<'_> {
     fn status(&mut self, text: &str) {
         self.end_line();
         self.printer.status(text);
+    }
+}
+
+/// One status line per notable approval decision; reads approved by the mode are silent.
+fn approval_line(record: &ApprovalRecord) -> Option<String> {
+    let confinement = match record.sandbox {
+        rozu_core::SandboxMode::InProcess => String::new(),
+        sandbox => format!(
+            " · sandbox: {sandbox} · network: {}",
+            if record.network { "on" } else { "off" }
+        ),
+    };
+    match (&record.decision, &record.source) {
+        (_, DecisionSource::Cancelled) => None,
+        (Decision::Approve, DecisionSource::Mode(_)) if record.risk == Risk::Read => None,
+        (Decision::Approve, DecisionSource::Mode(mode)) => Some(format!(
+            "  ✓ auto-approved ({}, {mode} mode){confinement}",
+            record.risk
+        )),
+        (Decision::Approve, DecisionSource::Rule { prefix }) => Some(format!(
+            "  ✓ allowed by project rule `{prefix}`{confinement}"
+        )),
+        (Decision::Approve, _) => Some(format!("  ✓ approved{confinement}")),
+        (Decision::AlwaysAllowPrefix, _) => Some(format!(
+            "  ✓ approved; always allowing this prefix in {}",
+            rozu_tools::PROTECTED_DIR
+        )),
+        (Decision::Deny { reason }, _) => Some(format!("  ✗ denied: {}", clip(reason, 120))),
     }
 }
 

@@ -1,8 +1,10 @@
 //! `rozu`: headless CLI driver for the agent, used for the dev loop and evals before the GUI exists.
 
+mod approve;
 mod auth;
 mod chat;
 mod models;
+mod term;
 
 use std::process::ExitCode;
 
@@ -29,6 +31,8 @@ enum Command {
     Chat(chat::ChatArgs),
     /// List known models with context window and prices.
     Models,
+    /// Run your shell inside a rozu PTY session (a smoke test for the terminal layer).
+    Term,
 }
 
 /// Name and version of every crate linked into this binary.
@@ -58,6 +62,7 @@ fn main() -> ExitCode {
         Some(Command::Auth { command }) => auth::run(command),
         Some(Command::Chat(args)) => chat::run(args),
         Some(Command::Models) => models::run(),
+        Some(Command::Term) => term::run(),
         None => {
             println!(
                 "rozu {}: try `rozu chat`, `rozu models`, `rozu auth set openai|anthropic|xai` or `rozu --help`.",
