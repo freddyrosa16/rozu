@@ -7,11 +7,14 @@
 //!
 //! The classifier only decides when to ask; the sandbox is the boundary. Whatever can't be read
 //! off the command line is [`Risk::Opaque`] and asks in every mode (unless the user's own rule
-//! covers a named script): language interpreters (`python`, `perl`, `ruby`, `node`,
-//! `osascript`, …), `sh -c` / `bash -c` / `zsh -c`, scripts fed to a shell on stdin, `eval`,
-//! `source`, `exec`, those behind `xargs` or `find -exec`, and every output redirect to a file
-//! (`>`, `>>`, `tee`). A shell running a named script file counts like `make`: a sandboxed
-//! workspace write.
+//! covers a named script): inline code (`python -c`, `perl -e`, `node -e`, `sh -c` / `bash -c` /
+//! `zsh -c`, scripts fed to an interpreter on stdin or a heredoc, `eval`, `source`, `exec`,
+//! those behind `xargs` or `find -exec`), other interpreters (`osascript`, …) and every output
+//! redirect to a file (`>`, `>>`, `tee`).
+//!
+//! One rule covers script files: a shell, `python`, `perl`, `ruby` or `node` running a named
+//! script inside the workspace (`sh test.sh`, `python3 tools/gen.py`) counts like `make`, a
+//! sandboxed workspace write. The same script outside the workspace is opaque.
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -470,6 +473,27 @@ fn runs_named_script(name: &str, args: &[String]) -> bool {
     }
 }
 
+/// `<interpreter> <script file>` (`runs_named_script` holds). One rule for every interpreter
+/// that runs a script like `make` runs a Makefile — shells, `python`, `perl`, `ruby`, `node`: a
+/// script file inside the scope is sandboxed workspace code ([`Risk::WriteWorkspace`]), so
+/// `sh test.sh` and `python test.py` are treated alike. Anything else is opaque (a rule may
+/// cover it): a script outside the scope or behind a `$VAR`, `python -m <module>`, and other
+/// interpreters (`osascript` can drive other apps outside the sandbox).
+fn named_script_risk(name: &str, args: &[String], scope: &PathScope) -> CommandRisk {
+    let script_host = SHELLS.contains(&name)
+        || matches!(name, "node" | "nodejs")
+        || ["python", "pypy", "perl", "ruby"].iter().any(|base| {
+            name.strip_prefix(base)
+                .is_some_and(|v| v.chars().all(|c| c.is_ascii_digit() || c == '.'))
+        });
+    match args.first() {
+        Some(script) if script_host && script != "-m" && scope.target(script) == Target::Inside => {
+            CommandRisk::WRITE
+        }
+        _ => CommandRisk::OPAQUE,
+    }
+}
+
 const SHELLS: &[&str] = &["sh", "bash", "zsh", "dash", "ksh", "fish", "csh", "tcsh"];
 
 /// Program name without its directory (`/bin/rm` → `rm`).
@@ -708,7 +732,7 @@ fn classify_program(words: &[String], scope: &PathScope, depth: usize) -> Comman
             return pip_risk(&args[2..]).max(CommandRisk::OPAQUE);
         }
         return if runs_named_script(name, args) {
-            CommandRisk::OPAQUE
+            named_script_risk(name, args, scope)
         } else {
             CommandRisk::OPAQUE_INLINE
         };
@@ -726,9 +750,9 @@ fn classify_program(words: &[String], scope: &PathScope, depth: usize) -> Comman
                     }
                     None => CommandRisk::OPAQUE_INLINE,
                 },
-                // A script file runs like `make` (sandboxed workspace code); a script on stdin
+                // A script file is classified like any interpreter's; a script on stdin
                 // (`… | sh`) is inline code.
-                None if runs_named_script(name, args) => CommandRisk::WRITE,
+                None if runs_named_script(name, args) => named_script_risk(name, args, scope),
                 None => CommandRisk::OPAQUE_INLINE,
             }
         }
@@ -1356,9 +1380,27 @@ mod tests {
             ("git commit -m 'msg'", WriteWorkspace),
             ("git checkout -b feature", WriteWorkspace),
             ("npm test", WriteWorkspace),
+            // Script files in the workspace, whichever interpreter runs them
             ("sh test.sh", WriteWorkspace),
-            // Opaque: interpreters, scripts, eval/source/exec and output redirects
-            ("python3 script.py", Opaque),
+            ("bash scripts/ci.sh --fast", WriteWorkspace),
+            ("zsh ./setup.zsh", WriteWorkspace),
+            ("python3 script.py", WriteWorkspace),
+            ("python tools/gen.py --all", WriteWorkspace),
+            ("python3.12 script.py", WriteWorkspace),
+            ("perl gen.pl", WriteWorkspace),
+            ("ruby task.rb", WriteWorkspace),
+            ("node build.js", WriteWorkspace),
+            ("/usr/bin/env python3 script.py", WriteWorkspace),
+            ("bash /work/repo/run.sh", WriteWorkspace),
+            // Opaque: scripts outside the workspace, modules, other interpreters, inline code,
+            // eval/source/exec and output redirects
+            ("sh /etc/rc.sh", Opaque),
+            ("python3 ../elsewhere/x.py", Opaque),
+            ("node ~/bin/tool.js", Opaque),
+            ("bash $SCRIPT", Opaque),
+            ("osascript script.scpt", Opaque),
+            ("php artisan migrate", Opaque),
+            ("python3 -u script.py", Opaque),
             ("python3 -m pytest -q", Opaque),
             ("sh -s < test.sh", Opaque),
             ("echo hi > out.txt", Opaque),
@@ -1446,6 +1488,32 @@ mod tests {
         ];
         for (command, expected) in table {
             assert_eq!(risk(command), *expected, "{command:?}");
+        }
+    }
+
+    #[test]
+    fn script_files_follow_one_rule_for_every_interpreter() {
+        for interp in ["sh", "bash", "zsh", "python3", "perl", "ruby", "node"] {
+            let inside = classify_command(&format!("{interp} scripts/task"), &scope());
+            assert_eq!(inside.risk, Risk::WriteWorkspace, "{interp}");
+            assert!(!inside.unrulable && !inside.outside_unknown, "{interp}");
+            let outside = classify_command(&format!("{interp} /opt/task"), &scope());
+            assert_eq!(outside.risk, Risk::Opaque, "{interp}");
+            assert!(!outside.unrulable, "{interp}: a rule may name the script");
+        }
+        for inline in [
+            "sh -c 'ls'",
+            "bash -s < task.sh",
+            "python3 -c 'print(1)'",
+            "perl -e 1",
+            "ruby -e 1",
+            "node -e 1",
+            "python3 <<EOF\nprint(1)\nEOF",
+            "sh task.sh > out.txt",
+        ] {
+            let r = classify_command(inline, &scope());
+            assert_eq!(r.risk, Risk::Opaque, "{inline}");
+            assert!(r.unrulable, "{inline}");
         }
     }
 

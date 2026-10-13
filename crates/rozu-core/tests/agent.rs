@@ -9,10 +9,10 @@ use async_trait::async_trait;
 use futures::stream::{self, StreamExt};
 use rozu_core::{
     Agent, AgentConfig, AgentError, AgentEvent, ApprovalGate, ApprovalMode, ApprovalPolicy,
-    ApprovalRecord, ApprovalRequest, ApprovalRules, Billing, ChatRequest, ContentPart, Decision,
-    DecisionSource, EventStream, LongContextPrices, Message, ModelInfo, PrefixRule, Provider,
-    ProviderError, ProviderKind, ProviderResult, Role, SandboxMode, Session, StopReason,
-    StreamEvent, TurnOutcome, Usage, approvals_path,
+    ApprovalRecord, ApprovalRequest, ApprovalResolution, ApprovalRules, Billing, ChatRequest,
+    ContentPart, Decision, DecisionSource, EventStream, LongContextPrices, Message, ModelInfo,
+    PendingApproval, PrefixRule, Provider, ProviderError, ProviderKind, ProviderResult, Role,
+    SandboxMode, Session, StopReason, StreamEvent, TurnOutcome, Usage, approvals_path,
 };
 use rozu_tools::{
     AllowRule, NoSandbox, Risk, Shell, Tool, ToolCtx, ToolOutput, ToolRegistry, Workspace,
@@ -674,12 +674,181 @@ async fn write_tools_are_denied_without_approval() {
         move |tools| tools.register(tool),
     );
 
-    h.run("write").await.0.unwrap();
+    let events = h.run("write").await.1;
 
     assert!(!ran.load(Ordering::SeqCst));
     let (_, output, is_error) = &h.tool_results()[0];
     assert!(is_error);
     assert!(output.contains("denied"), "{output}");
+    // The default gate answers by itself: no prompt was ever open.
+    assert!(prompts(&events).is_empty(), "{events:?}");
+}
+
+/// The approval-prompt events of a turn, in order.
+fn prompts(events: &[AgentEvent]) -> Vec<AgentEvent> {
+    events
+        .iter()
+        .filter(|e| {
+            matches!(
+                e,
+                AgentEvent::ApprovalPending(_) | AgentEvent::ApprovalResolved { .. }
+            )
+        })
+        .cloned()
+        .collect()
+}
+
+#[tokio::test]
+async fn approval_prompts_are_reported_while_open() {
+    for (decision, resolution) in [
+        (Decision::Approve, ApprovalResolution::Approved),
+        (
+            Decision::Deny {
+                reason: "no".into(),
+            },
+            ApprovalResolution::Denied,
+        ),
+    ] {
+        let gate = ScriptedGate::new(decision);
+        let mut h = shell_harness(
+            vec![
+                tool_step(&[("c1", "shell", r#"{"command":"touch made"}"#)]),
+                done(),
+            ],
+            ApprovalMode::ReadOnly,
+            gate.clone(),
+        );
+
+        let (_, events) = h.run("make it").await;
+
+        assert_eq!(gate.asked().len(), 1);
+        assert_eq!(
+            prompts(&events),
+            [
+                AgentEvent::ApprovalPending(PendingApproval {
+                    request_id: "c1".into(),
+                    tool: "shell".into(),
+                    summary: "$ touch made".into(),
+                    provider: "scripted".into(),
+                }),
+                AgentEvent::ApprovalResolved {
+                    request_id: "c1".into(),
+                    resolution,
+                },
+            ]
+        );
+        // Started → pending → resolved → decision record → finished.
+        let position = |pred: &dyn Fn(&AgentEvent) -> bool| events.iter().position(pred).unwrap();
+        let order = [
+            position(&|e| matches!(e, AgentEvent::ToolCallStarted { .. })),
+            position(&|e| matches!(e, AgentEvent::ApprovalPending(_))),
+            position(&|e| matches!(e, AgentEvent::ApprovalResolved { .. })),
+            position(&|e| matches!(e, AgentEvent::Approval(_))),
+            position(&|e| matches!(e, AgentEvent::ToolCallFinished { .. })),
+        ];
+        assert!(order.is_sorted(), "{events:?}");
+    }
+}
+
+#[tokio::test]
+async fn auto_decisions_open_no_prompt() {
+    let gate = ScriptedGate::new(Decision::Deny {
+        reason: "should not be asked".into(),
+    });
+    let mut h = shell_harness(
+        vec![
+            tool_step(&[
+                ("c1", "echo", "{}"),
+                ("c2", "shell", r#"{"command":"echo hi"}"#),
+            ]),
+            done(),
+        ],
+        ApprovalMode::FullAccess,
+        gate.clone(),
+    );
+
+    let (_, events) = h.run("go").await;
+
+    assert_eq!(approvals(&events).len(), 2);
+    assert!(gate.asked().is_empty());
+    assert!(prompts(&events).is_empty(), "{events:?}");
+}
+
+/// Never answers, like a user who walked away.
+struct AbsentUser;
+
+#[async_trait]
+impl ApprovalGate for AbsentUser {
+    async fn decide(&self, _req: ApprovalRequest) -> Decision {
+        std::future::pending().await
+    }
+}
+
+#[tokio::test]
+async fn a_prompt_open_at_cancel_expires() {
+    let mut h = Harness::build(
+        vec![
+            tool_step(&[("c1", "shell", r#"{"command":"touch x"}"#)]),
+            done(),
+        ],
+        |_| {},
+        |tools| tools.register(Shell),
+        |agent| {
+            agent
+                .with_approval_gate(Arc::new(AbsentUser))
+                .with_sandbox(Arc::new(NoSandbox))
+        },
+    );
+
+    let (result, events) = h
+        .run_with("go", |event, cancel| {
+            if matches!(event, AgentEvent::ApprovalPending(_)) {
+                cancel.cancel();
+            }
+        })
+        .await;
+
+    assert_eq!(result.unwrap(), TurnOutcome::Cancelled);
+    assert_eq!(
+        prompts(&events)[1..],
+        [AgentEvent::ApprovalResolved {
+            request_id: "c1".into(),
+            resolution: ApprovalResolution::Expired,
+        }]
+    );
+    assert_eq!(approvals(&events)[0].source, DecisionSource::Cancelled);
+}
+
+#[tokio::test]
+async fn agent_backend_prompts_are_forwarded() {
+    let pending = PendingApproval {
+        request_id: "mcp-1".into(),
+        tool: "shell".into(),
+        summary: "$ cargo test".into(),
+        provider: "claude-cli".into(),
+    };
+    let mut h = Harness::new([ok(vec![
+        StreamEvent::ApprovalPending(pending.clone()),
+        StreamEvent::ApprovalResolved {
+            request_id: "mcp-1".into(),
+            resolution: ApprovalResolution::Approved,
+        },
+        StreamEvent::Done(StopReason::EndTurn),
+    ])]);
+    h.provider.backend.store(true, Ordering::SeqCst);
+
+    let (_, events) = h.run("test").await;
+
+    assert_eq!(
+        prompts(&events),
+        [
+            AgentEvent::ApprovalPending(pending),
+            AgentEvent::ApprovalResolved {
+                request_id: "mcp-1".into(),
+                resolution: ApprovalResolution::Approved,
+            },
+        ]
+    );
 }
 
 /// Answers every prompt with a fixed decision and records what it was asked.

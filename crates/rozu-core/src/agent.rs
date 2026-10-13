@@ -14,7 +14,9 @@ use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, info_span, warn};
 
 pub use crate::approval::ApprovalRecord;
-use crate::approval::{ApprovalGate, ApprovalMode, ApprovalPolicy, ReadOnlyGate};
+use crate::approval::{
+    ApprovalGate, ApprovalMode, ApprovalPolicy, ApprovalResolution, PendingApproval, ReadOnlyGate,
+};
 use crate::audit::AuditLog;
 use crate::exec::ToolExecutor;
 use crate::model::{
@@ -128,6 +130,15 @@ pub enum AgentEvent {
     },
     /// An approval decision for a tool call (every call gets one, auto-approved or not).
     Approval(ApprovalRecord),
+    /// An approval prompt is open and waiting for the user. Never sent for decisions made
+    /// without asking (mode, rule, policy, a non-interactive session).
+    ApprovalPending(PendingApproval),
+    /// The prompt opened by the [`AgentEvent::ApprovalPending`] with this id closed. Comes
+    /// before that call's [`AgentEvent::Approval`] record.
+    ApprovalResolved {
+        request_id: String,
+        resolution: ApprovalResolution,
+    },
     /// Usage for one model response (for an agent backend: for the whole turn).
     Usage(Usage),
     TurnFinished(TurnOutcome),
@@ -194,6 +205,7 @@ impl Agent {
             platform_sandbox(),
         );
         exec.default_timeout = config.tool_timeout;
+        exec.model_provider = Some(provider.id().to_owned());
         Self {
             provider,
             exec,
@@ -431,6 +443,10 @@ impl Agent {
                     StreamEvent::Approval(record) => {
                         warn!(call_id = %record.call_id, "a model provider sent an approval; ignored");
                     }
+                    StreamEvent::ApprovalPending(PendingApproval { request_id, .. })
+                    | StreamEvent::ApprovalResolved { request_id, .. } => {
+                        warn!(%request_id, "a model provider sent an approval prompt; ignored");
+                    }
                     StreamEvent::Done(reason) => {
                         debug!(?reason, "model response done");
                         return StreamEnd::Done;
@@ -555,6 +571,14 @@ impl Agent {
                     }
                 }
                 StreamEvent::Approval(record) => AgentEvent::Approval(record),
+                StreamEvent::ApprovalPending(pending) => AgentEvent::ApprovalPending(pending),
+                StreamEvent::ApprovalResolved {
+                    request_id,
+                    resolution,
+                } => AgentEvent::ApprovalResolved {
+                    request_id,
+                    resolution,
+                },
                 StreamEvent::Usage(usage) => {
                     session.record_usage(usage, self.config.priced_model());
                     AgentEvent::Usage(usage)
