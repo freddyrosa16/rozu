@@ -1,0 +1,7 @@
+# A turn that runs until rozu interrupts it.
+< turn/start
+> {"id":__ID__,"result":{"turn":{"id":"turn_1","items":[],"status":"inProgress"}}}
+> {"method":"item/agentMessage/delta","params":{"delta":"Working on it","itemId":"msg_1","threadId":"thr_1","turnId":"turn_1"}}
+< turn/interrupt
+> {"id":__ID__,"result":{}}
+> {"method":"turn/completed","params":{"threadId":"thr_1","turn":{"id":"turn_1","items":[],"status":"interrupted"}}}

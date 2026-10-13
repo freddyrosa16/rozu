@@ -18,12 +18,23 @@ enum Kind {
     Xai,
     /// The official `claude` CLI on the user's subscription; built by `rozu-cli-providers`.
     ClaudeCli,
+    /// The official Codex CLI's `codex app-server` on the user's ChatGPT subscription; built by
+    /// `rozu-cli-providers`.
+    Codex,
 }
 
 /// Id of the CLI-backed Claude provider (`rozu_cli_providers::claude::PROVIDER_ID`).
 pub const CLAUDE_CLI_ID: &str = "claude-cli";
 /// Context window assumed for the `claude` CLI's model aliases.
 const CLAUDE_CLI_CONTEXT: u32 = 200_000;
+/// Id of the CLI-backed Codex provider (`rozu_cli_providers::codex::PROVIDER_ID`).
+pub const CODEX_ID: &str = "codex";
+/// Codex models listed when the app-server's own list (`rozu models` asks it) isn't available.
+/// **Unverified**: not checked against what Codex accepts. `default` sends no model, so Codex
+/// uses the one it is configured with.
+pub const CODEX_STATIC_MODELS: &[&str] = &["default", "gpt-6.1-sol", "gpt-6-astra", "gpt-6-luna"];
+/// Context window assumed for Codex models (unverified; Codex reports the real one per turn).
+const CODEX_CONTEXT: u32 = 272_000;
 
 /// A provider rozu can talk to.
 #[derive(Debug, PartialEq, Eq)]
@@ -66,13 +77,29 @@ pub const PROVIDERS: &[ProviderInfo] = &[
         default_model: "sonnet",
         kind: Kind::ClaudeCli,
     },
+    ProviderInfo {
+        id: CODEX_ID,
+        label: "OpenAI (ChatGPT subscription, via the codex CLI)",
+        default_base_url: "",
+        default_model: "default",
+        kind: Kind::Codex,
+    },
 ];
 
 impl ProviderInfo {
     /// Whether this provider drives a vendor CLI on the user's subscription (no API key; built
     /// by `rozu-cli-providers`, not [`build`]).
     pub fn is_cli_backed(&self) -> bool {
-        self.kind == Kind::ClaudeCli
+        matches!(self.kind, Kind::ClaudeCli | Kind::Codex)
+    }
+
+    /// Context window assumed for a model of a CLI-backed provider that isn't listed.
+    fn cli_context(&self) -> u32 {
+        if self.kind == Kind::Codex {
+            CODEX_CONTEXT
+        } else {
+            CLAUDE_CLI_CONTEXT
+        }
     }
 
     /// Whether this provider needs an API key.
@@ -86,7 +113,7 @@ pub const DEFAULT_PROVIDER: &str = openai::PROVIDER_ID;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum RegistryError {
-    #[error("unknown provider `{0}` (known: openai, anthropic, xai, claude-cli)")]
+    #[error("unknown provider `{0}` (known: openai, anthropic, xai, claude-cli, codex)")]
     UnknownProvider(String),
     #[error(
         "can't tell which provider serves `{0}`; use provider/model, e.g. anthropic/{0}, or see `rozu models`"
@@ -135,6 +162,10 @@ pub fn models_for(provider: &str) -> Vec<ModelInfo> {
         Some(Kind::ClaudeCli) => ["sonnet", "opus", "haiku"]
             .into_iter()
             .map(|id| ModelInfo::subscription(CLAUDE_CLI_ID, id, CLAUDE_CLI_CONTEXT))
+            .collect(),
+        Some(Kind::Codex) => CODEX_STATIC_MODELS
+            .iter()
+            .map(|id| ModelInfo::subscription(CODEX_ID, *id, CODEX_CONTEXT))
             .collect(),
         None => Vec::new(),
     }
@@ -191,7 +222,7 @@ pub fn resolve(provider: Option<&str>, model: Option<&str>) -> Result<ModelChoic
         // Every model is covered by the subscription, listed or not.
         provider
             .is_cli_backed()
-            .then(|| ModelInfo::subscription(provider.id, &model, CLAUDE_CLI_CONTEXT))
+            .then(|| ModelInfo::subscription(provider.id, &model, provider.cli_context()))
     });
     Ok(ModelChoice {
         provider,
@@ -250,7 +281,7 @@ pub fn build(
             }
             Arc::new(AnthropicProvider::new(config)?)
         }
-        Kind::ClaudeCli => {
+        Kind::ClaudeCli | Kind::Codex => {
             return Err(ProviderError::BadRequest {
                 status: 0,
                 message: format!(
@@ -433,11 +464,18 @@ mod tests {
     fn model_ids_are_unique() {
         let all = models();
         for (i, model) in all.iter().enumerate() {
-            assert!(
-                all[i + 1..].iter().all(|other| other.id != model.id),
-                "duplicate {}",
-                model.id
-            );
+            for other in all[i + 1..].iter().filter(|other| other.id == model.id) {
+                // Codex serves OpenAI's models on the subscription; a bare id still means the
+                // API-key provider listed first.
+                assert!(
+                    other.provider == CODEX_ID && model.provider == openai::PROVIDER_ID,
+                    "duplicate {} ({} and {})",
+                    model.id,
+                    model.provider,
+                    other.provider
+                );
+                assert_eq!(lookup(&model.id).unwrap().provider, openai::PROVIDER_ID);
+            }
         }
     }
 
@@ -563,5 +601,30 @@ mod tests {
         assert!(choice.info.is_some_and(|info| !info.is_metered()));
         // ...while the HTTP provider keeps the same id priced.
         assert!(lookup("anthropic/claude-opus-4-5").is_none_or(|m| m.is_metered()));
+    }
+
+    #[test]
+    fn codex_models_are_subscription_billed() {
+        let provider = provider_info(CODEX_ID).unwrap();
+        assert!(provider.is_cli_backed() && !provider.needs_api_key());
+        assert!(models_for(CODEX_ID).iter().all(|m| !m.is_metered()));
+        assert_eq!(
+            resolve(Some(CODEX_ID), None).unwrap().spec(),
+            "codex/default"
+        );
+        let choice = resolve(Some(CODEX_ID), Some("gpt-6.1-sol")).unwrap();
+        assert_eq!(choice.spec(), "codex/gpt-6.1-sol");
+        assert!(choice.info.is_some_and(|info| !info.is_metered()));
+        let unlisted = resolve(Some(CODEX_ID), Some("gpt-7-preview")).unwrap();
+        assert_eq!(unlisted.info.unwrap().context_window, CODEX_CONTEXT);
+        // A bare OpenAI id still means the API-key provider.
+        assert_eq!(
+            resolve(None, Some("gpt-6.1-sol")).unwrap().provider.id,
+            "openai"
+        );
+        assert!(matches!(
+            build(provider, SecretString::from("x".to_owned()), None, None),
+            Err(ProviderError::BadRequest { .. })
+        ));
     }
 }

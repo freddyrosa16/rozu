@@ -22,7 +22,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use rozu_core::{
     ApprovalGate, ApprovalRecord, ChatRequest, EventStream, Provider, ProviderError, ProviderKind,
-    ProviderResult, Role, StreamEvent,
+    ProviderResult, StreamEvent,
 };
 use rozu_mcp::claude::{DISALLOWED_BUILTIN_TOOLS, MCP_SERVER};
 use rozu_mcp::{APPROVAL_SOCKET_ENV, APPROVE_TOOL, ApprovalBridge};
@@ -32,6 +32,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use crate::process::{CliCommand, CliProcess, DEFAULT_MAX_LINE_BYTES, ReadError};
+use crate::turn::turn_text;
 use protocol::{Mapper, classify_error, looks_logged_out};
 
 /// Must match the id in `rozu_providers::registry`, which lists this provider's models.
@@ -236,48 +237,7 @@ impl ClaudeCliProvider {
 /// The system prompt for `--append-system-prompt`: the session's system messages plus how to
 /// reach rozu's tools.
 fn system_prompt(req: &ChatRequest) -> String {
-    let mut prompt: Vec<String> = req
-        .messages
-        .iter()
-        .filter(|m| m.role == Role::System)
-        .map(|m| m.text_content())
-        .collect();
-    prompt.push(TOOL_NOTE.to_owned());
-    prompt.join("\n\n")
-}
-
-/// The text to send for this turn: the newest user message, preceded by the earlier
-/// conversation when Claude hasn't seen it (a fresh session after talking to another model).
-fn turn_text(req: &ChatRequest, claude_has_history: bool) -> String {
-    let mut turns: Vec<(Role, String)> = req
-        .messages
-        .iter()
-        .filter(|m| matches!(m.role, Role::User | Role::Assistant))
-        .map(|m| (m.role, m.text_content()))
-        .filter(|(_, text)| !text.is_empty())
-        .collect();
-    let latest = match turns.pop() {
-        Some((Role::User, text)) => text,
-        Some(other) => {
-            turns.push(other);
-            String::new()
-        }
-        None => String::new(),
-    };
-    if claude_has_history || turns.is_empty() {
-        return latest;
-    }
-    let mut text = String::from("Earlier in this conversation (with another model):\n");
-    for (role, said) in turns {
-        let who = if role == Role::User {
-            "User"
-        } else {
-            "Assistant"
-        };
-        text.push_str(&format!("\n{who}: {said}\n"));
-    }
-    text.push_str(&format!("\nThe user's new message:\n{latest}"));
-    text
+    crate::turn::system_prompt(req, TOOL_NOTE)
 }
 
 /// Holds the session lock for one turn. If the turn doesn't finish (cancelled, dropped, failed
@@ -427,25 +387,6 @@ mod tests {
             tools: Vec::new(),
             max_output_tokens: None,
         }
-    }
-
-    #[test]
-    fn turn_text_replays_history_only_for_a_fresh_session() {
-        let req = request(vec![
-            Message::system("be brief"),
-            Message::user("first"),
-            Message::assistant("answer"),
-            Message::user("second"),
-        ]);
-        assert_eq!(turn_text(&req, true), "second");
-        let fresh = turn_text(&req, false);
-        assert!(fresh.contains("User: first") && fresh.contains("Assistant: answer"));
-        assert!(
-            fresh.ends_with("The user's new message:\nsecond"),
-            "{fresh}"
-        );
-        let single = request(vec![Message::system("s"), Message::user("only")]);
-        assert_eq!(turn_text(&single, false), "only");
     }
 
     #[test]

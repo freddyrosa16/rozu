@@ -23,19 +23,21 @@ struct Cli {
 enum Command {
     /// Print versions of the rozu crates and where logs go.
     Doctor,
-    /// Manage provider API keys (stored in the OS keychain) and check the claude CLI login.
+    /// Manage provider API keys (stored in the OS keychain), check the claude and codex CLI
+    /// logins, and start `codex login`.
     Auth {
         #[command(subcommand)]
         command: auth::AuthCommand,
     },
     /// Chat with the agent. OPENAI_API_KEY / ANTHROPIC_API_KEY / XAI_API_KEY, if set, override
-    /// the keychain; `--provider claude-cli` uses your Claude subscription via the claude CLI.
+    /// the keychain; `--provider claude-cli` uses your Claude subscription via the claude CLI,
+    /// `--provider codex` your ChatGPT subscription via the Codex CLI.
     Chat(chat::ChatArgs),
     /// List known models with context window and prices.
     Models,
     /// Run your shell inside a rozu PTY session (a smoke test for the terminal layer).
     Term,
-    /// rozu's stdio MCP server, started by the claude CLI (internal).
+    /// rozu's stdio MCP server, started by the claude or codex CLI (internal).
     #[command(hide = true)]
     McpServe(mcp_serve::McpServeArgs),
 }
@@ -80,7 +82,7 @@ fn main() -> ExitCode {
         Some(Command::McpServe(args)) => mcp_serve::run(args),
         None => {
             println!(
-                "rozu {}: try `rozu chat`, `rozu chat --provider claude-cli`, `rozu models`, `rozu auth status` or `rozu --help`.",
+                "rozu {}: try `rozu chat`, `rozu chat --provider claude-cli`, `rozu chat --provider codex`, `rozu models`, `rozu auth status` or `rozu --help`.",
                 env!("CARGO_PKG_VERSION")
             );
             Ok(ExitCode::SUCCESS)

@@ -128,6 +128,7 @@ enum WireSource {
     Gate,
     Cancelled,
     Policy,
+    Delegated,
 }
 
 impl From<Risk> for WireRisk {
@@ -231,6 +232,7 @@ impl From<DecisionSource> for WireSource {
             DecisionSource::Gate => Self::Gate,
             DecisionSource::Cancelled => Self::Cancelled,
             DecisionSource::Policy => Self::Policy,
+            DecisionSource::Delegated => Self::Delegated,
         }
     }
 }
@@ -243,6 +245,7 @@ impl From<WireSource> for DecisionSource {
             WireSource::Gate => Self::Gate,
             WireSource::Cancelled => Self::Cancelled,
             WireSource::Policy => Self::Policy,
+            WireSource::Delegated => Self::Delegated,
         }
     }
 }

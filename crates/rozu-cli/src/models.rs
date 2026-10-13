@@ -1,15 +1,31 @@
 //! `rozu models`: list the known models with context window and prices.
+//!
+//! Codex's models come from the installed Codex CLI (`codex app-server`'s `model/list`) when it
+//! answers; otherwise a small static list, marked unverified, is shown.
 
 use std::process::ExitCode;
 
-use rozu_providers::registry;
+use rozu_cli_providers::codex::DEFAULT_MODEL as CODEX_DEFAULT_MODEL;
+use rozu_cli_providers::codex::install::{CodexModel, find_codex_binary, list_models};
+use rozu_providers::registry::{self, CODEX_ID};
 
 pub fn run() -> anyhow::Result<ExitCode> {
+    let codex_live = codex_models();
     println!(
         "{:<38}{:>9}{:>9}{:>9}{:>12}{:>14}",
         "MODEL", "CONTEXT", "IN $/M", "OUT $/M", "CACHED $/M", "CACHE WR $/M"
     );
+    let mut codex_listed = false;
     for model in registry::models() {
+        if model.provider == CODEX_ID {
+            if let Some(live) = &codex_live {
+                if !codex_listed {
+                    print_codex_models(live);
+                    codex_listed = true;
+                }
+                continue;
+            }
+        }
         let is_default = registry::provider_info(&model.provider)
             .is_some_and(|provider| provider.default_model == model.id);
         let name = format!(
@@ -19,8 +35,13 @@ pub fn run() -> anyhow::Result<ExitCode> {
             if is_default { " *" } else { "" }
         );
         if !model.is_metered() {
+            let note = if model.provider == CODEX_ID {
+                " · unverified"
+            } else {
+                ""
+            };
             println!(
-                "{name:<38}{:>9}   subscription (no per-token cost)",
+                "{name:<38}{:>9}   subscription (no per-token cost){note}",
                 tokens(model.context_window)
             );
             continue;
@@ -51,9 +72,55 @@ pub fn run() -> anyhow::Result<ExitCode> {
          estimates. An indented `prompt` row is a long-context tier: a request with that many \
          prompt tokens pays those prices for all of its tokens. claude-cli models run on your \
          Claude subscription through the official claude CLI: tokens are counted, cost isn't; \
-         any model id the CLI accepts works."
+         any model id the CLI accepts works. codex models run on your ChatGPT subscription \
+         through the official Codex CLI the same way; `codex/default` is the model Codex is \
+         configured with. {}",
+        if codex_live.is_some() {
+            "The codex list comes from the installed Codex CLI."
+        } else {
+            "The codex list is a static, unverified one (the Codex CLI wasn't available to ask)."
+        }
     );
     Ok(ExitCode::SUCCESS)
+}
+
+/// The installed Codex CLI's model list, if it answers.
+fn codex_models() -> Option<Vec<CodexModel>> {
+    let binary = find_codex_binary()?;
+    let runtime = tokio::runtime::Runtime::new().ok()?;
+    match runtime.block_on(list_models(&binary)) {
+        Ok(models) if !models.is_empty() => Some(models),
+        Ok(_) => None,
+        Err(err) => {
+            tracing::info!(error = %err, "codex model list unavailable; showing the static list");
+            None
+        }
+    }
+}
+
+fn print_codex_models(models: &[CodexModel]) {
+    let default =
+        registry::provider_info(CODEX_ID).map_or(CODEX_DEFAULT_MODEL, |p| p.default_model);
+    println!(
+        "{:<38}{:>9}   subscription (Codex's configured model)",
+        format!("{CODEX_ID}/{default} *"),
+        ""
+    );
+    for model in models {
+        let name = format!(
+            "{CODEX_ID}/{}{}",
+            model.id,
+            if model.is_default {
+                " (codex default)"
+            } else {
+                ""
+            }
+        );
+        println!(
+            "{name:<38}{:>9}   subscription (no per-token cost) · {}",
+            "", model.display_name
+        );
+    }
 }
 
 /// `>272K` for a tier starting just over a round number, `≥200K` for one starting at it.

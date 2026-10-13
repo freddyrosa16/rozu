@@ -1,0 +1,6 @@
+# model/list for `rozu models` (hidden models are left out).
+< initialize
+> {"id":__ID__,"result":{"codexHome":"/fake/.codex","platformFamily":"unix","platformOs":"macos","userAgent":"codex_cli_rs/0.147.0 (fake)"}}
+< initialized
+< model/list
+> {"id":__ID__,"result":{"data":[{"id":"gpt-6.1-sol","model":"gpt-6.1-sol","displayName":"GPT-6.1 Sol","description":"","hidden":false,"isDefault":true,"defaultReasoningEffort":"medium","supportedReasoningEfforts":[]},{"id":"gpt-6-luna","model":"gpt-6-luna","displayName":"GPT-6 Luna","description":"","hidden":false,"isDefault":false,"defaultReasoningEffort":"low","supportedReasoningEfforts":[]},{"id":"internal","model":"internal","displayName":"Internal","description":"","hidden":true,"isDefault":false,"defaultReasoningEffort":"low","supportedReasoningEfforts":[]}],"nextCursor":null}}

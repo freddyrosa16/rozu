@@ -1,5 +1,5 @@
-//! `rozu mcp-serve` (hidden): rozu's stdio MCP server, started by a vendor CLI from the
-//! `--mcp-config` rozu writes for it. stdout carries only the protocol; logs go to the log file.
+//! `rozu mcp-serve` (hidden): rozu's stdio MCP server, started by a vendor CLI from the MCP
+//! config rozu gives it (Claude's `--mcp-config`, Codex's `-c mcp_servers.rozu.*`). stdout carries only the protocol; logs go to the log file.
 //!
 //! Tool calls and permission prompts are decided by the project's approval policy; prompts go to
 //! the parent `rozu chat` over the socket in `ROZU_APPROVAL_SOCKET`, and are denied when it
@@ -31,6 +31,10 @@ pub struct McpServeArgs {
     /// The parent `rozu chat`'s session id, so both processes' audit entries match.
     #[arg(long)]
     session_id: Option<String>,
+    /// The CLI-backed provider that started this server (e.g. `codex`), recorded in the audit
+    /// log.
+    #[arg(long)]
+    provider: Option<String>,
 }
 
 pub fn run(args: McpServeArgs) -> anyhow::Result<ExitCode> {
@@ -62,7 +66,8 @@ async fn serve(args: McpServeArgs) -> anyhow::Result<ExitCode> {
         Arc::new(policy),
         platform_sandbox(),
     )
-    .with_audit(AuditLog::from_env(session_id).map(Arc::new));
+    .with_audit(AuditLog::from_env(session_id).map(Arc::new))
+    .with_provider(args.provider);
     let server = Arc::new(McpServer::new(exec, workspace, gate));
     server
         .serve(tokio::io::stdin(), tokio::io::stdout())

@@ -1,0 +1,11 @@
+# A text-only turn: two deltas, the completed message (not repeated), token usage.
+< turn/start
+> {"id":__ID__,"result":{"turn":{"id":"turn_1","items":[],"status":"inProgress"}}}
+> {"method":"turn/started","params":{"threadId":"thr_1","turn":{"id":"turn_1","items":[],"status":"inProgress"}}}
+> {"method":"item/started","params":{"item":{"type":"userMessage","id":"user_1","content":[{"type":"text","text":"hi"}]},"startedAtMs":1,"threadId":"thr_1","turnId":"turn_1"}}
+> {"method":"item/started","params":{"item":{"type":"agentMessage","id":"msg_1","text":""},"startedAtMs":2,"threadId":"thr_1","turnId":"turn_1"}}
+> {"method":"item/agentMessage/delta","params":{"delta":"Hello ","itemId":"msg_1","threadId":"thr_1","turnId":"turn_1"}}
+> {"method":"item/agentMessage/delta","params":{"delta":"from Codex!","itemId":"msg_1","threadId":"thr_1","turnId":"turn_1"}}
+> {"method":"item/completed","params":{"item":{"type":"agentMessage","id":"msg_1","text":"Hello from Codex!"},"threadId":"thr_1","turnId":"turn_1"}}
+> {"method":"thread/tokenUsage/updated","params":{"threadId":"thr_1","turnId":"turn_1","tokenUsage":{"last":{"inputTokens":1200,"cachedInputTokens":1000,"outputTokens":30,"reasoningOutputTokens":10,"totalTokens":1230},"total":{"inputTokens":1200,"cachedInputTokens":1000,"outputTokens":30,"reasoningOutputTokens":10,"totalTokens":1230},"modelContextWindow":272000}}}
+> {"method":"turn/completed","params":{"threadId":"thr_1","turn":{"id":"turn_1","items":[],"status":"completed"}}}

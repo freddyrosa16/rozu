@@ -117,7 +117,14 @@ impl AuditLog {
 
     /// Appends one entry for `record`, decided in `mode`.
     pub fn record(&self, record: &ApprovalRecord, mode: ApprovalMode) {
-        let entry = AuditEntry::new(record, mode, &self.session_id);
+        self.record_for(record, mode, None);
+    }
+
+    /// Like [`AuditLog::record`], tagging the entry with the CLI-backed provider that asked
+    /// (e.g. `codex`), if any.
+    pub fn record_for(&self, record: &ApprovalRecord, mode: ApprovalMode, provider: Option<&str>) {
+        let mut entry = AuditEntry::new(record, mode, &self.session_id);
+        entry.provider = provider;
         let mut line = match serde_json::to_vec(&entry) {
             Ok(line) => line,
             Err(err) => {
@@ -145,11 +152,16 @@ struct AuditEntry<'a> {
     session_id: &'a str,
     call_id: &'a str,
     tool: &'a str,
+    /// The CLI-backed provider whose request this was (`codex`); absent for rozu's own calls.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provider: Option<&'a str>,
     /// `allow` or `deny`.
     decision: &'static str,
     /// `approve`, `always_allow`, `approve_unsandboxed` or `deny`.
     kind: &'static str,
-    /// `mode` (auto-approved), `rule`, `user`, `policy` (default-deny) or `cancelled`.
+    /// `mode` (auto-approved), `rule`, `user`, `policy` (default-deny), `cancelled` or
+    /// `delegated-to-rozu-mcp` (a CLI's prompt for rozu's own MCP tool, which `rozu mcp-serve`
+    /// then decides and logs itself).
     decided_by: &'static str,
     rule: Option<&'a str>,
     mode: &'static str,
@@ -185,12 +197,14 @@ impl<'a> AuditEntry<'a> {
             DecisionSource::Gate => ("user", None),
             DecisionSource::Cancelled => ("cancelled", None),
             DecisionSource::Policy => ("policy", None),
+            DecisionSource::Delegated => ("delegated-to-rozu-mcp", None),
         };
         Self {
             ts: utc_timestamp(now.as_secs(), now.subsec_millis()),
             session_id,
             call_id: &record.call_id,
             tool: &record.tool,
+            provider: None,
             decision: if record.decision.is_approval() {
                 "allow"
             } else {
@@ -385,6 +399,7 @@ mod tests {
         assert!(!text.contains("abcdefghijklmnopqrstu") && !text.contains("0123456789abcdefghij"));
         let entry: serde_json::Value = serde_json::from_str(text.trim()).unwrap();
         assert_eq!(entry["session_id"], "s-1");
+        assert!(entry.get("provider").is_none());
         assert_eq!(entry["decision"], "deny");
         assert_eq!(entry["decided_by"], "user");
         assert_eq!(entry["mode"], "auto");
@@ -402,6 +417,11 @@ mod tests {
             let mode = fs::metadata(&path).unwrap().permissions().mode();
             assert_eq!(mode & 0o777, 0o600);
         }
+
+        log.record_for(&record, ApprovalMode::AutoWorkspace, Some("codex"));
+        let text = fs::read_to_string(&path).unwrap();
+        let entry: serde_json::Value = serde_json::from_str(text.lines().nth(1).unwrap()).unwrap();
+        assert_eq!(entry["provider"], "codex");
     }
 
     #[test]
