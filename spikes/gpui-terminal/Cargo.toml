@@ -1,0 +1,17 @@
+[package]
+name = "gpui-terminal"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Standalone spike: keep out of any parent workspace.
+[workspace]
+
+[dependencies]
+gpui = { version = "0.2", features = ["runtime_shaders"] }
+portable-pty = "0.9"
+alacritty_terminal = "0.26"
+
+[profile.release]
+strip = true
+lto = "thin"
