@@ -7,8 +7,15 @@ default-run = "gpui-spike"
 
 [dependencies]
 gpui = { version = "0.2", features = ["runtime_shaders"] }
-# The v7.2 activity orb (`cargo run --bin activity_orb`); no rozu-core needed for the demo.
-rozu-activity = { path = "../../crates/rozu-activity", default-features = false }
+# The v7.3 activity orb (`cargo run --bin activity_orb`). `core` brings in rozu-core for the
+# `--agent` mode, which replays `rozu_activity::replay::demo_turn()` (real `AgentEvent`s).
+rozu-activity = { path = "../../crates/rozu-activity", default-features = false, features = ["core"] }
+rozu-core = { path = "../../crates/rozu-core" }
+
+# activity_orb reads Reduce motion and the window's occlusion state. Both are already in GPUI's tree.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+raw-window-handle = "0.6"
 
 [profile.release]
 strip = true
