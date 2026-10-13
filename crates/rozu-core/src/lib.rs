@@ -18,9 +18,9 @@ pub use agent::{
     TurnOutcome, TurnUsage,
 };
 pub use approval::{
-    ApprovalGate, ApprovalMode, ApprovalPolicy, ApprovalRecord, ApprovalRequest, ApprovalRules,
-    CODEX_SANDBOX, Confinement, Decision, DecisionSource, PrefixRule, ReadOnlyGate, SandboxMode,
-    approvals_path,
+    ApprovalGate, ApprovalMode, ApprovalPolicy, ApprovalRecord, ApprovalRequest,
+    ApprovalResolution, ApprovalRules, CODEX_SANDBOX, Confinement, Decision, DecisionSource,
+    PendingApproval, PrefixRule, ReadOnlyGate, SandboxMode, approvals_path,
 };
 pub use audit::{AUDIT_LOG_ENV, AuditLog, audit_path_from_env, default_audit_path, new_session_id};
 pub use exec::{ToolExecutor, log_decision};

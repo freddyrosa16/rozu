@@ -287,14 +287,23 @@ Notes:
   `TMPDIR`/`TMP`/`TEMP`), `/dev` and the call's approved extra paths, with `<workspace>/.rozu` denied again and
   `(deny network*)` unless the call was approved with network. `/tmp` and the user's `$TMPDIR` are **not**
   writable. `NoSandbox` elsewhere. **Linux Landlock is deferred**; without a sandbox, auto mode asks before shell
-  commands that write. Known Seatbelt limits: `allow default` still permits mach/XPC services; tools that write
-  to `~/.cargo` or similar caches outside the workspace fail under the sandbox (the output says
-  "blocked by rozu sandbox: writes outside workspace…" and the user is offered `u`).
+  commands that write, and `rozu chat` / `rozu doctor` print a multi-line red WARNING banner on stderr.
+  Known Seatbelt limits: `allow default` still permits mach/XPC services; tools that write to caches outside the
+  workspace (`~/.cargo` — cargo locks `.package-cache` on every build — `~/.npm`, `~/.cache/pip`, Go's module and
+  build caches, …) fail under the sandbox **in every mode, `full` included** (the output says "blocked by rozu
+  sandbox: writes outside workspace…" and the user is offered `u`, unsandboxed for that command only, never
+  remembered). Documented workarounds (README): start rozu with `CARGO_HOME`, `npm_config_cache`,
+  `PIP_CACHE_DIR`, `GOMODCACHE`/`GOCACHE` under the workspace, or point them at the session `$TMPDIR` per command;
+  filling a fresh cache needs one approved networked run. A read-write cache allowlist stays an option if this
+  is frequent in dogfooding.
 - **Risk classifier** (`classify_command`): splits on `&&`, `||`, `;`, `|`, `&`, newlines, parentheses and
   backticks, recurses into `sh -c`/`bash -c`/`eval`/`xargs`/`find -exec`, takes the max. Unknown commands are
-  `WriteWorkspace`. `Opaque` (asks in every mode): language interpreters (`python`, `perl`, `ruby`, `node`,
-  `osascript`, …), `sh -c`/`bash -c`/`zsh -c`, scripts on a shell's stdin, `eval`, `source`/`.`, `exec`, those
-  behind `xargs`/`find -exec`, and any output redirect or `tee` to a file. Redirects or `tee` to paths outside
+  `WriteWorkspace`. One rule for script files: `sh`/`bash`/`zsh` (any shell), `python`, `perl`, `ruby` or `node`
+  running a named script **inside the workspace** is `WriteWorkspace` (sandboxed, no prompt in auto/full), like
+  `make`; the same script outside the workspace (or behind a `$VAR`), `python -m <module>` and other interpreters
+  (`osascript`, …) are `Opaque` but rule-able. `Opaque` and never rule-able: inline code (`-c`/`-e`, code on
+  stdin or in a heredoc, `eval`, `source`/`.`, `exec`, those behind `xargs`/`find -exec`) and any output
+  redirect or `tee` to a file. Redirects or `tee` to paths outside
   the workspace/session tmp are `Destructive`. It also collects the outside paths a command writes (`~`, `$HOME`,
   `$TMPDIR` expanded; other variables, `~user` and globs are "unknown").
 - **Approvals** (`rozu-core::approval`): `ApprovalMode::{ReadOnly, AutoWorkspace (default), FullAccess}`. Every
@@ -537,6 +546,26 @@ guide; research: `grok-rozu-owned-loop.md` LIVE UPDATE, `grok-live-results.md`, 
   `--agent-profile` works for `grok agent`; that `session/cancel` ends the prompt with `stopReason: cancelled`;
   `hooks:` in agent-profile frontmatter (documented to exist, shape not); the static model ids and 500K window; the
   headless built-in tool names; that Grok's MCP subprocess (rozu mcp-serve) stays in Grok's process group.
+
+**Approval-pending events + activity orb wiring (2026-10-13).**
+- `AgentEvent::ApprovalPending(PendingApproval { request_id, tool, summary, provider })` is sent the moment a
+  prompt waits for the user, and `AgentEvent::ApprovalResolved { request_id, resolution: Approved | Denied |
+  Expired }` when it closes (before that call's `Approval` record). Never for auto-decisions: mode, rule, policy,
+  delegated, or a gate that answers on its own (`ApprovalGate::asks_user()` is false for `ReadOnlyGate`, the
+  non-interactive `CliGate` and `SocketGate`, which is a relay).
+- Sources: `ToolExecutor::ask_gate` (native loop, Codex's own requests, blocked-retry prompts; `Expired` on
+  cancel), and `ApprovalBridge` in the parent for prompts forwarded by `rozu mcp-serve` (Claude, Codex and Grok;
+  `Expired` when the asker hangs up). CLI providers carry them as `StreamEvent::ApprovalPending/Resolved`; the
+  bridge channel now carries `StreamEvent`s and is bound with the provider id. Codex's in-process prompts are
+  yielded while the answer is awaited. Tests: core `approval_prompts_are_reported_while_open`,
+  `auto_decisions_open_no_prompt`, `a_prompt_open_at_cancel_expires`, `agent_backend_prompts_are_forwarded`; MCP
+  `rozu_write_tool_goes_through_the_parent_in_read_only_mode`, `withdrawn_prompts_expire`; fixtures for Claude,
+  Codex (`codex_prompts_are_reported_before_the_user_answers`) and Grok.
+- `rozu-activity` (no GUI deps; `rozu-core` stays GPUI-free) maps them: pending → Waiting (held while any prompt
+  is open), resolved → the running tool or the state before Waiting; `TurnFailed` from `AgentError` → Error, or
+  Offline for network errors. `Debouncer` paces the pill (Waiting/Done/Error/Offline/idle at once; other states
+  stay up ≥300ms, coalescing). `replay::demo_turn` + `cargo run -p rozu-activity --example replay` replay a
+  scripted turn; the GPUI demo in `spikes/` is untouched and can replay it later.
 
 ### M4: Sessions, memory, evals (≈2–3 weeks)
 - [ ] JSONL sessions + SQLite index, resume; ROZU.md memory; compaction

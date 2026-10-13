@@ -40,8 +40,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use rozu_core::{
-    ApprovalRecord, ChatRequest, EventStream, Provider, ProviderError, ProviderKind,
-    ProviderResult, StreamEvent, ToolExecutor,
+    ChatRequest, EventStream, Provider, ProviderError, ProviderKind, ProviderResult, StreamEvent,
+    ToolExecutor,
 };
 use rozu_mcp::{APPROVAL_SOCKET_ENV, ApprovalBridge, SERVER_NAME};
 use rozu_tools::{ToolRegistry, Workspace};
@@ -210,8 +210,8 @@ struct State {
     epoch: u64,
     /// Set by [`GrokSession::rotate_epoch`]: the next turn opens a new session.
     rotate: Option<EpochReason>,
-    /// Decision-log entries from `rozu mcp-serve`.
-    records: mpsc::UnboundedReceiver<ApprovalRecord>,
+    /// Decision-log entries from `rozu mcp-serve` and the prompts the bridge opened.
+    records: mpsc::UnboundedReceiver<StreamEvent>,
 }
 
 /// The Grok Build ACP provider: one process, one session per context epoch.
@@ -239,7 +239,12 @@ impl GrokSession {
             .tempdir_in(base)?;
         let (records_tx, records) = mpsc::unbounded_channel();
         let socket = runtime_dir.path().join("approval.sock");
-        let bridge = match ApprovalBridge::bind(&socket, config.exec.gate.clone(), records_tx) {
+        let bridge = match ApprovalBridge::bind(
+            &socket,
+            PROVIDER_ID,
+            config.exec.gate.clone(),
+            records_tx,
+        ) {
             Ok(bridge) => Some(bridge),
             Err(err) => {
                 warn!(error = %err, "no approval bridge; prompts from rozu's MCP tools will be denied");
@@ -553,7 +558,7 @@ impl Drop for TurnGuard {
 
 enum Next {
     Cancelled,
-    Record(ApprovalRecord),
+    Record(StreamEvent),
     Line(Result<Option<Value>, ReadError>),
 }
 
@@ -767,7 +772,7 @@ impl Provider for GrokSession {
                         yield Err(ProviderError::Cancelled);
                         break;
                     }
-                    Next::Record(record) => Flow::Events(vec![StreamEvent::Approval(record)]),
+                    Next::Record(event) => Flow::Events(vec![event]),
                     Next::Line(Ok(Some(message))) => {
                         Self::handle(&config, state, message, prompt).await
                     }

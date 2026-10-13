@@ -11,9 +11,10 @@ use futures::StreamExt;
 use rozu_cli_providers::claude::install::{claude_auth_status, claude_version};
 use rozu_cli_providers::{ClaudeCliConfig, ClaudeCliProvider};
 use rozu_core::{
-    Agent, AgentConfig, AgentEvent, ApprovalMode, ApprovalRecord, ChatRequest, Decision,
-    DecisionSource, Message, ModelInfo, Provider, ProviderError, ReadOnlyGate, SandboxMode,
-    Session, StopReason, StreamEvent, TurnOutcome, Usage,
+    Agent, AgentConfig, AgentEvent, ApprovalGate, ApprovalMode, ApprovalRecord, ApprovalRequest,
+    ApprovalResolution, ChatRequest, Decision, DecisionSource, Message, ModelInfo, PendingApproval,
+    Provider, ProviderError, ReadOnlyGate, SandboxMode, Session, StopReason, StreamEvent,
+    TurnOutcome, Usage,
 };
 use rozu_mcp::SocketGate;
 use rozu_tools::{Risk, ToolRegistry, Workspace};
@@ -71,12 +72,16 @@ impl Fake {
     }
 
     fn provider(&self) -> ClaudeCliProvider {
+        self.provider_with_gate(Arc::new(ReadOnlyGate))
+    }
+
+    fn provider_with_gate(&self, gate: Arc<dyn ApprovalGate>) -> ClaudeCliProvider {
         let mut config = ClaudeCliConfig::new(
             self.binary(),
             self.path("workspace"),
             "/nonexistent/rozu",
             vec!["mcp-serve".into()],
-            Arc::new(ReadOnlyGate),
+            gate,
         );
         config.env = vec![
             (
@@ -437,6 +442,127 @@ async fn approval_records_from_the_mcp_server_join_the_stream() {
         .send_record(record.clone())
         .await;
 
+    let next = tokio::time::timeout(Duration::from_secs(10), stream.next())
+        .await
+        .unwrap();
+    assert_eq!(next.unwrap(), Ok(StreamEvent::Approval(record)));
+    cancel.cancel();
+}
+
+/// The user, who answers once released.
+#[derive(Default)]
+struct HeldUser {
+    release: tokio::sync::Notify,
+}
+
+#[async_trait::async_trait]
+impl ApprovalGate for HeldUser {
+    async fn decide(&self, _req: ApprovalRequest) -> Decision {
+        self.release.notified().await;
+        Decision::Approve
+    }
+}
+
+fn shell_request(call_id: &str) -> ApprovalRequest {
+    ApprovalRequest {
+        call_id: call_id.into(),
+        tool: "shell".into(),
+        args: serde_json::json!({"command": "cargo test"}),
+        risk: Risk::Network,
+        preview: "$ cargo test".into(),
+        sandbox: SandboxMode::Enforced("seatbelt"),
+        network: true,
+        extra_writes: Vec::new(),
+        outside_unknown: false,
+        blocked_retry: false,
+        allow_rule: None,
+    }
+}
+
+#[tokio::test]
+async fn prompts_forwarded_by_the_mcp_server_are_reported_while_open() {
+    let fake = Fake::new(&["partial_then_hang.jsonl"]);
+    fake.mark("turns/hang1", "");
+    let user = Arc::new(HeldUser::default());
+    let provider = fake.provider_with_gate(user.clone());
+    let cancel = CancellationToken::new();
+    let mut stream = provider
+        .stream(
+            request("sonnet", vec![Message::user("one")]),
+            cancel.clone(),
+        )
+        .await
+        .unwrap();
+    let _text = stream.next().await;
+
+    // `rozu mcp-serve` asks; the user hasn't answered yet.
+    let gate = SocketGate::new(Some(provider.runtime_dir().join("approval.sock")));
+    let asking = tokio::spawn(async move { gate.decide(shell_request("mcp-7")).await });
+    let next = tokio::time::timeout(Duration::from_secs(10), stream.next())
+        .await
+        .unwrap();
+    assert_eq!(
+        next.unwrap(),
+        Ok(StreamEvent::ApprovalPending(PendingApproval {
+            request_id: "mcp-7".into(),
+            tool: "shell".into(),
+            summary: "$ cargo test".into(),
+            provider: "claude-cli".into(),
+        }))
+    );
+    assert!(!asking.is_finished());
+
+    user.release.notify_one();
+    let next = tokio::time::timeout(Duration::from_secs(10), stream.next())
+        .await
+        .unwrap();
+    assert_eq!(
+        next.unwrap(),
+        Ok(StreamEvent::ApprovalResolved {
+            request_id: "mcp-7".into(),
+            resolution: ApprovalResolution::Approved,
+        })
+    );
+    assert_eq!(asking.await.unwrap(), Decision::Approve);
+    cancel.cancel();
+}
+
+#[tokio::test]
+async fn a_gate_that_answers_by_itself_opens_no_prompt() {
+    let fake = Fake::new(&["partial_then_hang.jsonl"]);
+    fake.mark("turns/hang1", "");
+    let provider = fake.provider(); // ReadOnlyGate: denies without asking anyone
+    let cancel = CancellationToken::new();
+    let mut stream = provider
+        .stream(
+            request("sonnet", vec![Message::user("one")]),
+            cancel.clone(),
+        )
+        .await
+        .unwrap();
+    let _text = stream.next().await;
+
+    let gate = SocketGate::new(Some(provider.runtime_dir().join("approval.sock")));
+    assert!(matches!(
+        gate.decide(shell_request("mcp-8")).await,
+        Decision::Deny { .. }
+    ));
+    // The next thing on the stream is the decision record, not a prompt.
+    let record = ApprovalRecord {
+        call_id: "mcp-8".into(),
+        tool: "shell".into(),
+        risk: Risk::Network,
+        preview: "$ cargo test".into(),
+        sandbox: SandboxMode::Enforced("seatbelt"),
+        network: true,
+        extra_writes: Vec::new(),
+        blocked_retry: false,
+        decision: Decision::Deny {
+            reason: "no one".into(),
+        },
+        source: DecisionSource::Gate,
+    };
+    gate.send_record(record.clone()).await;
     let next = tokio::time::timeout(Duration::from_secs(10), stream.next())
         .await
         .unwrap();

@@ -22,7 +22,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use rozu_core::{
     AgentEvent, ApprovalRecord, ApprovalRequest, CODEX_SANDBOX, Decision, DecisionSource,
-    SandboxMode, ToolExecutor,
+    SandboxMode, StreamEvent, ToolExecutor,
 };
 use rozu_mcp::SERVER_NAME;
 use rozu_tools::{OutsideWrites, Risk, Shell, Tool, ToolCtx, ToolOutput, Workspace};
@@ -51,6 +51,9 @@ pub struct ApprovalCtx<'a> {
     pub cancel: &'a CancellationToken,
     /// The thread's items, for file-change approvals (whose params carry only the item id).
     pub mapper: Option<&'a Mapper>,
+    /// Where approval prompts are reported while they are open
+    /// ([`StreamEvent::ApprovalPending`] / [`StreamEvent::ApprovalResolved`]).
+    pub prompts: Option<&'a mpsc::UnboundedSender<StreamEvent>>,
 }
 
 /// Answers the server request `method` with `params` (JSON-RPC id `id`).
@@ -608,7 +611,8 @@ fn rozu_tool_approval(
     Ok((tool.clone(), args))
 }
 
-/// Runs the decision (policy then user, or the user only) and collects its log entries.
+/// Runs the decision (policy then user, or the user only) and collects its log entries. A
+/// prompt the user is shown is reported on `ctx.prompts` as it opens and closes.
 async fn decide(
     ctx: &ApprovalCtx<'_>,
     request: &ApprovalRequest,
@@ -616,18 +620,38 @@ async fn decide(
     ask_user: bool,
 ) -> (Decision, DecisionSource, Vec<ApprovalRecord>) {
     let (tx, mut rx) = mpsc::channel(4);
-    let (decision, source) = if ask_user {
-        ctx.exec.ask_user(request, ctx.cancel, &tx).await
-    } else {
-        ctx.exec.decide(request, rule_tool, ctx.cancel, &tx).await
-    };
-    drop(tx);
-    let mut records = Vec::new();
-    while let Some(event) = rx.recv().await {
-        if let AgentEvent::Approval(record) = event {
-            records.push(record);
+    let run = async move {
+        if ask_user {
+            ctx.exec.ask_user(request, ctx.cancel, &tx).await
+        } else {
+            ctx.exec.decide(request, rule_tool, ctx.cancel, &tx).await
         }
-    }
+    };
+    let collect = async {
+        let mut records = Vec::new();
+        while let Some(event) = rx.recv().await {
+            let prompt = match event {
+                AgentEvent::Approval(record) => {
+                    records.push(record);
+                    continue;
+                }
+                AgentEvent::ApprovalPending(pending) => StreamEvent::ApprovalPending(pending),
+                AgentEvent::ApprovalResolved {
+                    request_id,
+                    resolution,
+                } => StreamEvent::ApprovalResolved {
+                    request_id,
+                    resolution,
+                },
+                _ => continue,
+            };
+            if let Some(prompts) = ctx.prompts {
+                let _ = prompts.send(prompt);
+            }
+        }
+        records
+    };
+    let ((decision, source), records) = tokio::join!(run, collect);
     (decision, source, records)
 }
 
