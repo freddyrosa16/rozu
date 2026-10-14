@@ -9,6 +9,16 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  landing-page:
+    name: landing page tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: node --test tests/waves.test.cjs
+
   check:
     name: fmt / clippy / test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

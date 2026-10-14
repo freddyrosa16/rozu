@@ -1,5 +1,5 @@
-//! What the app remembers between launches: the chosen model and effort, and the folders added as
-//! projects. Kept in `app.json` in rozu's config dir.
+//! What the app remembers between launches: the chosen model, effort and approval mode, and the
+//! folders added as projects. Kept in `app.json` in rozu's config dir.
 
 use std::path::{Path, PathBuf};
 
@@ -11,6 +11,8 @@ pub struct Settings {
     pub provider: Option<String>,
     pub model: Option<String>,
     pub effort: Option<String>,
+    /// `read-only`, `auto` or `full` (the `rozu chat --approval` names); `None` means auto.
+    pub approval: Option<String>,
     pub projects: Vec<PathBuf>,
 }
 
@@ -71,6 +73,7 @@ mod tests {
             provider: Some("claude-cli".into()),
             model: Some("opus".into()),
             effort: Some("high".into()),
+            approval: Some("read-only".into()),
             ..Default::default()
         };
         assert!(s.add_project("/a".into()));

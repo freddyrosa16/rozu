@@ -16,6 +16,7 @@ use async_trait::async_trait;
 use clap::{Args, Subcommand, ValueEnum};
 use rozu_core::{AgentEvent, ApprovalGate, ApprovalRequest, Decision, Session, TurnOutcome, Usage};
 use rozu_tools::Workspace;
+use serde::de::DeserializeOwned;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -93,6 +94,29 @@ impl ApprovalGate for EvalGate {
     }
 }
 
+/// Loads JSON fixtures in filename order, retaining the fixture kind and path in errors.
+fn load_fixtures<T: DeserializeOwned>(dir: &Path, kind: &str) -> anyhow::Result<Vec<T>> {
+    let entries =
+        std::fs::read_dir(dir).with_context(|| format!("cannot read {}", dir.display()))?;
+    let mut paths = entries
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<std::io::Result<Vec<_>>>()
+        .with_context(|| format!("cannot list {}", dir.display()))?;
+    paths.retain(|path| {
+        path.extension()
+            .is_some_and(|extension| extension == "json")
+    });
+    paths.sort();
+    paths
+        .into_iter()
+        .map(|path| {
+            let text = std::fs::read_to_string(&path)
+                .with_context(|| format!("cannot read {}", path.display()))?;
+            serde_json::from_str(&text).with_context(|| format!("bad {kind} {}", path.display()))
+        })
+        .collect()
+}
+
 /// A temp workspace holding `files` (relative paths).
 pub fn temp_repo(
     files: &BTreeMap<String, String>,
@@ -163,4 +187,58 @@ pub fn last_answer(session: &Session) -> String {
 
 pub fn cache_hit_rate(usage: &Usage) -> Option<f64> {
     (usage.input_tokens > 0).then(|| usage.cache_read_tokens as f64 / usage.input_tokens as f64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Debug, serde::Deserialize, PartialEq)]
+    #[serde(deny_unknown_fields)]
+    struct Fixture {
+        name: String,
+    }
+
+    #[test]
+    fn fixtures_load_in_filename_order_and_skip_other_files() {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, text) in [
+            ("02.json", r#"{"name":"second"}"#),
+            ("notes.md", "not JSON"),
+            ("01.json", r#"{"name":"first"}"#),
+        ] {
+            std::fs::write(dir.path().join(name), text).unwrap();
+        }
+        let fixtures: Vec<Fixture> = load_fixtures(dir.path(), "task").unwrap();
+        assert_eq!(
+            fixtures
+                .into_iter()
+                .map(|fixture| fixture.name)
+                .collect::<Vec<_>>(),
+            ["first", "second"]
+        );
+    }
+
+    #[test]
+    fn invalid_fixtures_identify_the_kind_and_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("broken.json");
+        for text in ["not JSON", r#"{"unexpected":"field"}"#] {
+            std::fs::write(&path, text).unwrap();
+            let error = load_fixtures::<Fixture>(dir.path(), "scenario").unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                format!("bad scenario {}", path.display())
+            );
+        }
+    }
+
+    #[test]
+    fn unreadable_fixtures_are_not_silently_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("directory.json");
+        std::fs::create_dir(&path).unwrap();
+        let error = load_fixtures::<Fixture>(dir.path(), "task").unwrap_err();
+        assert_eq!(error.to_string(), format!("cannot read {}", path.display()));
+    }
 }

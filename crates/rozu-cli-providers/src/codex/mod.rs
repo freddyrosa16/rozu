@@ -7,7 +7,7 @@
 //!
 //! - **rozu's tools** reach it as the `rozu` MCP server (`rozu mcp-serve`), configured with
 //!   `-c mcp_servers.rozu.*`; they apply rozu's policy and sandbox themselves and ask the user
-//!   through the [`ApprovalBridge`]. So Codex is told not to ask before them
+//!   through the [`ApprovalBridge`](rozu_mcp::ApprovalBridge). So Codex is told not to ask before them
 //!   (`default_tools_approval_mode="approve"`, for that server only), and the approval
 //!   elicitations it may still send for them are accepted.
 //! - **Codex's own shell and apply_patch** stay enabled (Codex 0.147's config schema has no
@@ -34,14 +34,15 @@ use rozu_core::{
     ApprovalGate, ApprovalMode, ApprovalRequest, ChatRequest, Decision, EventStream, Provider,
     ProviderError, ProviderKind, ProviderResult, StreamEvent, ToolExecutor,
 };
-use rozu_mcp::{APPROVAL_SOCKET_ENV, ApprovalBridge, SERVER_NAME};
+use rozu_mcp::{APPROVAL_SOCKET_ENV, SERVER_NAME};
 use rozu_tools::Workspace;
 use serde_json::{Value, json};
 use tokio::sync::{Mutex, OwnedMutexGuard, mpsc};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use crate::process::{CliCommand, CliProcess, DEFAULT_MAX_LINE_BYTES, ReadError};
+use crate::runtime::ApprovalRuntime;
 use crate::turn::{system_prompt, turn_text};
 use approvals::ApprovalCtx;
 use protocol::{AccountStatus, Incoming, LOGIN_HINT, Mapper};
@@ -126,8 +127,7 @@ struct State {
 pub struct CodexAppServerProvider {
     config: Arc<CodexConfig>,
     /// Holds the approval socket; removed on drop.
-    runtime_dir: tempfile::TempDir,
-    bridge: Option<ApprovalBridge>,
+    runtime: ApprovalRuntime,
     state: Arc<Mutex<State>>,
 }
 
@@ -137,29 +137,11 @@ impl CodexAppServerProvider {
     pub fn new(mut config: CodexConfig) -> io::Result<Self> {
         let user_gate = config.exec.gate.clone();
         config.exec.gate = Arc::new(OneTimeGate(user_gate.clone()));
-        // Short base path: Unix socket paths are limited to ~100 bytes.
-        let base = if cfg!(unix) {
-            PathBuf::from("/tmp")
-        } else {
-            std::env::temp_dir()
-        };
-        let runtime_dir = tempfile::Builder::new()
-            .prefix("rozu-codex-")
-            .tempdir_in(base)?;
-        let (records_tx, records) = mpsc::unbounded_channel();
-        let socket = runtime_dir.path().join("approval.sock");
-        // rozu's own tools (via `rozu mcp-serve`) get the user's real answers, `u` included.
-        let bridge = match ApprovalBridge::bind(&socket, PROVIDER_ID, user_gate, records_tx) {
-            Ok(bridge) => Some(bridge),
-            Err(err) => {
-                warn!(error = %err, "no approval bridge; prompts from rozu's MCP tools will be denied");
-                None
-            }
-        };
+        // MCP tools use the user's real gate, including unsandboxed approvals.
+        let (runtime, records) = ApprovalRuntime::new("rozu-codex-", PROVIDER_ID, user_gate)?;
         Ok(Self {
             config: Arc::new(config),
-            runtime_dir,
-            bridge,
+            runtime,
             state: Arc::new(Mutex::new(State {
                 process: None,
                 next_id: 1,
@@ -172,7 +154,7 @@ impl CodexAppServerProvider {
 
     /// The directory holding the approval socket.
     pub fn runtime_dir(&self) -> &std::path::Path {
-        self.runtime_dir.path()
+        self.runtime.path()
     }
 
     /// Codex's sandbox for rozu's approval mode: read-only stays read-only, otherwise
@@ -214,10 +196,10 @@ impl CodexAppServerProvider {
                 toml_string(ROZU_TOOLS_APPROVAL_MODE)
             ),
         ];
-        if let Some(bridge) = &self.bridge {
+        if let Some(socket) = self.runtime.socket_path() {
             overrides.push(format!(
                 "mcp_servers.{server}.env={{ {APPROVAL_SOCKET_ENV} = {} }}",
-                toml_string(&bridge.path().display().to_string())
+                toml_string(&socket.display().to_string())
             ));
         }
         overrides

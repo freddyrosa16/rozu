@@ -1,0 +1,22 @@
+[package]
+name = "rozu-runtime"
+description = "Builds a rozu agent for a model choice (API key or vendor CLI); shared by the CLI and the app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+rozu-cli-providers.workspace = true
+rozu-core.workspace = true
+rozu-providers.workspace = true
+rozu-secrets.workspace = true
+rozu-store.workspace = true
+rozu-tools.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

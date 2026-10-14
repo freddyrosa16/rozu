@@ -30,9 +30,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
-use super::{EvalGate, Mode, cache_hit_rate, last_answer, quiet_turn, temp_repo};
-use crate::approve::{ApprovalArg, CliGate};
-use crate::chat::{AgentFactory, resolve_choice};
+use super::{EvalGate, Mode, cache_hit_rate, last_answer, load_fixtures, quiet_turn, temp_repo};
+use crate::approve::CliGate;
+use rozu_runtime::{AgentFactory, TERMINAL_HOST, resolve_choice, system_prompt};
 
 #[derive(Debug, Args)]
 pub struct MemoryArgs {
@@ -105,7 +105,7 @@ struct Row {
 }
 
 pub async fn run(args: MemoryArgs) -> anyhow::Result<ExitCode> {
-    let scenarios = load(&args.dir)?;
+    let scenarios: Vec<Scenario> = load_fixtures(&args.dir, "scenario")?;
     let conditions: Vec<(&str, MemoryPolicy)> = match args.condition.as_str() {
         "all" => MemoryPolicy::PRESETS.to_vec(),
         name => {
@@ -188,22 +188,6 @@ pub async fn run(args: MemoryArgs) -> anyhow::Result<ExitCode> {
     })
 }
 
-fn load(dir: &Path) -> anyhow::Result<Vec<Scenario>> {
-    let mut paths: Vec<_> = std::fs::read_dir(dir)
-        .with_context(|| format!("cannot read {}", dir.display()))?
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.extension().is_some_and(|e| e == "json"))
-        .collect();
-    paths.sort();
-    paths
-        .iter()
-        .map(|p| {
-            let text = std::fs::read_to_string(p)?;
-            serde_json::from_str(&text).with_context(|| format!("bad scenario {}", p.display()))
-        })
-        .collect()
-}
-
 fn finished_runs(out: &Path) -> anyhow::Result<HashSet<(String, String, u32)>> {
     let Ok(text) = std::fs::read_to_string(out) else {
         return Ok(HashSet::new());
@@ -249,7 +233,7 @@ async fn run_one(
         Some(choice) => {
             let (gate, _asks) = CliGate::new(false);
             let mut factory =
-                AgentFactory::new(&workspace, ApprovalArg::ReadOnly, gate, new_session_id())?;
+                AgentFactory::new(&workspace, ApprovalMode::ReadOnly, gate, new_session_id())?;
             factory.memory = policy;
             let info = choice.info.clone().map(|mut info| {
                 info.context_window = scenario.context_window;
@@ -262,9 +246,10 @@ async fn run_one(
         }
     };
 
-    let mut session = Session::with_system_prompt(crate::chat::system_prompt(
-        &workspace,
+    let mut session = Session::with_system_prompt(system_prompt(
+        workspace.root(),
         ApprovalMode::ReadOnly,
+        TERMINAL_HOST,
     ));
     session
         .messages

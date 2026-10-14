@@ -7,7 +7,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Instant;
 
-use anyhow::{Context, bail};
+use anyhow::bail;
 use clap::{Args, ValueEnum};
 use rozu_core::{
     Agent, AgentConfig, ApprovalMode, ApprovalPolicy, ContentPart, Message, ReplayProvider, Role,
@@ -18,9 +18,9 @@ use rozu_tools::{ToolRegistry, platform_sandbox};
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::{EvalGate, Mode, last_answer, quiet_turn, temp_repo};
+use super::{EvalGate, Mode, last_answer, load_fixtures, quiet_turn, temp_repo};
 use crate::approve::{ApprovalArg, CliGate};
-use crate::chat::{AgentFactory, resolve_choice};
+use rozu_runtime::{AgentFactory, TERMINAL_HOST, resolve_choice, system_prompt};
 
 #[derive(Debug, Args)]
 pub struct TasksArgs {
@@ -93,11 +93,6 @@ pub struct Expect {
 }
 
 impl Task {
-    pub fn load(path: &Path) -> anyhow::Result<Self> {
-        let text = std::fs::read_to_string(path)?;
-        serde_json::from_str(&text).with_context(|| format!("bad task {}", path.display()))
-    }
-
     /// The script as assistant messages.
     pub fn steps(&self) -> Vec<Message> {
         let mut n = 0;
@@ -163,18 +158,8 @@ impl Task {
     }
 }
 
-pub fn load_dir(dir: &Path) -> anyhow::Result<Vec<Task>> {
-    let mut paths: Vec<_> = std::fs::read_dir(dir)
-        .with_context(|| format!("cannot read {}", dir.display()))?
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.extension().is_some_and(|e| e == "json"))
-        .collect();
-    paths.sort();
-    paths.iter().map(|p| Task::load(p)).collect()
-}
-
 pub async fn run(args: TasksArgs) -> anyhow::Result<ExitCode> {
-    let mut tasks = load_dir(&args.dir)?;
+    let mut tasks: Vec<Task> = load_fixtures(&args.dir, "task")?;
     if !args.names.is_empty() {
         tasks.retain(|t| args.names.contains(&t.name));
     }
@@ -248,11 +233,15 @@ async fn run_task(
         Some(choice) => {
             // Prompts are denied without asking; full-access live runs rarely need one.
             let (cli_gate, _asks) = CliGate::new(false);
-            AgentFactory::new(&workspace, approval, cli_gate, new_session_id())?.build(choice)?
+            AgentFactory::new(&workspace, approval.into(), cli_gate, new_session_id())?
+                .build(choice)?
         }
     };
-    let mut session =
-        Session::with_system_prompt(crate::chat::system_prompt(&workspace, approval.into()));
+    let mut session = Session::with_system_prompt(system_prompt(
+        workspace.root(),
+        approval.into(),
+        TERMINAL_HOST,
+    ));
     let (outcome, _) = quiet_turn(&agent, &mut session, &task.prompt).await?;
     if let Some(store) = sessions {
         let meta = SessionMeta {

@@ -4,7 +4,9 @@
 use std::time::Instant;
 
 use rozu_activity::{ActivityEvent, ActivityState, ActivityTracker, from_agent_event};
-use rozu_core::{AgentEvent, ApprovalRequest, ApprovalResolution, TurnOutcome};
+use rozu_core::{
+    AgentEvent, ApprovalRequest, ApprovalResolution, ContentPart, Role, Session, TurnOutcome,
+};
 
 pub enum Item {
     User(String),
@@ -37,6 +39,73 @@ pub struct Feed {
 }
 
 impl Feed {
+    /// A saved chat as it was: the user's messages, the replies and a finished step per tool
+    /// call. Compaction summaries and the system prompt are not shown.
+    pub fn from_session(session: &Session) -> Self {
+        let mut feed = Self::default();
+        for message in &session.messages {
+            for part in &message.content {
+                match (message.role, part) {
+                    (Role::User, ContentPart::Text { text }) => {
+                        feed.items.push(Item::User(text.clone()));
+                    }
+                    (Role::Assistant, ContentPart::Text { text }) if !text.trim().is_empty() => {
+                        match feed.items.last_mut() {
+                            Some(Item::Text(t)) => {
+                                t.push_str("\n\n");
+                                t.push_str(text);
+                            }
+                            _ => feed.items.push(Item::Text(text.clone())),
+                        }
+                    }
+                    (
+                        Role::Assistant,
+                        ContentPart::ToolCall {
+                            id,
+                            name,
+                            args_json,
+                        },
+                    ) => {
+                        let ev = AgentEvent::ToolCallStarted {
+                            id: id.clone(),
+                            name: name.clone(),
+                            args_json: args_json.clone(),
+                        };
+                        let activity = from_agent_event(&ev);
+                        let state = activity
+                            .as_ref()
+                            .map_or(ActivityState::Thinking, |a| a.state);
+                        let label = activity.map_or(name.clone(), |a| a.label);
+                        let mut step = Step::new(id, state, &label);
+                        step.done = Some(past(&label));
+                        feed.items.push(Item::Step(step));
+                    }
+                    (
+                        _,
+                        ContentPart::ToolResult {
+                            call_id,
+                            output,
+                            is_error: true,
+                        },
+                    ) => {
+                        if let Some(step) = feed.items.iter_mut().rev().find_map(|i| match i {
+                            Item::Step(s) if s.id == *call_id => Some(s),
+                            _ => None,
+                        }) {
+                            step.failed = true;
+                            step.done = Some(output.lines().next().unwrap_or("Failed").to_owned());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if !feed.items.is_empty() {
+            feed.tracker.apply(&ActivityEvent::TurnCompleted);
+        }
+        feed
+    }
+
     pub fn send(&mut self, text: String) {
         self.items.push(Item::User(text));
         self.items.push(Item::Step(Step::new(
@@ -261,6 +330,55 @@ mod tests {
         feed.apply(AgentEvent::TurnFinished(TurnOutcome::Cancelled));
         assert_eq!(steps(&feed)[1].1, Some("Searched \"x\""));
         assert!(matches!(feed.items.last(), Some(Item::Note(n)) if n == "Stopped"));
+    }
+
+    #[test]
+    fn a_saved_chat_is_shown_as_it_was() {
+        use rozu_core::Message;
+        let mut session = Session::with_system_prompt("sys");
+        session.messages.push(Message::user("fix it"));
+        session.messages.push(Message::new(
+            Role::Assistant,
+            vec![
+                ContentPart::Text {
+                    text: "Looking.".into(),
+                },
+                ContentPart::ToolCall {
+                    id: "a".into(),
+                    name: "read_file".into(),
+                    args_json: r#"{"path":"PLAN.md"}"#.into(),
+                },
+                ContentPart::ToolCall {
+                    id: "b".into(),
+                    name: "shell".into(),
+                    args_json: r#"{"command":"cargo test"}"#.into(),
+                },
+            ],
+        ));
+        session
+            .messages
+            .push(Message::tool_result("a", "text", false));
+        session
+            .messages
+            .push(Message::tool_result("b", "boom\nmore", true));
+        session.messages.push(Message::assistant("Done."));
+        let feed = Feed::from_session(&session);
+        assert!(matches!(&feed.items[0], Item::User(t) if t == "fix it"));
+        assert!(matches!(&feed.items[1], Item::Text(t) if t == "Looking."));
+        assert_eq!(
+            steps(&feed),
+            [
+                (ActivityState::Reading, Some("Read PLAN.md")),
+                (ActivityState::Running, Some("boom"))
+            ]
+        );
+        assert!(matches!(feed.items.last(), Some(Item::Text(t)) if t == "Done."));
+        assert!(!feed.running);
+        assert_eq!(feed.state(), ActivityState::Done);
+        assert_eq!(
+            Feed::from_session(&Session::new()).state(),
+            ActivityState::Offline
+        );
     }
 
     #[test]

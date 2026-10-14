@@ -43,13 +43,14 @@ use rozu_core::{
     ChatRequest, EventStream, Provider, ProviderError, ProviderKind, ProviderResult, StreamEvent,
     ToolExecutor,
 };
-use rozu_mcp::{APPROVAL_SOCKET_ENV, ApprovalBridge, SERVER_NAME};
+use rozu_mcp::{APPROVAL_SOCKET_ENV, SERVER_NAME};
 use rozu_tools::{ToolRegistry, Workspace};
 use serde_json::{Value, json};
 use tokio::sync::{Mutex, OwnedMutexGuard, mpsc};
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use crate::process::{CliCommand, CliProcess, DEFAULT_MAX_LINE_BYTES, ReadError};
+use crate::runtime::ApprovalRuntime;
 use crate::turn::{system_prompt, turn_text_with};
 use protocol::{Incoming, LOGIN_HINT, Mapper};
 
@@ -218,9 +219,8 @@ struct State {
 pub struct GrokSession {
     config: Arc<GrokConfig>,
     /// Holds the agent profile and the approval socket; removed on drop.
-    runtime_dir: tempfile::TempDir,
+    runtime: ApprovalRuntime,
     profile: PathBuf,
-    bridge: Option<ApprovalBridge>,
     state: Arc<Mutex<State>>,
 }
 
@@ -228,36 +228,14 @@ impl GrokSession {
     /// Writes the agent profile and starts the approval bridge for `rozu mcp-serve`. Needs a
     /// tokio runtime. Grok itself starts with the first turn.
     pub fn new(config: GrokConfig) -> io::Result<Self> {
-        // Short base path: Unix socket paths are limited to ~100 bytes.
-        let base = if cfg!(unix) {
-            PathBuf::from("/tmp")
-        } else {
-            std::env::temp_dir()
-        };
-        let runtime_dir = tempfile::Builder::new()
-            .prefix("rozu-grok-")
-            .tempdir_in(base)?;
-        let (records_tx, records) = mpsc::unbounded_channel();
-        let socket = runtime_dir.path().join("approval.sock");
-        let bridge = match ApprovalBridge::bind(
-            &socket,
-            PROVIDER_ID,
-            config.exec.gate.clone(),
-            records_tx,
-        ) {
-            Ok(bridge) => Some(bridge),
-            Err(err) => {
-                warn!(error = %err, "no approval bridge; prompts from rozu's MCP tools will be denied");
-                None
-            }
-        };
-        let profile = runtime_dir.path().join("rozu-agent.md");
+        let (runtime, records) =
+            ApprovalRuntime::new("rozu-grok-", PROVIDER_ID, config.exec.gate.clone())?;
+        let profile = runtime.path().join("rozu-agent.md");
         std::fs::write(&profile, agent_profile(config.post_tool_hook.as_deref()))?;
         Ok(Self {
             config: Arc::new(config),
-            runtime_dir,
+            runtime,
             profile,
-            bridge,
             state: Arc::new(Mutex::new(State {
                 process: None,
                 model: None,
@@ -272,7 +250,7 @@ impl GrokSession {
 
     /// The directory holding the agent profile and the approval socket.
     pub fn runtime_dir(&self) -> &Path {
-        self.runtime_dir.path()
+        self.runtime.path()
     }
 
     /// The agent profile file Grok is started with.
@@ -296,14 +274,10 @@ impl GrokSession {
     /// `session/new`'s `mcpServers`: rozu's server only, with the approval socket.
     pub fn mcp_servers(&self) -> Vec<Value> {
         let env: Vec<(String, String)> = self
-            .bridge
-            .iter()
-            .map(|b| {
-                (
-                    APPROVAL_SOCKET_ENV.to_owned(),
-                    b.path().display().to_string(),
-                )
-            })
+            .runtime
+            .socket_path()
+            .into_iter()
+            .map(|socket| (APPROVAL_SOCKET_ENV.to_owned(), socket.display().to_string()))
             .collect();
         vec![protocol::mcp_server(
             SERVER_NAME,

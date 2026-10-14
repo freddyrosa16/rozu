@@ -5135,12 +5135,15 @@ dependencies = [
  "anyhow",
  "async-trait",
  "directories",
+ "futures",
  "gpui",
  "rozu-activity",
  "rozu-cli-providers",
  "rozu-core",
  "rozu-providers",
+ "rozu-runtime",
  "rozu-secrets",
+ "rozu-store",
  "rozu-tools",
  "serde",
  "serde_json",
@@ -5166,6 +5169,7 @@ dependencies = [
  "rozu-mcp",
  "rozu-providers",
  "rozu-pty",
+ "rozu-runtime",
  "rozu-secrets",
  "rozu-store",
  "rozu-tools",
@@ -5267,6 +5271,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "rozu-runtime"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "rozu-cli-providers",
+ "rozu-core",
+ "rozu-providers",
+ "rozu-secrets",
+ "rozu-store",
+ "rozu-tools",
+ "tempfile",
+ "tracing",
+]
+
+[[package]]
 name = "rozu-secrets"
 version = "0.1.0"
 dependencies = [
@@ -5280,6 +5299,7 @@ name = "rozu-store"
 version = "0.1.0"
 dependencies = [
  "directories",
+ "libc",
  "rozu-core",
  "rozu-tools",
  "rusqlite",

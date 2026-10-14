@@ -6,7 +6,7 @@ use std::ops::Range;
 use gpui::{
     App, Bounds, Context, ElementInputHandler, EntityInputHandler, EventEmitter, FocusHandle,
     Focusable, KeyBinding, Pixels, Point, SharedString, UTF16Selection, Window, actions, canvas,
-    div, prelude::*, rgb,
+    div, prelude::*, px, rgb,
 };
 
 use crate::theme::{INK, INK3};
@@ -29,6 +29,8 @@ pub struct Composer {
     focus: FocusHandle,
     pub text: String,
     pub placeholder: SharedString,
+    /// Width the message text wraps at, in pixels. `0` sizes to the text (the model search box).
+    pub wrap_at: f32,
     /// IME composition in progress (bytes of `text`).
     marked: Option<Range<usize>>,
 }
@@ -48,6 +50,7 @@ impl Composer {
             focus: cx.focus_handle(),
             text,
             placeholder,
+            wrap_at: 0.,
             marked,
         }
     }
@@ -103,6 +106,10 @@ impl Render for Composer {
         };
         let entity = cx.entity();
         let focus = self.focus.clone();
+        let wrap_at = self.wrap_at;
+        // `min_w_0` lets this shrink inside the bar. Without it a long line is the flex
+        // item's minimum width, and the model picker is pushed out of the bar. The text
+        // itself wraps at `wrap_at`: GPUI only wraps when it is given a width.
         div()
             .id("composer")
             .key_context("Composer")
@@ -113,11 +120,14 @@ impl Render for Composer {
             .on_action(cx.listener(Self::paste))
             .on_click(cx.listener(|this, _, window, _| window.focus(&this.focus)))
             .relative()
+            .w_full()
             .flex_1()
+            .min_w_0()
             .min_h_6()
+            .overflow_x_hidden()
             .cursor_text()
             .text_color(rgb(if empty && !focused { INK3 } else { INK }))
-            .child(shown)
+            .child(div().when(wrap_at > 0., |d| d.w(px(wrap_at))).child(shown))
             .child(
                 canvas(
                     |_, _, _| {},

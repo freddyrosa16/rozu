@@ -5,7 +5,7 @@
 //! [`ProviderKind::AgentBackend`]: each [`Provider::stream`] call is one user turn. Claude's
 //! mutating built-ins are disallowed; it reaches rozu's own tools, and asks permission for
 //! anything else, through rozu's MCP server (`rozu mcp-serve`, see `rozu-mcp`), which applies
-//! rozu's approval policy and forwards prompts to this process over an [`ApprovalBridge`].
+//! rozu's approval policy and forwards prompts to this process over an [`ApprovalBridge`](rozu_mcp::ApprovalBridge).
 //!
 //! The CLI does its own login and keeps its own credentials; rozu never reads them. Usage is
 //! counted but has no cost (subscription billing).
@@ -25,13 +25,14 @@ use rozu_core::{
     StreamEvent,
 };
 use rozu_mcp::claude::{DISALLOWED_BUILTIN_TOOLS, MCP_SERVER};
-use rozu_mcp::{APPROVAL_SOCKET_ENV, APPROVE_TOOL, ApprovalBridge};
+use rozu_mcp::{APPROVAL_SOCKET_ENV, APPROVE_TOOL};
 use serde_json::json;
 use tokio::sync::{Mutex, OwnedMutexGuard, mpsc};
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::info;
 
 use crate::process::{CliCommand, CliProcess, DEFAULT_MAX_LINE_BYTES, ReadError};
+use crate::runtime::ApprovalRuntime;
 use crate::turn::turn_text;
 use protocol::{Mapper, classify_error, looks_logged_out};
 
@@ -100,9 +101,8 @@ struct State {
 pub struct ClaudeCliProvider {
     config: ClaudeCliConfig,
     /// Holds the MCP config file and the approval socket; removed on drop.
-    runtime_dir: tempfile::TempDir,
+    runtime: ApprovalRuntime,
     mcp_config: PathBuf,
-    _bridge: Option<ApprovalBridge>,
     state: Arc<Mutex<State>>,
 }
 
@@ -110,30 +110,13 @@ impl ClaudeCliProvider {
     /// Writes the MCP config and starts the approval bridge. Needs a tokio runtime. The CLI
     /// itself starts with the first turn.
     pub fn new(config: ClaudeCliConfig) -> io::Result<Self> {
-        // Short base path: Unix socket paths are limited to ~100 bytes.
-        let base = if cfg!(unix) {
-            PathBuf::from("/tmp")
-        } else {
-            std::env::temp_dir()
-        };
-        let runtime_dir = tempfile::Builder::new()
-            .prefix("rozu-claude-")
-            .tempdir_in(base)?;
-        let (records_tx, records) = mpsc::unbounded_channel();
-        let socket = runtime_dir.path().join("approval.sock");
-        let bridge =
-            match ApprovalBridge::bind(&socket, PROVIDER_ID, config.gate.clone(), records_tx) {
-                Ok(bridge) => Some(bridge),
-                Err(err) => {
-                    warn!(error = %err, "no approval bridge; prompts from Claude will be denied");
-                    None
-                }
-            };
+        let (runtime, records) =
+            ApprovalRuntime::new("rozu-claude-", PROVIDER_ID, config.gate.clone())?;
         let mut env = serde_json::Map::new();
-        if let Some(bridge) = &bridge {
+        if let Some(socket) = runtime.socket_path() {
             env.insert(
                 APPROVAL_SOCKET_ENV.into(),
-                bridge.path().display().to_string().into(),
+                socket.display().to_string().into(),
             );
         }
         let mcp = json!({
@@ -146,13 +129,12 @@ impl ClaudeCliProvider {
                 }
             }
         });
-        let mcp_config = runtime_dir.path().join("mcp.json");
+        let mcp_config = runtime.path().join("mcp.json");
         std::fs::write(&mcp_config, serde_json::to_vec_pretty(&mcp)?)?;
         Ok(Self {
             config,
-            runtime_dir,
+            runtime,
             mcp_config,
-            _bridge: bridge,
             state: Arc::new(Mutex::new(State {
                 process: None,
                 model: None,
@@ -164,7 +146,7 @@ impl ClaudeCliProvider {
 
     /// The directory holding the MCP config and approval socket.
     pub fn runtime_dir(&self) -> &std::path::Path {
-        self.runtime_dir.path()
+        self.runtime.path()
     }
 
     /// The arguments `claude` is started with.

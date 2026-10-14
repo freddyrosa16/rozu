@@ -4,6 +4,8 @@
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod backend;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+mod catalog;
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod feed;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod markdown;

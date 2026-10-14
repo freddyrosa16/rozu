@@ -20,7 +20,7 @@ use rozu_core::{ProviderError, StopReason, StreamEvent, Usage};
 use serde_json::{Value, json};
 use tracing::{debug, info};
 
-pub use crate::codex::protocol::Incoming;
+pub use crate::jsonrpc::{Incoming, METHOD_NOT_FOUND};
 
 /// The hint shown when Grok Build isn't signed in.
 pub const LOGIN_HINT: &str = "run `rozu auth login grok` (it runs the official `grok login`; \
@@ -33,8 +33,6 @@ pub const PROTOCOL_VERSION: u64 = 1;
 pub const ROZU_TOOL_PREFIX: &str = "rozu__";
 /// Grok's meta-tool that calls an MCP tool by name.
 pub const USE_TOOL: &str = "use_tool";
-/// JSON-RPC "method not found".
-pub const METHOD_NOT_FOUND: i64 = -32601;
 
 pub fn request(id: u64, method: &str, params: Value) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params })

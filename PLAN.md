@@ -585,7 +585,13 @@ that estimates prefix-cache hits from the previous request; live runs use `--pro
 
 ### M5: GUI (in progress: `crates/rozu-app`)
 - [x] Stack: GPUI, approved by Fred 2026-10-14, with the mockup `docs/design/app/index.html` as the spec (no terminal pane, no side panel)
-- [ ] Primitives + component gallery screen → chat view (virtualized, batched streaming), tool/approval cards, terminal pane, settings (keys, providers, sign-in)
+- [x] Sidebar, chat view, composer, approval cards, model/effort menu, first-run setup (2026-10-14)
+- [x] Parity with `rozu chat` (2026-10-14): chats saved and reopened through `rozu-store` (the sidebar lists them per
+      project, deleting one asks and removes its file), approval mode chosen on the setup page, `ROZU.md`/`AGENTS.md`
+      and pinned notes in the prompt, the same system prompt. Both front ends build the agent through
+      `rozu-runtime::AgentFactory`; the app's `rozu` on PATH must match its version.
+- [ ] Visual review of the setup page (approval chips) and the sidebar with saved chats; `/pin` and `/compact` in the app
+- [ ] Chat view virtualized with batched streaming (2k lines smooth), terminal pane, settings for API keys
 
 **Done when:** every screen matches the spec (visual review), streaming 2k lines stays smooth, approval cards work, and the terminal is usable.
 

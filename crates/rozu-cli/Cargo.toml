@@ -23,6 +23,7 @@ rozu-core.workspace = true
 rozu-mcp.workspace = true
 rozu-providers.workspace = true
 rozu-pty.workspace = true
+rozu-runtime.workspace = true
 rozu-secrets.workspace = true
 rozu-store.workspace = true
 rozu-tools.workspace = true

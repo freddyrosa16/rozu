@@ -1,18 +1,22 @@
 //! Sessions on disk: `<dir>/<id>.jsonl` (append-only) plus `<dir>/index.sqlite`.
 
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rozu_core::{Message, Role, Session, Usage};
+use rozu_core::{Session, Usage};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
 /// Overrides where sessions are stored.
 pub const SESSIONS_DIR_ENV: &str = "ROZU_SESSIONS_DIR";
 const INDEX_FILE: &str = "index.sqlite";
-const TITLE_CHARS: usize = 80;
+mod index;
+mod log;
+
+use index::upsert;
+pub use log::Record;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -28,6 +32,12 @@ pub enum StoreError {
     Ambiguous(String),
     #[error("{0} has no session header")]
     NoHeader(PathBuf),
+    #[error("invalid session id `{0}`")]
+    InvalidId(String),
+    #[error("session header id `{actual}` does not match file id `{expected}`")]
+    MismatchedId { expected: String, actual: String },
+    #[error("session `{0}` is already open for writing; close its other chat first")]
+    InUse(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -38,32 +48,6 @@ pub struct SessionMeta {
     pub model: String,
     /// Unix seconds.
     pub created: u64,
-}
-
-/// One line of a session file. Replaying them in order rebuilds the session.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum Record {
-    Meta(SessionMeta),
-    Message {
-        message: Message,
-    },
-    /// Running totals after a turn.
-    Usage {
-        usage: Usage,
-        cost_usd: f64,
-        #[serde(default)]
-        context_tokens: u64,
-    },
-    /// The model changed (`/model`).
-    Model {
-        provider: String,
-        model: String,
-    },
-    /// The whole history after a compaction; replaces everything before it.
-    Checkpoint {
-        messages: Vec<Message>,
-    },
 }
 
 /// A row of `rozu sessions`.
@@ -130,6 +114,33 @@ impl SessionStore {
         self.dir.join(format!("{id}.jsonl"))
     }
 
+    fn checked_path(&self, id: &str) -> Result<PathBuf, StoreError> {
+        if id.is_empty() || matches!(id, "." | "..") || id.contains(['/', '\\', '\0']) {
+            return Err(StoreError::InvalidId(id.to_owned()));
+        }
+        Ok(self.path_of(id))
+    }
+
+    fn read(&self, id: &str) -> Result<log::LoadedSession, StoreError> {
+        let path = self.checked_path(id)?;
+        let file = File::open(&path).map_err(|err| match err.kind() {
+            io::ErrorKind::NotFound => StoreError::NotFound(id.to_owned()),
+            _ => err.into(),
+        })?;
+        self.read_from(id, &file)
+    }
+
+    fn read_from(&self, id: &str, file: &File) -> Result<log::LoadedSession, StoreError> {
+        let loaded = log::replay(&self.path_of(id), BufReader::new(file.try_clone()?))?;
+        if loaded.meta.id != id {
+            return Err(StoreError::MismatchedId {
+                expected: id.to_owned(),
+                actual: loaded.meta.id,
+            });
+        }
+        Ok(loaded)
+    }
+
     fn index_path(&self) -> PathBuf {
         self.dir.join(INDEX_FILE)
     }
@@ -148,8 +159,9 @@ impl SessionStore {
 
     /// Starts a new session file.
     pub fn create(&self, meta: SessionMeta) -> Result<SessionWriter, StoreError> {
-        let path = self.path_of(&meta.id);
-        let file = open_private(&path)?;
+        let path = self.checked_path(&meta.id)?;
+        let file = open_private(&path, true)?;
+        lock_writer(&file, &meta.id)?;
         let mut writer = SessionWriter {
             store: self.clone(),
             file,
@@ -165,11 +177,23 @@ impl SessionStore {
 
     /// Reads a session back, and a writer that continues it.
     pub fn resume(&self, id: &str) -> Result<(Session, SessionWriter), StoreError> {
-        let (meta, session) = self.load(id)?;
-        let path = self.path_of(&meta.id);
+        let path = self.checked_path(id)?;
+        let mut file = open_private(&path, false).map_err(|err| match err.kind() {
+            io::ErrorKind::NotFound => StoreError::NotFound(id.to_owned()),
+            _ => err.into(),
+        })?;
+        lock_writer(&file, id)?;
+        let loaded = self.read_from(id, &file)?;
+        if loaded.valid_bytes < file.metadata()?.len() {
+            file.set_len(loaded.valid_bytes)?;
+        }
+        if loaded.needs_newline {
+            file.write_all(b"\n")?;
+        }
+        let (meta, session) = (loaded.meta, loaded.session);
         let writer = SessionWriter {
             store: self.clone(),
-            file: open_private(&path)?,
+            file,
             written: session.messages.len(),
             compactions: session.compactions,
             usage: (session.usage, session.cost_usd, session.context_tokens),
@@ -180,17 +204,13 @@ impl SessionStore {
 
     /// Replays a session file. The meta reflects the latest `/model`.
     pub fn load(&self, id: &str) -> Result<(SessionMeta, Session), StoreError> {
-        let path = self.path_of(id);
-        let file = File::open(&path).map_err(|err| match err.kind() {
-            io::ErrorKind::NotFound => StoreError::NotFound(id.to_owned()),
-            _ => err.into(),
-        })?;
-        replay(&path, BufReader::new(file))
+        self.read(id).map(|loaded| (loaded.meta, loaded.session))
     }
 
     /// Replays a session file from anywhere (e.g. a recorded eval fixture).
     pub fn load_file(path: &Path) -> Result<(SessionMeta, Session), StoreError> {
-        replay(path, BufReader::new(File::open(path)?))
+        log::replay(path, BufReader::new(File::open(path)?))
+            .map(|loaded| (loaded.meta, loaded.session))
     }
 
     /// The session id `query` names: `last` (or nothing) is the newest in `workspace`, anything
@@ -208,7 +228,8 @@ impl SessionStore {
                 .optional()?
                 .ok_or_else(|| StoreError::NotFound("last".into())),
             Some(prefix) => {
-                let mut stmt = conn.prepare("SELECT id FROM sessions WHERE id LIKE ?1 || '%'")?;
+                let mut stmt =
+                    conn.prepare("SELECT id FROM sessions WHERE substr(id, 1, length(?1)) = ?1")?;
                 let ids: Vec<String> = stmt
                     .query_map([prefix], |row| row.get(0))?
                     .collect::<Result<_, _>>()?;
@@ -259,8 +280,29 @@ impl SessionStore {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
+    /// Removes a saved session: its file and its index row. A missing file is not an error.
+    pub fn delete(&self, id: &str) -> Result<(), StoreError> {
+        let path = self.checked_path(id)?;
+        let file = match open_private(&path, false) {
+            Ok(file) => {
+                lock_writer(&file, id)?;
+                fs::remove_file(&path)?;
+                Some(file)
+            }
+            Err(err) if err.kind() == io::ErrorKind::NotFound => None,
+            Err(err) => return Err(err.into()),
+        };
+        self.index()?
+            .execute("DELETE FROM sessions WHERE id = ?1", [id])?;
+        drop(file);
+        Ok(())
+    }
+
     /// Rebuilds the index from the session files (skipping unreadable ones).
     pub fn reindex(&self) -> Result<usize, StoreError> {
+        let mut conn = self.index()?;
+        let tx = conn.transaction()?;
+        tx.execute("DELETE FROM sessions", [])?;
         let mut count = 0;
         for entry in fs::read_dir(&self.dir)? {
             let path = entry?.path();
@@ -278,9 +320,10 @@ impl SessionStore {
                 .ok()
                 .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
                 .map_or(meta.created, |d| d.as_secs());
-            upsert(&self.index()?, &meta, &session, updated)?;
+            upsert(&tx, &meta, &session, updated)?;
             count += 1;
         }
+        tx.commit()?;
         Ok(count)
     }
 }
@@ -359,94 +402,6 @@ impl SessionWriter {
     }
 }
 
-fn upsert(
-    conn: &Connection,
-    meta: &SessionMeta,
-    session: &Session,
-    updated: u64,
-) -> Result<(), StoreError> {
-    conn.execute(
-        "INSERT INTO sessions (id, workspace, provider, model, title, created, updated, messages)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-         ON CONFLICT(id) DO UPDATE SET provider = ?3, model = ?4, title = ?5, updated = ?7,
-           messages = ?8",
-        params![
-            meta.id,
-            meta.workspace.display().to_string(),
-            meta.provider,
-            meta.model,
-            title(session),
-            meta.created as i64,
-            updated as i64,
-            session
-                .messages
-                .iter()
-                .filter(|m| m.role != Role::System)
-                .count() as i64,
-        ],
-    )?;
-    Ok(())
-}
-
-/// The first user message, on one line.
-fn title(session: &Session) -> String {
-    let text = session
-        .messages
-        .iter()
-        .find(|m| m.role == Role::User)
-        .map(|m| m.text_content())
-        .unwrap_or_default();
-    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if flat.chars().count() <= TITLE_CHARS {
-        flat
-    } else {
-        format!("{}…", flat.chars().take(TITLE_CHARS).collect::<String>())
-    }
-}
-
-fn replay(path: &Path, reader: impl BufRead) -> Result<(SessionMeta, Session), StoreError> {
-    let mut meta = None;
-    let mut session = Session::default();
-    let mut lines = reader.lines().peekable();
-    while let Some(line) = lines.next() {
-        let line = line?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        let record = match serde_json::from_str(&line) {
-            Ok(record) => record,
-            // A crash mid-write leaves a torn last line; everything before it is intact.
-            Err(_) if lines.peek().is_none() => break,
-            Err(err) => return Err(err.into()),
-        };
-        match record {
-            Record::Meta(m) => meta = Some(m),
-            Record::Message { message } => session.messages.push(message),
-            Record::Usage {
-                usage,
-                cost_usd,
-                context_tokens,
-            } => {
-                session.usage = usage;
-                session.cost_usd = cost_usd;
-                session.context_tokens = context_tokens;
-            }
-            Record::Model { provider, model } => {
-                if let Some(meta) = meta.as_mut() {
-                    meta.provider = provider;
-                    meta.model = model;
-                }
-            }
-            Record::Checkpoint { messages } => {
-                session.messages = messages;
-                session.compactions += 1;
-            }
-        }
-    }
-    let meta = meta.ok_or_else(|| StoreError::NoHeader(path.to_owned()))?;
-    Ok((meta, session))
-}
-
 fn create_private_dir(dir: &Path) -> io::Result<()> {
     fs::create_dir_all(dir)?;
     #[cfg(unix)]
@@ -457,172 +412,39 @@ fn create_private_dir(dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn open_private(path: &Path) -> io::Result<File> {
+fn open_private(path: &Path, create: bool) -> io::Result<File> {
     let mut options = OpenOptions::new();
-    options.create(true).append(true);
+    options.create_new(create).read(true).append(true);
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
     options.open(path)
 }
 
-#[cfg(test)]
-mod tests {
-    use rozu_core::{ContentPart, Message};
+#[cfg(unix)]
+fn lock_writer(file: &File, id: &str) -> Result<(), StoreError> {
+    use std::os::fd::AsRawFd;
 
-    use super::*;
-
-    fn meta(id: &str, workspace: &Path) -> SessionMeta {
-        SessionMeta {
-            id: id.into(),
-            workspace: workspace.into(),
-            provider: "openai".into(),
-            model: "gpt-5".into(),
-            created: 1,
-        }
+    // The lock belongs to the open file and is released on close, including process crashes.
+    let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if result == 0 {
+        return Ok(());
     }
-
-    fn chat(turns: &[&str]) -> Session {
-        let mut session = Session::with_system_prompt("sys");
-        for turn in turns {
-            session.messages.push(Message::user(*turn));
-            session
-                .messages
-                .push(Message::assistant(format!("re: {turn}")));
-        }
-        session
-    }
-
-    #[test]
-    fn a_session_survives_a_restart() {
-        let dir = tempfile::tempdir().unwrap();
-        let ws = Path::new("/w");
-        let mut session = chat(&["hello there"]);
-        session.usage.input_tokens = 10;
-        session.cost_usd = 0.5;
-        {
-            let store = SessionStore::open(dir.path()).unwrap();
-            let mut writer = store.create(meta("s1", ws)).unwrap();
-            writer.sync(&session).unwrap();
-            session.messages.push(Message::user("again"));
-            session.messages.push(Message::new(
-                Role::Assistant,
-                vec![ContentPart::ToolCall {
-                    id: "c".into(),
-                    name: "read_file".into(),
-                    args_json: "{}".into(),
-                }],
-            ));
-            session
-                .messages
-                .push(Message::tool_result("c", "out", false));
-            writer.sync(&session).unwrap();
-            writer.sync(&session).unwrap();
-            writer.set_model("anthropic", "claude").unwrap();
-        }
-        let store = SessionStore::open(dir.path()).unwrap();
-        let id = store.resolve(None, ws).unwrap();
-        let (mut resumed, mut writer) = store.resume(&id).unwrap();
-        assert_eq!(resumed, session);
-        assert_eq!(writer.meta().model, "claude");
-
-        resumed.messages.push(Message::user("third"));
-        writer.sync(&resumed).unwrap();
-        let (_, reloaded) = store.load("s1").unwrap();
-        assert_eq!(reloaded.messages, resumed.messages);
-
-        let list = store.list(Some(ws), None, 10).unwrap();
-        assert_eq!(list.len(), 1);
-        assert_eq!(list[0].title, "hello there");
-        assert_eq!(list[0].messages, 6);
-        assert_eq!(list[0].provider, "anthropic");
-    }
-
-    #[test]
-    fn compaction_writes_a_checkpoint() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = SessionStore::open(dir.path()).unwrap();
-        let mut session = chat(&["a", "b", "c"]);
-        let mut writer = store.create(meta("s", Path::new("/w"))).unwrap();
-        writer.sync(&session).unwrap();
-        session.messages.drain(1..5);
-        session.compactions += 1;
-        writer.sync(&session).unwrap();
-        session.messages.push(Message::user("d"));
-        writer.sync(&session).unwrap();
-        let (_, loaded) = store.load("s").unwrap();
-        assert_eq!(loaded, session);
-    }
-
-    #[test]
-    fn resolve_by_prefix_last_and_workspace() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = SessionStore::open(dir.path()).unwrap();
-        for (id, ws) in [
-            ("20261014-aa", "/a"),
-            ("20261014-ab", "/a"),
-            ("20261015-b", "/b"),
-        ] {
-            store
-                .create(meta(id, Path::new(ws)))
-                .unwrap()
-                .sync(&chat(&[id]))
-                .unwrap();
-        }
-        // Not yet talked to: invisible.
-        store
-            .create(meta("20261016-empty", Path::new("/a")))
-            .unwrap();
-
-        assert_eq!(
-            store.resolve(Some("20261015"), Path::new("/x")).unwrap(),
-            "20261015-b"
-        );
-        assert!(matches!(
-            store.resolve(Some("20261014-a"), Path::new("/a")),
-            Err(StoreError::Ambiguous(_))
-        ));
-        assert!(matches!(
-            store.resolve(Some("nope"), Path::new("/a")),
-            Err(StoreError::NotFound(_))
-        ));
-        assert!(
-            store
-                .resolve(Some("last"), Path::new("/a"))
-                .unwrap()
-                .starts_with("20261014-a")
-        );
-        assert!(matches!(
-            store.resolve(None, Path::new("/none")),
-            Err(StoreError::NotFound(_))
-        ));
-        assert_eq!(
-            store.list(Some(Path::new("/a")), None, 10).unwrap().len(),
-            2
-        );
-        assert_eq!(store.list(None, Some("20261015"), 10).unwrap().len(), 1);
-        assert_eq!(store.list(None, None, 1).unwrap().len(), 1);
-    }
-
-    #[test]
-    fn a_lost_index_is_rebuilt_and_a_torn_line_is_skipped() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = SessionStore::open(dir.path()).unwrap();
-        let session = chat(&["keep me"]);
-        store
-            .create(meta("s", Path::new("/w")))
-            .unwrap()
-            .sync(&session)
-            .unwrap();
-        let mut file = OpenOptions::new()
-            .append(true)
-            .open(store.path_of("s"))
-            .unwrap();
-        file.write_all(b"{\"type\":\"mess").unwrap();
-        fs::remove_file(dir.path().join(INDEX_FILE)).unwrap();
-
-        let store = SessionStore::open(dir.path()).unwrap();
-        let list = store.list(None, Some("keep"), 10).unwrap();
-        assert_eq!(list.len(), 1);
-        assert_eq!(store.load("s").unwrap().1, session);
+    let error = io::Error::last_os_error();
+    if error.kind() == io::ErrorKind::WouldBlock {
+        Err(StoreError::InUse(id.to_owned()))
+    } else {
+        Err(error.into())
     }
 }
+
+#[cfg(not(unix))]
+fn lock_writer(_file: &File, _id: &str) -> Result<(), StoreError> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "session writing requires Unix file locking",
+    )
+    .into())
+}
+
+#[cfg(test)]
+mod tests;

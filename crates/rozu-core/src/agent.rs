@@ -4,7 +4,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use futures::StreamExt;
 use rozu_tools::{
     MAX_OUTPUT_BYTES, Sandbox, SessionTemp, ToolOutput, ToolRegistry, Workspace, platform_sandbox,
     truncate_head_tail,
@@ -18,15 +17,16 @@ use crate::approval::{
     ApprovalGate, ApprovalMode, ApprovalPolicy, ApprovalResolution, PendingApproval, ReadOnlyGate,
 };
 use crate::audit::AuditLog;
-use crate::compact::{
-    Compaction, MemoryPolicy, SUMMARY_HEADER, SUMMARY_PROMPT, estimate_tokens, mask_tool_outputs,
-    pinned_len, recent_start, transcript,
-};
+use crate::compact::MemoryPolicy;
 use crate::exec::ToolExecutor;
-use crate::model::{
-    ChatRequest, ContentPart, Message, ModelInfo, Role, StreamEvent, ToolSpec, Usage,
-};
+use crate::model::{ChatRequest, ContentPart, Message, ModelInfo, Role, ToolSpec, Usage};
 use crate::provider::{Provider, ProviderError, ProviderKind};
+
+mod compaction;
+mod session;
+mod stream;
+
+use stream::{StepOutput, StreamEnd};
 
 /// Default cap on model requests per user turn.
 pub const DEFAULT_MAX_STEPS: usize = 20;
@@ -73,59 +73,7 @@ impl AgentConfig {
     }
 }
 
-/// Tokens and estimated cost of one user turn (all of its model requests).
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
-pub struct TurnUsage {
-    pub usage: Usage,
-    /// `None` when the model has no known prices or is covered by a subscription.
-    pub cost_usd: Option<f64>,
-}
-
-/// The conversation so far plus running totals. A session can outlive an [`Agent`], so the
-/// model (and provider) can change between turns.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct Session {
-    pub messages: Vec<Message>,
-    /// Tokens over all turns.
-    pub usage: Usage,
-    /// Estimated USD over all turns whose model had known prices.
-    pub cost_usd: f64,
-    /// The most recent turn, including one that was cancelled or failed.
-    pub last_turn: TurnUsage,
-    /// Bumped whenever earlier messages are rewritten (compaction), so a store knows to write
-    /// the whole history again instead of appending.
-    pub compactions: u32,
-    /// Prompt plus output tokens of the latest model response: roughly what the next request
-    /// starts from. 0 until a provider reports usage.
-    pub context_tokens: u64,
-    /// What compaction did during the most recent turn, if anything.
-    pub last_compaction: Option<Compaction>,
-}
-
-impl Session {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn with_system_prompt(prompt: impl Into<String>) -> Self {
-        Self {
-            messages: vec![Message::system(prompt)],
-            ..Self::default()
-        }
-    }
-
-    /// Adds one response's usage to the totals, pricing it with `model` (`None`: unpriced).
-    fn record_usage(&mut self, usage: Usage, model: Option<&ModelInfo>) {
-        self.usage += usage;
-        self.last_turn.usage += usage;
-        self.context_tokens = usage.input_tokens + usage.output_tokens;
-        if let Some(model) = model {
-            let cost = model.cost_usd(&usage);
-            self.cost_usd += cost;
-            *self.last_turn.cost_usd.get_or_insert(0.0) += cost;
-        }
-    }
-}
+pub use session::{Session, TurnUsage};
 
 /// Progress reported to the UI / CLI while a turn runs.
 #[derive(Debug, Clone, PartialEq)]
@@ -181,27 +129,6 @@ pub struct Agent {
     exec: ToolExecutor,
     workspace: Workspace,
     config: AgentConfig,
-}
-
-/// A tool call being assembled from stream events.
-#[derive(Debug, Default)]
-struct PendingCall {
-    id: String,
-    name: String,
-    args_json: String,
-}
-
-/// Everything one model response produced.
-#[derive(Debug, Default)]
-struct StepOutput {
-    text: String,
-    calls: Vec<PendingCall>,
-}
-
-enum StreamEnd {
-    Done,
-    Cancelled,
-    Failed(ProviderError),
 }
 
 impl Agent {
@@ -400,316 +327,6 @@ impl Agent {
             }
         }
         Ok(finish(events, TurnOutcome::MaxSteps).await)
-    }
-
-    /// Whether the provider is a vendor CLI that keeps (and compacts) its own context.
-    pub fn manages_own_context(&self) -> bool {
-        self.provider.kind() == ProviderKind::AgentBackend
-    }
-
-    /// Masks and summarizes everything but the pinned prefix and the recent turns now, whatever
-    /// the context size (`/compact`). Does nothing for an agent backend.
-    pub async fn compact(&self, session: &mut Session, cancel: CancellationToken) -> Compaction {
-        self.compact_with(session, &cancel, true)
-            .await
-            .unwrap_or_default()
-    }
-
-    /// Applies [`MemoryPolicy`]: masking, then summarizing, each when its threshold is passed
-    /// (`force`: regardless). `None` when nothing changed.
-    async fn compact_with(
-        &self,
-        session: &mut Session,
-        cancel: &CancellationToken,
-        force: bool,
-    ) -> Option<Compaction> {
-        if self.manages_own_context() {
-            return None;
-        }
-        let policy = self.config.memory;
-        let window = self.config.model_info.as_ref().map(|i| i.context_window);
-        let used = |s: &Session| match s.context_tokens {
-            0 => estimate_tokens(&s.messages),
-            n => n,
-        };
-        let over = |share: Option<f32>, tokens: u64| {
-            force
-                || matches!((share, window), (Some(share), Some(window))
-                    if tokens as f64 >= f64::from(window) * f64::from(share))
-        };
-        let mut done = Compaction {
-            tokens_before: used(session),
-            ..Compaction::default()
-        };
-        let end = recent_start(&session.messages, policy.keep_turns);
-        if over(policy.mask_at, done.tokens_before) {
-            done.masked = mask_tool_outputs(&mut session.messages, end);
-            if done.masked > 0 {
-                session.context_tokens = estimate_tokens(&session.messages);
-            }
-        }
-        if over(policy.summarize_at, used(session)) {
-            match self.summarize(session, cancel).await {
-                Ok(n) => done.summarized = n,
-                Err(err) => warn!(error = %err, "could not summarize older turns"),
-            }
-        }
-        if done.masked + done.summarized == 0 {
-            return None;
-        }
-        session.compactions += 1;
-        session.context_tokens = estimate_tokens(&session.messages);
-        done.tokens_after = session.context_tokens;
-        debug!(?done, "compacted the conversation");
-        Some(done)
-    }
-
-    /// Replaces the messages between the pinned prefix and the recent turns with one summary.
-    /// Returns how many messages it replaced.
-    async fn summarize(
-        &self,
-        session: &mut Session,
-        cancel: &CancellationToken,
-    ) -> Result<usize, AgentError> {
-        let start = pinned_len(&session.messages);
-        let end = recent_start(&session.messages, self.config.memory.keep_turns).max(start);
-        if end - start < 2 {
-            return Ok(0);
-        }
-        let request = ChatRequest {
-            model: self.config.model.clone(),
-            messages: vec![
-                Message::system(SUMMARY_PROMPT),
-                Message::user(transcript(&session.messages[start..end])),
-            ],
-            tools: Vec::new(),
-            max_output_tokens: self.config.max_output_tokens,
-        };
-        // The summary isn't shown to the user.
-        let (quiet, closed) = mpsc::channel(1);
-        drop(closed);
-        let mut output = StepOutput::default();
-        match self
-            .stream_step(request, session, &quiet, cancel, &mut output)
-            .await
-        {
-            StreamEnd::Done if !output.text.trim().is_empty() => {}
-            StreamEnd::Failed(err) => return Err(err.into()),
-            _ => return Ok(0),
-        }
-        let summary = Message::system(format!("{SUMMARY_HEADER}\n{}", output.text.trim()));
-        session.messages.splice(start..end, [summary]);
-        Ok(end - start)
-    }
-
-    /// Streams one model response into `output`, forwarding text and usage as it arrives.
-    async fn stream_step(
-        &self,
-        request: ChatRequest,
-        session: &mut Session,
-        events: &mpsc::Sender<AgentEvent>,
-        cancel: &CancellationToken,
-        output: &mut StepOutput,
-    ) -> StreamEnd {
-        let stream = tokio::select! {
-            biased;
-            _ = cancel.cancelled() => return StreamEnd::Cancelled,
-            stream = self.provider.stream(request, cancel.clone()) => stream,
-        };
-        let mut stream = match stream {
-            Ok(stream) => stream,
-            Err(ProviderError::Cancelled) => return StreamEnd::Cancelled,
-            Err(err) => return StreamEnd::Failed(err),
-        };
-
-        loop {
-            let event = tokio::select! {
-                biased;
-                _ = cancel.cancelled() => return StreamEnd::Cancelled,
-                event = stream.next() => event,
-            };
-            match event {
-                None if cancel.is_cancelled() => return StreamEnd::Cancelled,
-                None => return StreamEnd::Failed(ProviderError::UnexpectedEof),
-                Some(Err(ProviderError::Cancelled)) => return StreamEnd::Cancelled,
-                Some(Err(err)) => return StreamEnd::Failed(err),
-                Some(Ok(event)) => match event {
-                    StreamEvent::TextDelta(delta) => {
-                        output.text.push_str(&delta);
-                        let _ = events.send(AgentEvent::TextDelta(delta)).await;
-                    }
-                    StreamEvent::ToolCallStart { id, name } => {
-                        output.calls.push(PendingCall {
-                            id,
-                            name,
-                            args_json: String::new(),
-                        });
-                    }
-                    StreamEvent::ToolCallArgsDelta { id, json } => {
-                        if let Some(call) = output.calls.iter_mut().rev().find(|c| c.id == id) {
-                            call.args_json.push_str(&json);
-                        } else {
-                            warn!(%id, "arguments for an unknown tool call");
-                        }
-                    }
-                    StreamEvent::ToolCallEnd { .. } => {}
-                    StreamEvent::Usage(usage) => {
-                        session.record_usage(usage, self.config.priced_model());
-                        let _ = events.send(AgentEvent::Usage(usage)).await;
-                    }
-                    StreamEvent::ToolResult { id, .. } => {
-                        warn!(%id, "a model provider sent a tool result; ignored");
-                    }
-                    StreamEvent::Approval(record) => {
-                        warn!(call_id = %record.call_id, "a model provider sent an approval; ignored");
-                    }
-                    StreamEvent::ApprovalPending(PendingApproval { request_id, .. })
-                    | StreamEvent::ApprovalResolved { request_id, .. } => {
-                        warn!(%request_id, "a model provider sent an approval prompt; ignored");
-                    }
-                    StreamEvent::Done(reason) => {
-                        debug!(?reason, "model response done");
-                        return StreamEnd::Done;
-                    }
-                },
-            }
-        }
-    }
-
-    /// One turn with an agent backend ([`ProviderKind::AgentBackend`]): a single stream for the
-    /// whole turn, whose tool calls, results and approvals are forwarded as [`AgentEvent`]s. The
-    /// backend runs the tools (rozu's own, through MCP), so nothing executes here.
-    ///
-    /// Only the assistant's text is kept in the session; the backend keeps its own record of
-    /// the tool calls.
-    async fn backend_turn(
-        &self,
-        session: &mut Session,
-        events: &mpsc::Sender<AgentEvent>,
-        cancel: CancellationToken,
-    ) -> Result<TurnOutcome, AgentError> {
-        let request = ChatRequest {
-            model: self.config.model.clone(),
-            messages: session.messages.clone(),
-            tools: Vec::new(),
-            max_output_tokens: self.config.max_output_tokens,
-        };
-        let mut output = StepOutput::default();
-        let end = self
-            .stream_backend(request, session, events, &cancel, &mut output)
-            .await;
-        keep_partial_text(session, output.text);
-        match end {
-            StreamEnd::Done => Ok(finish(events, TurnOutcome::Completed).await),
-            StreamEnd::Cancelled => Ok(finish(events, TurnOutcome::Cancelled).await),
-            StreamEnd::Failed(err) => {
-                warn!(error = %err, "agent backend turn failed");
-                Err(err.into())
-            }
-        }
-    }
-
-    async fn stream_backend(
-        &self,
-        request: ChatRequest,
-        session: &mut Session,
-        events: &mpsc::Sender<AgentEvent>,
-        cancel: &CancellationToken,
-        output: &mut StepOutput,
-    ) -> StreamEnd {
-        let stream = tokio::select! {
-            biased;
-            _ = cancel.cancelled() => return StreamEnd::Cancelled,
-            stream = self.provider.stream(request, cancel.clone()) => stream,
-        };
-        let mut stream = match stream {
-            Ok(stream) => stream,
-            Err(ProviderError::Cancelled) => return StreamEnd::Cancelled,
-            Err(err) => return StreamEnd::Failed(err),
-        };
-        loop {
-            let event = tokio::select! {
-                biased;
-                _ = cancel.cancelled() => return StreamEnd::Cancelled,
-                event = stream.next() => event,
-            };
-            let event = match event {
-                None if cancel.is_cancelled() => return StreamEnd::Cancelled,
-                None => return StreamEnd::Failed(ProviderError::UnexpectedEof),
-                Some(Err(ProviderError::Cancelled)) => return StreamEnd::Cancelled,
-                Some(Err(err)) => return StreamEnd::Failed(err),
-                Some(Ok(event)) => event,
-            };
-            let forward = match event {
-                StreamEvent::TextDelta(delta) => {
-                    output.text.push_str(&delta);
-                    AgentEvent::TextDelta(delta)
-                }
-                StreamEvent::ToolCallStart { id, name } => {
-                    output.calls.push(PendingCall {
-                        id,
-                        name,
-                        args_json: String::new(),
-                    });
-                    continue;
-                }
-                StreamEvent::ToolCallArgsDelta { id, json } => {
-                    if let Some(call) = output.calls.iter_mut().rev().find(|c| c.id == id) {
-                        call.args_json.push_str(&json);
-                    }
-                    continue;
-                }
-                StreamEvent::ToolCallEnd { id } => {
-                    let Some(call) = output.calls.iter().rev().find(|c| c.id == id) else {
-                        warn!(%id, "end of an unknown tool call");
-                        continue;
-                    };
-                    AgentEvent::ToolCallStarted {
-                        id: call.id.clone(),
-                        name: call.name.clone(),
-                        args_json: call.args_json.clone(),
-                    }
-                }
-                StreamEvent::ToolResult {
-                    id,
-                    output: text,
-                    is_error,
-                } => {
-                    let name = output
-                        .calls
-                        .iter()
-                        .rev()
-                        .find(|c| c.id == id)
-                        .map(|c| c.name.clone())
-                        .unwrap_or_default();
-                    AgentEvent::ToolCallFinished {
-                        id,
-                        name,
-                        output: truncate_head_tail(&text, self.config.max_tool_output_bytes)
-                            .into_owned(),
-                        is_error,
-                    }
-                }
-                StreamEvent::Approval(record) => AgentEvent::Approval(record),
-                StreamEvent::ApprovalPending(pending) => AgentEvent::ApprovalPending(pending),
-                StreamEvent::ApprovalResolved {
-                    request_id,
-                    resolution,
-                } => AgentEvent::ApprovalResolved {
-                    request_id,
-                    resolution,
-                },
-                StreamEvent::Usage(usage) => {
-                    session.record_usage(usage, self.config.priced_model());
-                    AgentEvent::Usage(usage)
-                }
-                StreamEvent::Done(reason) => {
-                    debug!(?reason, "agent backend turn done");
-                    return StreamEnd::Done;
-                }
-            };
-            let _ = events.send(forward).await;
-        }
     }
 }
 

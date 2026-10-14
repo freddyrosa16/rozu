@@ -21,6 +21,7 @@ rozu-mcp = { path = "crates/rozu-mcp" }
 rozu-providers = { path = "crates/rozu-providers" }
 rozu-tools = { path = "crates/rozu-tools" }
 rozu-pty = { path = "crates/rozu-pty" }
+rozu-runtime = { path = "crates/rozu-runtime" }
 rozu-secrets = { path = "crates/rozu-secrets" }
 rozu-store = { path = "crates/rozu-store" }
 

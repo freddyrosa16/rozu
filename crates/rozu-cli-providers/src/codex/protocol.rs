@@ -24,59 +24,12 @@ use tracing::{debug, info, warn};
 pub const LOGIN_HINT: &str = "run `rozu auth login codex` (it runs the official `codex login`; \
      rozu never handles ChatGPT credentials)";
 
-/// The JSON-RPC error code rozu answers unsupported server requests with.
-pub const METHOD_NOT_FOUND: i64 = -32601;
+pub use crate::jsonrpc::{Incoming, METHOD_NOT_FOUND};
 
 /// Tool name rozu shows for a Codex shell command.
 pub const SHELL_TOOL: &str = "codex:shell";
 /// Tool name rozu shows for a Codex file change (its `apply_patch`).
 pub const PATCH_TOOL: &str = "codex:apply_patch";
-
-/// One message from the app-server.
-#[derive(Debug, Clone, PartialEq)]
-pub enum Incoming {
-    /// The answer to one of rozu's requests.
-    Response {
-        id: Value,
-        result: Result<Value, String>,
-    },
-    /// A server → client request rozu must answer.
-    Request {
-        id: Value,
-        method: String,
-        params: Value,
-    },
-    Notification {
-        method: String,
-        params: Value,
-    },
-}
-
-impl Incoming {
-    /// `None` for something that isn't a JSON-RPC message.
-    pub fn parse(message: Value) -> Option<Self> {
-        let Value::Object(mut map) = message else {
-            return None;
-        };
-        let method = map.get("method").and_then(Value::as_str).map(str::to_owned);
-        let params = map.remove("params").unwrap_or(Value::Null);
-        match (method, map.remove("id")) {
-            (Some(method), Some(id)) => Some(Self::Request { id, method, params }),
-            (Some(method), None) => Some(Self::Notification { method, params }),
-            (None, Some(id)) => {
-                let result = match (map.remove("result"), map.remove("error")) {
-                    (_, Some(error)) => Err(error["message"]
-                        .as_str()
-                        .map_or_else(|| error.to_string(), str::to_owned)),
-                    (Some(result), None) => Ok(result),
-                    (None, None) => return None,
-                };
-                Some(Self::Response { id, result })
-            }
-            (None, None) => None,
-        }
-    }
-}
 
 pub fn request(id: u64, method: &str, params: Value) -> Value {
     json!({ "id": id, "method": method, "params": params })
@@ -472,37 +425,6 @@ fn tool_result(item: &Value) -> (String, bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn parses_messages() {
-        assert_eq!(
-            Incoming::parse(json!({"id": 1, "result": {"ok": true}})),
-            Some(Incoming::Response {
-                id: json!(1),
-                result: Ok(json!({"ok": true}))
-            })
-        );
-        assert_eq!(
-            Incoming::parse(json!({"error": {"code": -1, "message": "no"}, "id": 2})),
-            Some(Incoming::Response {
-                id: json!(2),
-                result: Err("no".into())
-            })
-        );
-        assert!(matches!(
-            Incoming::parse(json!({"id": "s1", "method": "execCommandApproval", "params": {}})),
-            Some(Incoming::Request { method, .. }) if method == "execCommandApproval"
-        ));
-        assert!(matches!(
-            Incoming::parse(json!({"method": "turn/started"})),
-            Some(Incoming::Notification {
-                params: Value::Null,
-                ..
-            })
-        ));
-        assert_eq!(Incoming::parse(json!([1])), None);
-        assert_eq!(Incoming::parse(json!({"id": 3})), None);
-    }
 
     #[test]
     fn usage_maps_fields_and_turn_deltas() {

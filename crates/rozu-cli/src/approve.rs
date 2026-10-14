@@ -254,11 +254,11 @@ pub struct Keys {
 
 impl Keys {
     pub fn for_request(req: &ApprovalRequest) -> Self {
+        let options = rozu_runtime::ApprovalOptions::for_request(req);
         Self {
-            // After a sandbox block, `y` would just repeat the blocked run.
-            approve: !req.blocked_retry,
-            always_allow: req.allow_rule.is_some() && !req.blocked_retry,
-            unsandboxed: req.can_run_unsandboxed(),
+            approve: options.approve,
+            always_allow: options.always_allow,
+            unsandboxed: options.unsandboxed,
         }
     }
 

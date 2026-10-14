@@ -16,12 +16,18 @@ rozu-activity.workspace = true
 rozu-cli-providers.workspace = true
 rozu-core.workspace = true
 rozu-providers.workspace = true
+rozu-runtime.workspace = true
 rozu-secrets.workspace = true
+rozu-store.workspace = true
 rozu-tools.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
+
+[dev-dependencies]
+futures.workspace = true
+
 
 # GPUI only builds on macOS here; elsewhere the binary just says so.
 [target.'cfg(target_os = "macos")'.dependencies]

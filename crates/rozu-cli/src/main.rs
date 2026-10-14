@@ -55,10 +55,11 @@ enum Command {
 }
 
 /// Name and version of every crate linked into this binary.
-fn crate_versions() -> [(&'static str, &'static str); 9] {
+fn crate_versions() -> [(&'static str, &'static str); 10] {
     [
         ("rozu-cli", env!("CARGO_PKG_VERSION")),
         ("rozu-core", rozu_core::VERSION),
+        ("rozu-runtime", rozu_runtime::VERSION),
         ("rozu-providers", rozu_providers::VERSION),
         ("rozu-cli-providers", rozu_cli_providers::VERSION),
         ("rozu-mcp", rozu_mcp::VERSION),

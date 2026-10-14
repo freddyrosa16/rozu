@@ -53,10 +53,14 @@ impl RetryPolicy {
                 .and_then(|v| v.trim().parse::<f64>().ok())
                 .filter(|v| v.is_finite() && *v >= 0.0)
         };
-        let delay = header("retry-after-ms")
-            .map(|ms| Duration::from_secs_f64(ms / 1000.0))
-            .or_else(|| header("retry-after").map(Duration::from_secs_f64))?;
-        Some(delay.min(self.max_delay))
+        let seconds = header("retry-after-ms")
+            .map(|ms| ms / 1000.0)
+            .or_else(|| header("retry-after"))?;
+        Some(
+            Duration::try_from_secs_f64(seconds)
+                .unwrap_or(self.max_delay)
+                .min(self.max_delay),
+        )
     }
 }
 
@@ -188,5 +192,17 @@ mod tests {
             HeaderValue::from_static("Wed, 21 Oct 2015 07:28:00 GMT"),
         );
         assert_eq!(policy.retry_after(&headers), None);
+    }
+
+    #[test]
+    fn retry_after_caps_values_larger_than_a_duration() {
+        let policy = RetryPolicy::default();
+        for name in ["retry-after", "retry-after-ms"] {
+            for value in ["1e300", "184467440737095516160000"] {
+                let mut headers = HeaderMap::new();
+                headers.insert(name, HeaderValue::from_str(value).unwrap());
+                assert_eq!(policy.retry_after(&headers), Some(policy.max_delay));
+            }
+        }
     }
 }
