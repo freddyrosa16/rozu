@@ -6,10 +6,11 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use gpui::{
-    AnyElement, App, Application, Bounds, Context, Div, Entity, FocusHandle, Focusable, KeyBinding,
-    Menu, MenuItem, MouseButton, PathPromptOptions, PromptLevel, ScrollHandle, SharedString,
-    Stateful, Subscription, Svg, Task, TitlebarOptions, Window, WindowBounds, WindowOptions,
-    actions, deferred, div, point, prelude::*, px, relative, rgb, size, svg,
+    AnyElement, App, Application, Bounds, Context, Corner, Div, Entity, FocusHandle, Focusable,
+    KeyBinding, Menu, MenuItem, MouseButton, PathPromptOptions, PromptLevel, ScrollHandle,
+    SharedString, Stateful, Subscription, Svg, Task, TitlebarOptions, Window, WindowBounds,
+    WindowOptions, actions, anchored, deferred, div, point, prelude::*, px, relative, rgb, size,
+    svg,
 };
 use rozu_activity::ActivityState;
 use rozu_core::{ApprovalRequest, Decision};
@@ -96,8 +97,10 @@ struct Rozu {
     choice: Option<ModelChoice>,
     effort: Option<String>,
     menu: bool,
-    /// The provider whose models the menu shows.
-    menu_tab: Option<&'static str>,
+    /// The model menu's search box, and the window height it must fit in.
+    search: Entity<Composer>,
+    viewport_h: f32,
+    _search: Subscription,
     /// Codex's own model list, once it answered.
     live: backend::Live,
     /// The plan picked on the setup page, and what each plan's CLI says.
@@ -120,6 +123,17 @@ impl Rozu {
         let sent = cx.subscribe(&composer, |this, _, Sent(text), cx| {
             this.send(text.clone(), cx)
         });
+        let search = cx.new(|cx| {
+            let mut c = Composer::new(cx);
+            c.placeholder = "Search models".into();
+            c
+        });
+        let search_sub = cx.subscribe(&search, |this, _, Sent(query), cx| {
+            if let Some(m) = this.matches(query).into_iter().next() {
+                this.choose(m, cx);
+            }
+        });
+        cx.observe(&search, |_, _, cx| cx.notify()).detach();
         window.focus(&composer.focus_handle(cx));
         let mut settings = Settings::load();
         if let Some(root) = launch.clone()
@@ -144,7 +158,9 @@ impl Rozu {
             providers: backend::providers(),
             choice,
             menu: false,
-            menu_tab: None,
+            search,
+            viewport_h: 800.,
+            _search: search_sub,
             live: Vec::new(),
             plan: PLANS[0].id,
             access: HashMap::new(),
@@ -862,15 +878,26 @@ impl Rozu {
                     .cursor_pointer()
                     .child(model)
                     .child(icon("down", INK2))
-                    .on_click(cx.listener(|this, _, _, cx| {
+                    .on_click(cx.listener(|this, _, window, cx| {
                         this.providers = backend::providers();
                         this.menu = true;
-                        this.menu_tab = this.choice.as_ref().map(|c| c.provider.id);
+                        this.search.update(cx, |s, cx| s.set_text("", cx));
+                        window.focus(&this.search.focus_handle(cx));
                         cx.notify();
                     })),
             )
             .when(self.menu, |d| {
-                d.child(deferred(self.model_menu(cx)).with_priority(2))
+                d.child(
+                    div().absolute().top(px(-8.)).right_0().child(
+                        deferred(
+                            anchored()
+                                .anchor(Corner::BottomRight)
+                                .snap_to_window_with_margin(px(8.))
+                                .child(self.model_menu(cx)),
+                        )
+                        .with_priority(2),
+                    ),
+                )
             });
         let go = div()
             .id("go")
@@ -925,58 +952,43 @@ impl Rozu {
         }
     }
 
-    /// The model and effort menu above the composer's picker.
+    /// Every model the menu can offer that matches `query`, grouped by provider.
+    fn matches(&self, query: &str) -> Vec<ModelChoice> {
+        let query = query.trim().to_lowercase();
+        self.providers
+            .iter()
+            .flat_map(|p| backend::models(p, &self.live))
+            .filter(|m| {
+                let name = format!(
+                    "{} {} {}",
+                    backend::provider_name(m.provider),
+                    backend::model_name(&m.model, &self.live),
+                    m.model
+                );
+                query.is_empty() || name.to_lowercase().contains(&query)
+            })
+            .collect()
+    }
+
+    /// The model menu, like Cursor's: a search box, a scrolling list grouped by provider, and
+    /// the effort for the chosen model. Kept inside the window.
     fn model_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let query = self.search.read(cx).text.clone();
+        let models = self.matches(&query);
         let mut list = div()
-            .id("model-menu")
-            .absolute()
-            .bottom(px(28.))
-            .right_0()
-            .w(px(280.))
-            .max_h(px(460.))
+            .id("model-list")
+            .flex_1()
+            .min_h_0()
             .overflow_y_scroll()
-            .occlude()
-            .bg(rgb(RAISE))
-            .border_1()
-            .border_color(rgb(LINE))
-            .rounded(px(12.))
             .p_1()
             .flex()
             .flex_col();
-        if self.providers.is_empty() {
-            list = list.child(
-                div()
-                    .p_2()
-                    .text_color(rgb(INK3))
-                    .text_size(px(14.))
-                    .child("No AI is set up. Click the gear to pick one."),
-            );
-        }
-        let tab = self
-            .menu_tab
-            .and_then(|id| self.providers.iter().find(|p| p.id == id))
-            .or(self.providers.first())
-            .copied();
-        if self.providers.len() > 1 {
-            list = list.child(div().flex().flex_wrap().gap_1().p_1().pb_2().children(
-                self.providers.iter().map(|p| {
-                    let id = p.id;
-                    chip(
-                        SharedString::from(format!("tab:{id}")),
-                        backend::provider_name(p),
-                        tab.is_some_and(|t| t.id == id),
-                    )
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.menu_tab = Some(id);
-                        cx.notify();
-                    }))
-                }),
-            ));
-        }
-        for m in tab
-            .map(|p| backend::models(p, &self.live))
-            .unwrap_or_default()
-        {
+        let mut last = "";
+        for m in models.iter().cloned() {
+            if m.provider.id != last {
+                last = m.provider.id;
+                list = list.child(menu_heading(backend::provider_name(m.provider)));
+            }
             let on = self.choice.as_ref() == Some(&m);
             let key = SharedString::from(format!("m:{}", m.spec()));
             let label = backend::model_name(&m.model, &self.live);
@@ -986,29 +998,75 @@ impl Rozu {
                     .flex()
                     .items_center()
                     .px_2()
-                    .py(px(5.))
-                    .rounded(px(8.))
-                    .text_size(px(14.))
+                    .py(px(4.))
+                    .rounded(px(6.))
+                    .text_size(px(13.))
                     .cursor_pointer()
                     .hover(|s| s.bg(rgb(LINE)))
-                    .child(div().flex_1().child(label))
+                    .when(on, |r| r.bg(rgb(LINE)))
+                    .child(div().flex_1().truncate().child(label))
                     .when(on, |r| r.child(icon("check", INK)))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.choose(m.clone(), cx);
-                    })),
+                    .on_click(cx.listener(move |this, _, _, cx| this.choose(m.clone(), cx))),
             );
         }
-        if let Some(choice) = &self.choice
-            && tab.is_some_and(|t| t.id == choice.provider.id)
-        {
-            let efforts = backend::efforts(choice.provider.id);
-            if !efforts.is_empty() {
-                list = list
-                    .child(menu_heading("Effort"))
-                    .child(self.effort_chips(efforts, cx).px_2().pb_2());
-            }
+        if models.is_empty() {
+            list = list.child(div().p_2().text_size(px(13.)).text_color(rgb(INK3)).child(
+                if self.providers.is_empty() {
+                    "No AI is set up. Click the gear to pick one."
+                } else {
+                    "No models match."
+                },
+            ));
         }
-        list
+        let efforts = self
+            .choice
+            .as_ref()
+            .map_or(&[][..], |c| backend::efforts(c.provider.id));
+        div()
+            .id("model-menu")
+            .occlude()
+            .w(px(300.))
+            .max_h(px((self.viewport_h - 120.).clamp(160., 420.)))
+            .bg(rgb(RAISE))
+            .border_1()
+            .border_color(rgb(LINE))
+            .rounded(px(12.))
+            .shadow_lg()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .px_3()
+                    .py_2()
+                    .border_b_1()
+                    .border_color(rgb(LINE))
+                    .text_size(px(13.))
+                    .child(icon("search", INK3))
+                    .child(self.search.clone()),
+            )
+            .child(list)
+            .when(!efforts.is_empty(), |d| {
+                d.child(
+                    div()
+                        .border_t_1()
+                        .border_color(rgb(LINE))
+                        .px_2()
+                        .py_2()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(
+                            div()
+                                .text_size(px(12.))
+                                .text_color(rgb(INK3))
+                                .child("Effort"),
+                        )
+                        .child(self.effort_chips(efforts, cx)),
+                )
+            })
     }
 
     fn effort_chips(&self, efforts: &'static [&'static str], cx: &mut Context<Self>) -> Div {
@@ -1263,7 +1321,8 @@ impl Rozu {
 }
 
 impl Render for Rozu {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.viewport_h = window.viewport_size().height.into();
         let main = match self.page {
             Page::Thread(id) => self.thread_page(id, cx).into_any_element(),
             Page::Home => self.home_page(cx).into_any_element(),
@@ -1290,8 +1349,9 @@ impl Render for Rozu {
                             .left_0()
                             .size_full()
                             .occlude()
-                            .on_click(cx.listener(|this, _, _, cx| {
+                            .on_click(cx.listener(|this, _, window, cx| {
                                 this.menu = false;
+                                window.focus(&this.composer.focus_handle(cx));
                                 cx.notify();
                             })),
                     )
