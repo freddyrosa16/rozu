@@ -111,6 +111,9 @@ struct Rozu {
     /// The model menu's search box, and the window height it must fit in.
     search: Entity<Composer>,
     viewport_h: f32,
+    /// The chat column's inner width. Text gets it as a fixed width: GPUI wraps text at the
+    /// width it was offered, which inside the scrolling feed is wider than the column.
+    text_w: f32,
     _search: Subscription,
     /// Codex's own model list, once it answered.
     live: backend::Live,
@@ -171,6 +174,7 @@ impl Rozu {
             menu: false,
             search,
             viewport_h: 800.,
+            text_w: 700.,
             _search: search_sub,
             live: Vec::new(),
             plan: PLANS[0].id,
@@ -733,9 +737,10 @@ impl Rozu {
                 .rounded(px(14.))
                 .px(px(18.))
                 .py(px(12.))
+                .w(px(self.text_w))
                 .child(text.clone())
                 .into_any_element(),
-            Item::Text(text) => rich(text).into_any_element(),
+            Item::Text(text) => rich(text, self.text_w).into_any_element(),
             Item::Note(text) => div()
                 .text_color(rgb(INK3))
                 .text_size(px(14.))
@@ -1283,6 +1288,13 @@ impl Rozu {
 impl Render for Rozu {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.viewport_h = window.viewport_size().height.into();
+        let side = if self.settings.provider.is_some() {
+            270.
+        } else {
+            0.
+        };
+        let main_w = f32::from(window.viewport_size().width) - side;
+        self.text_w = main_w.min(760.) - 56.;
         let main = match self.page {
             Page::Thread(id) => self.thread_page(id, cx).into_any_element(),
             Page::Home => self.home_page(cx).into_any_element(),
@@ -1444,36 +1456,36 @@ fn step_row(i: usize, step: &Step) -> Div {
 }
 
 /// The agent's reply, Markdown drawn as paragraphs, headings, lists and code blocks.
-fn rich(text: &str) -> Div {
+fn rich(text: &str, w: f32) -> Div {
     div()
-        .w_full()
-        .min_w_0()
+        .w(px(w))
         .flex()
         .flex_col()
         .gap(px(10.))
         .line_height(relative(1.6))
         .children(markdown::parse(text).into_iter().map(|block| {
             match block {
-                Block::Para(t) => div().w_full().child(spans(t)),
+                Block::Para(t) => div().w(px(w)).child(spans(t)),
                 Block::Heading(t) => div()
-                    .w_full()
+                    .w(px(w))
                     .pt(px(6.))
                     .font_weight(FontWeight::SEMIBOLD)
                     .child(spans(t)),
                 Block::Item(marker, t) => div()
-                    .w_full()
+                    .w(px(w))
                     .flex()
                     .gap(px(10.))
                     .child(
                         div()
                             .flex_none()
-                            .min_w(px(14.))
+                            .w(px(14.))
                             .text_color(rgb(INK3))
                             .child(marker),
                     )
-                    .child(div().flex_1().min_w_0().child(spans(t))),
+                    .child(div().w(px(w - 24.)).child(spans(t))),
                 Block::Code(code) => div()
-                    .w_full()
+                    .w(px(w))
+                    .overflow_hidden()
                     .bg(rgb(CODE_BG))
                     .border_1()
                     .border_color(rgb(LINE))
