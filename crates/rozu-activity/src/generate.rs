@@ -1,8 +1,8 @@
 //! Per-state point generators, ported 1:1 from `docs/design/v7.5/reference/v7.5-orb.js`.
 //!
 //! Every state is the same object: a globe of small matte dots on lines of latitude
-//! ([`OrbSize::grid`]), and the state is what the globe is doing. Done and Error gather the dots
-//! into a check or a cross, with the rest resting on a faint ring. There are two sizes, tuned
+//! ([`OrbSize::grid`]), and the state is what the globe is doing; Done and Error are the full
+//! globe in green and red (filling up with a pop, or shaking once). There are two sizes, tuned
 //! separately rather than scaled: [`OrbSize::Large`] (15 rings) and [`OrbSize::Small`] (the 22px
 //! pill, 9 rings). The arithmetic (including JS's truncating `%`) is kept as in the reference so
 //! samples match it at the same `t`.
@@ -21,9 +21,6 @@ pub const CAMERA: f64 = 3.2;
 pub const R: f64 = 0.9;
 /// The globe's tilt toward the camera (rad).
 const TILT: f64 = 0.3;
-/// The plane Done's and Error's flat symbols sit on (toward the camera).
-pub const GLYPH_Z: f64 = 0.3;
-
 /// Which tuned point set to draw: each size is its own dot grid, not a subsample.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum OrbSize {
@@ -162,8 +159,6 @@ fn dot(p: Vec3, lit: f64, s: f64, a: f64) -> Dot {
     Dot { p, lit, s, a }
 }
 
-type Pt = [f64; 2];
-
 /// Dot `i`'s unit direction before the spin.
 fn dir(size: OrbSize, i: usize) -> Vec3 {
     let (phi, lam, _) = size.grid(i);
@@ -194,69 +189,6 @@ fn geo(size: OrbSize, i: usize, phi0: f64, lam0: f64) -> f64 {
 fn front(size: OrbSize, i: usize, yaw: f64) -> f64 {
     let a = size.grid(i).1 - yaw - PI / 2.0;
     a.sin().atan2(a.cos())
-}
-
-/// The point at arc-length fraction `u` along a set of polylines, taken as one path.
-fn along(strokes: &[&[Pt]], u: f64) -> Pt {
-    let mut segs: Vec<(Pt, Pt, f64)> = Vec::new();
-    let mut total = 0.0;
-    for pts in strokes {
-        for w in pts.windows(2) {
-            let l = (w[1][0] - w[0][0]).hypot(w[1][1] - w[0][1]);
-            segs.push((w[0], w[1], l));
-            total += l;
-        }
-    }
-    let mut d = u * total;
-    for (k, &(a, b, l)) in segs.iter().enumerate() {
-        if d <= l || k == segs.len() - 1 {
-            let f = if l != 0.0 { cl(d / l) } else { 0.0 };
-            return [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f];
-        }
-        d -= l;
-    }
-    strokes[0][0]
-}
-
-const CHECK: &[Pt] = &[[-0.46, 0.02], [-0.14, -0.32], [0.48, 0.34]];
-const CROSS: &[&[Pt]] = &[
-    &[[-0.36, 0.36], [0.36, -0.36]],
-    &[[0.36, 0.36], [-0.36, -0.36]],
-];
-
-/// Done and Error: the first `share` of the dots draw the symbol (those with `u ≤ drawn` lit),
-/// the rest rest on a faint dotted ring. `dx` shifts the whole frame, `pop` swells the symbol.
-#[allow(clippy::too_many_arguments)]
-fn symbol(
-    size: OrbSize,
-    i: usize,
-    strokes: &[&[Pt]],
-    share: f64,
-    dx: f64,
-    drawn: f64,
-    pop: f64,
-    lit_off: f64,
-) -> Dot {
-    let total = size.dots();
-    let n = (total as f64 * share).round() as usize;
-    if i < n {
-        let u = i as f64 / (n - 1) as f64;
-        let xy = along(strokes, u);
-        let on = u <= drawn;
-        return dot(
-            [xy[0] + dx, xy[1], GLYPH_Z],
-            if on { 1.0 } else { lit_off },
-            (if on { 1.2 } else { 0.6 }) * (1.0 + 0.2 * pop) * size.dot(),
-            if on { 1.0 } else { 0.35 },
-        );
-    }
-    let a = PI / 2.0 - TAU * (i - n) as f64 / (total - n) as f64;
-    dot(
-        [R * a.cos() + dx, R * a.sin(), GLYPH_Z],
-        0.0,
-        0.7 * size.dot(),
-        0.3,
-    )
 }
 
 /// The breathing globe at breath `b` (0 small and dim, 1 full and bright): Waiting, and what Done
@@ -361,25 +293,17 @@ pub fn generate(size: OrbSize, state: ActivityState, i: usize, t: f64) -> Dot {
         }
         // The globe stops and breathes, asking for you.
         ActivityState::Waiting => breath(size, i, 0.5 + 0.5 * (TAU * t / 1.8).sin()),
-        // The dots gather into a check that draws itself, pops, then holds.
+        // The globe fills up green over .5s, pops once, then holds.
         ActivityState::Done => {
-            let pop = if t > 0.7 && t < 0.95 {
-                (PI * (t - 0.7) / 0.25).sin()
+            let d = breath(size, i, cl(t / 0.5));
+            let pop = if t > 0.5 && t < 0.8 {
+                (PI * (t - 0.5) / 0.3).sin()
             } else {
                 0.0
             };
-            symbol(
-                size,
-                i,
-                &[CHECK],
-                0.42,
-                0.0,
-                cl((t - 0.25) / 0.45),
-                pop,
-                0.25,
-            )
+            dot(d.p, d.lit, d.s * (1.0 + 0.15 * pop), d.a)
         }
-        // A cross that shakes once, like a head saying no, then holds.
+        // The full red globe shakes once, like a head saying no, then holds.
         ActivityState::Error => {
             let st = t - 0.3;
             let dx = if st > 0.0 && st < 0.9 {
@@ -387,7 +311,8 @@ pub fn generate(size: OrbSize, state: ActivityState, i: usize, t: f64) -> Dot {
             } else {
                 0.0
             };
-            symbol(size, i, CROSS, 0.42, dx, 1.0, 0.0, 1.0)
+            let d = breath(size, i, 1.0);
+            dot([d.p[0] + dx, d.p[1], d.p[2]], d.lit, d.s, d.a)
         }
         // The globe dims and its rings drop out, one flicker at a time.
         ActivityState::Offline => {
@@ -529,14 +454,14 @@ mod tests {
             (Large, Waiting, 0.37, [-14.5960441811, 1711.9953931708, 407.5953542926, 4159.0518130180, 6899.4116207947, 5978.1785932715]),
             (Large, Waiting, 1.1, [-13.9066476933, 1631.1348807954, 388.3439186162, 1743.0098338957, 5691.3906312336, 4045.3450099737]),
             (Large, Waiting, 2.9, [-13.9066476933, 1631.1348807954, 388.3439186162, 1743.0098338957, 5691.3906312336, 4045.3450099737]),
-            (Large, Done, 0.0, [-385.9049567676, 19.8430811385, 1807.4571428571, 281.2500000000, 4105.8000000000, 1864.2071428571]),
-            (Large, Done, 0.37, [-385.9049567676, 19.8430811385, 1807.4571428571, 357.6428571429, 4166.9142857143, 1930.4142857143]),
-            (Large, Done, 1.1, [-385.9049567676, 19.8430811385, 1807.4571428571, 1122.0000000000, 4778.4000000000, 2592.8571428571]),
-            (Large, Done, 2.9, [-385.9049567676, 19.8430811385, 1807.4571428571, 1122.0000000000, 4778.4000000000, 2592.8571428571]),
-            (Large, Error, 0.0, [-560.4261061174, -76.7442857143, 1807.4571428571, 1122.0000000000, 4778.4000000000, 2592.8571428571]),
-            (Large, Error, 0.37, [-49.7705408654, -76.7442857143, 1807.4571428571, 1122.0000000000, 4778.4000000000, 2592.8571428571]),
-            (Large, Error, 1.1, [-566.1291950579, -76.7442857143, 1807.4571428571, 1122.0000000000, 4778.4000000000, 2592.8571428571]),
-            (Large, Error, 2.9, [-560.4261061174, -76.7442857143, 1807.4571428571, 1122.0000000000, 4778.4000000000, 2592.8571428571]),
+            (Large, Done, 0.0, [-13.7531231312, 1613.1277180440, 384.0567365883, 1204.9714285714, 5422.3714285714, 3614.9142857143]),
+            (Large, Done, 0.37, [-14.3892050760, 1687.7348750035, 401.8193606555, 3434.1685714286, 6536.9700000000, 5398.2720000000]),
+            (Large, Done, 1.1, [-14.6126933269, 1713.9482004218, 408.0602826251, 4217.4000000000, 6928.5857142857, 6024.8571428571]),
+            (Large, Done, 2.9, [-14.6126933269, 1713.9482004218, 408.0602826251, 4217.4000000000, 6928.5857142857, 6024.8571428571]),
+            (Large, Error, 0.0, [-14.6126933269, 1713.9482004218, 408.0602826251, 4217.4000000000, 6928.5857142857, 6024.8571428571]),
+            (Large, Error, 0.37, [496.0428719251, 1713.9482004218, 408.0602826251, 4217.4000000000, 6928.5857142857, 6024.8571428571]),
+            (Large, Error, 1.1, [-20.3157822674, 1713.9482004218, 408.0602826251, 4217.4000000000, 6928.5857142857, 6024.8571428571]),
+            (Large, Error, 2.9, [-14.6126933269, 1713.9482004218, 408.0602826251, 4217.4000000000, 6928.5857142857, 6024.8571428571]),
             (Large, Offline, 0.0, [-13.1800763340, 1545.9140631255, 368.0543725638, 0.0000000000, 2909.0642857143, 1540.0928571429]),
             (Large, Offline, 0.37, [-17.8379005017, 1545.7105347446, 368.7123244887, 0.0000000000, 2909.0642857143, 1540.0928571429]),
             (Large, Offline, 1.1, [-26.9158798983, 1545.1308807063, 370.5861884121, 0.0000000000, 3659.2500000000, 1937.2500000000]),
@@ -565,14 +490,14 @@ mod tests {
             (Small, Waiting, 0.37, [-4.3690411786, 165.1608447226, 33.2122014565, 419.8103942718, 800.8824052777, 603.4311725603]),
             (Small, Waiting, 1.1, [-4.1626837844, 157.3600115066, 31.6435315654, 175.9376123416, 660.6555556678, 408.3329470161]),
             (Small, Waiting, 2.9, [-4.1626837844, 157.3600115066, 31.6435315654, 175.9376123416, 660.6555556678, 408.3329470161]),
-            (Small, Done, 0.0, [-34.9118816494, -0.8544128669, 182.4428571429, 32.2500000000, 475.7550000000, 189.3928571429]),
-            (Small, Done, 0.37, [-34.9118816494, -0.8544128669, 182.4428571429, 43.8214285714, 486.4007142857, 199.4214285714]),
-            (Small, Done, 1.1, [-34.9118816494, -0.8544128669, 182.4428571429, 126.0000000000, 562.0050000000, 270.6428571429]),
-            (Small, Done, 2.9, [-34.9118816494, -0.8544128669, 182.4428571429, 126.0000000000, 562.0050000000, 270.6428571429]),
-            (Small, Error, 0.0, [-52.3856084267, -9.3857142857, 182.4428571429, 126.0000000000, 562.0050000000, 270.6428571429]),
-            (Small, Error, 0.37, [-0.8405631078, -9.3857142857, 182.4428571429, 126.0000000000, 562.0050000000, 270.6428571429]),
-            (Small, Error, 1.1, [-52.9612723339, -9.3857142857, 182.4428571429, 126.0000000000, 562.0050000000, 270.6428571429]),
-            (Small, Error, 2.9, [-52.3856084267, -9.3857142857, 182.4428571429, 126.0000000000, 562.0050000000, 270.6428571429]),
+            (Small, Done, 0.0, [-4.1167292007, 155.6228116152, 31.2941979636, 121.6285714286, 629.4278571429, 364.8857142857]),
+            (Small, Done, 0.37, [-4.3071279262, 162.8203666524, 32.7415546195, 346.6414285714, 758.8102500000, 544.8960000000]),
+            (Small, Done, 1.1, [-4.3740247758, 165.3492373412, 33.2500853364, 425.7000000000, 804.2689285714, 608.1428571429]),
+            (Small, Done, 2.9, [-4.3740247758, 165.3492373412, 33.2500853364, 425.7000000000, 804.2689285714, 608.1428571429]),
+            (Small, Error, 0.0, [-4.3740247758, 165.3492373412, 33.2500853364, 425.7000000000, 804.2689285714, 608.1428571429]),
+            (Small, Error, 0.37, [47.1710205431, 165.3492373412, 33.2500853364, 425.7000000000, 804.2689285714, 608.1428571429]),
+            (Small, Error, 1.1, [-4.9496886829, 165.3492373412, 33.2500853364, 425.7000000000, 804.2689285714, 608.1428571429]),
+            (Small, Error, 2.9, [-4.3740247758, 165.3492373412, 33.2500853364, 425.7000000000, 804.2689285714, 608.1428571429]),
             (Small, Offline, 0.0, [-3.9451988173, 149.1385277979, 29.9902730485, 0.0000000000, 257.7807142857, 118.6714285714]),
             (Small, Offline, 0.37, [-4.6258512881, 149.0822877678, 30.1720817765, 0.0000000000, 257.7807142857, 118.6714285714]),
             (Small, Offline, 1.1, [-5.9407606625, 148.9454282839, 30.6145112819, 0.0000000000, 457.7492857143, 210.7285714286]),
@@ -600,7 +525,7 @@ mod tests {
     fn busy_states_stay_on_the_globe() {
         for size in OrbSize::ALL {
             for state in [
-                Thinking, Reading, Searching, Editing, Running, Waiting, Offline,
+                Thinking, Reading, Searching, Editing, Running, Waiting, Done, Offline,
             ] {
                 for t in [0.0, 0.7, 1.5, 3.3] {
                     for d in frame(size, state, t) {
@@ -625,6 +550,14 @@ mod tests {
                 .collect();
             for (a, sa) in stills.iter().enumerate() {
                 for (b, sb) in stills.iter().enumerate().skip(a + 1) {
+                    // Waiting (at full breath), Done and Error are the same full globe; the tone
+                    // (amber, green, red) tells them apart.
+                    let toned = [Waiting, Done, Error];
+                    if toned.contains(&ActivityState::ALL[a])
+                        && toned.contains(&ActivityState::ALL[b])
+                    {
+                        continue;
+                    }
                     let diff: f64 = sa
                         .iter()
                         .zip(sb)
@@ -792,37 +725,32 @@ mod tests {
     }
 
     #[test]
-    fn done_draws_a_check_then_holds() {
+    fn done_fills_up_pops_then_holds() {
         for size in OrbSize::ALL {
-            let settled = frame(size, Done, 0.95);
-            for t in [1.0, crate::SETTLE, 5.0] {
-                assert_eq!(frame(size, Done, t), settled, "t={t}");
+            let full: Vec<Dot> = (0..size.dots()).map(|i| breath(size, i, 1.0)).collect();
+            for t in [0.8, 1.0, crate::SETTLE, 5.0] {
+                assert_eq!(frame(size, Done, t), full, "t={t}");
             }
-            let n = (size.dots() as f64 * 0.42).round() as usize;
-            for d in &settled[..n] {
-                assert_eq!(d.lit, 1.0, "check dot unlit: {d:?}");
-                assert!(xy_len(d) < 0.62);
-            }
-            for d in &settled[n..] {
-                assert!((xy_len(d) - R).abs() < 1e-9, "ring dot off the ring: {d:?}");
-                assert_eq!(d.lit, 0.0);
-            }
-            let mid = frame(size, Done, 0.45);
-            assert_eq!(mid[0].lit, 1.0);
-            assert!(mid[n - 1].lit < 1.0);
+            let early = frame(size, Done, 0.2);
+            assert!(
+                early
+                    .iter()
+                    .zip(&full)
+                    .all(|(a, b)| a.lit < b.lit && a.s < b.s)
+            );
+            let pop = frame(size, Done, 0.65);
+            assert!(pop.iter().zip(&full).all(|(a, b)| a.s > b.s && a.p == b.p));
         }
     }
 
     #[test]
     fn error_shakes_then_holds() {
-        let settled = frame(Large, Error, 1.25);
+        let full: Vec<Dot> = (0..Large.dots()).map(|i| breath(Large, i, 1.0)).collect();
         for t in [crate::SETTLE, 5.0, 60.0] {
-            assert_eq!(frame(Large, Error, t), settled, "t={t}");
+            assert_eq!(frame(Large, Error, t), full, "t={t}");
         }
         let cx = |f: &[Dot]| f.iter().map(|d| d.p[0]).sum::<f64>() / f.len() as f64;
-        assert!((cx(&frame(Large, Error, 0.36)) - cx(&settled)).abs() > 0.05);
-        assert!(settled[..119].iter().any(|d| xy_len(d) < 0.02));
-        assert!(settled[119..].iter().all(|d| (xy_len(d) - R).abs() < 1e-9));
+        assert!((cx(&frame(Large, Error, 0.36)) - cx(&full)).abs() > 0.05);
     }
 
     #[test]
@@ -847,12 +775,5 @@ mod tests {
         assert_eq!(crit(0.0), 0.0);
         assert_eq!(crit(1.6), 1.0);
         assert!(crit(1.59) > 0.999);
-    }
-
-    #[test]
-    fn along_hits_the_ends() {
-        assert_eq!(along(&[CHECK], 0.0), CHECK[0]);
-        let end = along(&[CHECK], 1.0);
-        assert!((end[0] - CHECK[2][0]).abs() < 1e-12 && (end[1] - CHECK[2][1]).abs() < 1e-12);
     }
 }

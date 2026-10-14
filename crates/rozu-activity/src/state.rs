@@ -98,7 +98,7 @@ impl ActivityState {
     }
 
     /// The time (s) of the static frame drawn in reduced-motion mode (handoff §5). Each one shows
-    /// the state's symbol: the finished lines, the typed line, the drawn check.
+    /// the state's motion: the written globe, the full green globe.
     pub fn reduced_motion_time(self) -> f64 {
         match self {
             ActivityState::Thinking => 0.55,

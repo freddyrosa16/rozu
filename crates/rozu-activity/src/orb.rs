@@ -49,7 +49,7 @@ struct Segment {
     state: ActivityState,
     start: f64,
     /// Set on Done and Error that follow Waiting: when that Waiting started. Instead of
-    /// morphing into the check or the cross, the breath keeps going (on Waiting's clock) and
+    /// morphing (a dip through the small dim globe), the breath keeps going (on Waiting's clock) and
     /// fills up to the full bright globe over [`SETTLE`], in the new tone.
     breath_from: Option<f64>,
 }
@@ -300,7 +300,7 @@ mod tests {
     }
 
     /// Done or Error after Waiting: no morph, the breath fills up in the new tone and holds, and
-    /// the next change starts from that full globe (not from the check).
+    /// the next change starts from that full globe.
     #[test]
     fn done_and_error_after_waiting_keep_the_breath() {
         for (to, tone) in [(Done, Tone::Success), (Error, Tone::Danger)] {
@@ -320,9 +320,6 @@ mod tests {
             for (a, b) in orb.sample(t).iter().zip(&full) {
                 assert!(close(a, b), "{to:?}: {a:?} vs {b:?}");
             }
-            // Never the check or the cross.
-            let check = target(to, SETTLE);
-            assert!(orb.sample(t).iter().zip(&check).any(|(a, b)| a.p != b.p));
             // The next morph starts from the full globe.
             orb.set_state(Thinking, 6.0);
             for (a, b) in orb.sample(6.0).iter().zip(&full) {
@@ -336,7 +333,7 @@ mod tests {
                 assert!(close(a, b), "{to:?}: {a:?} vs {b:?}");
             }
         }
-        // From anything else, Done and Error still draw the check and the cross.
+        // From anything else, Done and Error morph in as usual.
         let mut orb = Orb::new(Running, 0.0);
         orb.set_state(Error, 3.0);
         let t = 3.0 + MORPH_END + 0.01;

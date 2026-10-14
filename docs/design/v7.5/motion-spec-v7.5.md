@@ -20,8 +20,8 @@ Fred pointed at libraries.dev/orbs ("make the orbs like this but don't copy"). W
 | Editing | `globe(i, 0)` | Writing order o = (j + roundFrom(i))/rings, from the bottom ring up. ph = t mod 2.6, w = min(1, ph/2). Written (o < w): fresh = max(0, 1 − (w − o)·rings/1.5); lit .75 + .25·fresh, s 1.15 + .5·fresh, α .9 + .1·fresh; the newest dot on its ring ((w − o)·rings·ringLen(j) < 1, while ph < 2) is the caret: lit 1, s 1.7. Unwritten: lit 0, s .75, α .3. Held full from 2s, then from 2.3s everything fades together over .3s: q = (ph − 2.3)/.3, lit .75(1 − q), s 1.15 − .4q, α .9 − .6q | 2.6s | 1.1s |
 | Running | `globe(i, 2.4t)` | s = .5 + .5·sin(2φ + λ − 2πt/.9); lit = clamp(1.4s − .4); lit×.75, s .9 + .25·lit, α .5 + .5·lit | .9s | .3s |
 | Waiting (amber) | `globe(i, 0, R·(.96 + .06b))`, b = .5 + .5·sin(2πt/1.8) | lit .2 + .5b, s .9 + .25b, α .6 + .4b | 1.8s | .45s |
-| Done (green) | The first round(.42N) dots are the check (v7.4 path), at u = i/(n−1), on the plane z = .3; the rest on a ring of radius .9 | Drawn while u ≤ clamp((t − .25)/.45): lit 1, s 1.2, α 1; else lit .25, s .6, α .35; pop s×(1 + .2·sin(π(t − .7)/.25)) for t in (.7, .95). Ring dots lit 0, s .7, α .3. Static from .95s | once | 1.5s |
-| Error (red) | The same with the v7.4 cross, all drawn | Whole frame shifts dx = .13·e^(−5s)·sin(28s), s = t − .3, for s in (0, .9); static from 1.2s | once | 1.5s |
+| Done (green) | `breath(i, clamp(t/.5))` | Fills from the small dim globe to the full bright one over .5s; pop s × (1 + .15·sin(π(t − .5)/.3)) for t in (.5, .8); then holds | once | 1.5s |
+| Error (red) | `breath(i, 1)` | The full globe; whole frame shifts dx = .13·e^(−5s)·sin(28s), s = t − .3, for s in (0, .9); static from 1.2s | once | 1.5s |
 | Offline (dim) | `globe(i, .12t, .92R)` | slot = floor(t/.4); a dot is off (s 0, α 0) when hash2(j, slot) < .42 or hash2(i, slot) < .12; otherwise lit 0, s .85, α .45 | 2.4s | .3s |
 
 `vnoise` is smooth value noise on an integer lattice (`hash2` corners, smoothstep blend); `hash2(a, b) = frac(sin(12.9898a + 78.233b)·43758.5453)`.
