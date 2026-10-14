@@ -85,6 +85,8 @@ pub struct CodexConfig {
     pub handshake_timeout: Duration,
     /// How long to wait for an interrupted turn to end before killing the app-server.
     pub interrupt_grace: Duration,
+    /// `effort` on each `turn/start` (minimal, low, medium, high, xhigh); `None` keeps Codex's.
+    pub effort: Option<String>,
 }
 
 impl CodexConfig {
@@ -105,6 +107,7 @@ impl CodexConfig {
             max_line_bytes: DEFAULT_MAX_LINE_BYTES,
             handshake_timeout: Duration::from_secs(60),
             interrupt_grace: Duration::from_secs(10),
+            effort: None,
         }
     }
 }
@@ -629,6 +632,9 @@ impl Provider for CodexAppServerProvider {
         let mut params = json!({ "threadId": thread, "input": protocol::text_input(&text) });
         if req.model != DEFAULT_MODEL {
             params["model"] = req.model.clone().into();
+        }
+        if let Some(effort) = &self.config.effort {
+            params["effort"] = effort.clone().into();
         }
         let started = match self.call(&mut state, "turn/start", params).await {
             Ok(started) => started,

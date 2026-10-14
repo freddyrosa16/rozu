@@ -57,6 +57,11 @@ const ICONS: &[(&str, &str)] = &[
         r#"<path d="M9 3h6M10 3v6l-5 9a2 2 0 0 0 1.8 3h10.4a2 2 0 0 0 1.8-3l-5-9V3M7.5 15h9"/>"#,
     ),
     ("diff", r#"<path d="M12 4v8M8 8h8M7 19h10"/>"#),
+    (
+        "trash",
+        r#"<path d="M4 7h16M10 11v6M14 11v6M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12M9 7V4h6v3"/>"#,
+    ),
+    ("check", r#"<path d="m5 12 5 5 9-10"/>"#),
 ];
 
 pub struct Assets;

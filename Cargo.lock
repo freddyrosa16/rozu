@@ -5134,6 +5134,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "directories",
  "gpui",
  "rozu-activity",
  "rozu-cli-providers",
@@ -5141,6 +5142,8 @@ dependencies = [
  "rozu-providers",
  "rozu-secrets",
  "rozu-tools",
+ "serde",
+ "serde_json",
  "tokio",
  "tokio-util",
 ]

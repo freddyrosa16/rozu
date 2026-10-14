@@ -16,7 +16,9 @@ for now because GitHub Pages serves it.
 
 ## Try the app (M5, macOS)
 The desktop app is early: a sidebar of threads and a centered chat, driven by the same core as `rozu chat`.
-It uses your installed claude, codex or grok CLI (click the model name to switch), or an API key.
+On first run it asks which AI you pay for (Claude, ChatGPT or Grok), installs and signs in to its official CLI in
+Terminal, and lets you pick the model, effort and a folder to work in. The gear at the bottom left reopens that page.
+Add more folders with New Project; hover a folder or chat to remove it (files on disk are never touched).
 
 ```sh
 cargo build -p rozu-cli -p rozu-app   # the app needs `rozu` next to it for tool calls

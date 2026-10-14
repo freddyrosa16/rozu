@@ -7,8 +7,8 @@ use std::sync::{Arc, Mutex};
 use anyhow::{Context, anyhow};
 use async_trait::async_trait;
 use rozu_activity::ActivityEvent;
-use rozu_cli_providers::claude::install::find_claude_binary;
-use rozu_cli_providers::codex::install::find_codex_binary;
+use rozu_cli_providers::claude::install::{claude_auth_status, find_claude_binary};
+use rozu_cli_providers::codex::install::{LoginStatus, codex_login_status, find_codex_binary};
 use rozu_cli_providers::grok::install::find_grok_binary;
 use rozu_cli_providers::{
     ClaudeCliConfig, ClaudeCliProvider, CodexAppServerProvider, CodexConfig, GrokConfig,
@@ -19,7 +19,7 @@ use rozu_core::{
     AuditLog, Decision, Provider, Session, ToolExecutor, new_session_id,
 };
 use rozu_providers::registry::{self, CLAUDE_CLI_ID, CODEX_ID, GROK_ID};
-use rozu_providers::{ModelChoice, PROVIDERS};
+use rozu_providers::{ModelChoice, PROVIDERS, ProviderInfo};
 use rozu_secrets::{KeyringStore, resolve_api_key};
 use rozu_tools::{SessionTemp, ToolRegistry, Workspace, platform_sandbox};
 use tokio::sync::{mpsc, oneshot};
@@ -33,8 +33,6 @@ pub enum Update {
 
 pub struct Backend {
     rt: tokio::runtime::Runtime,
-    workspace: Workspace,
-    policy: Arc<ApprovalPolicy>,
     tools: Arc<ToolRegistry>,
 }
 
@@ -72,30 +70,36 @@ impl ApprovalGate for Gate {
 }
 
 impl Backend {
-    pub fn new(root: &Path) -> anyhow::Result<Self> {
-        let workspace = Workspace::new(root)
-            .with_context(|| format!("cannot open workspace {}", root.display()))?;
-        let policy = ApprovalPolicy::for_project(ApprovalMode::AutoWorkspace, workspace.root())?;
+    pub fn new() -> anyhow::Result<Self> {
         Ok(Self {
             rt: tokio::runtime::Runtime::new()?,
-            workspace,
-            policy: Arc::new(policy),
             tools: Arc::new(ToolRegistry::standard()),
         })
     }
 
-    pub fn root(&self) -> &Path {
-        self.workspace.root()
+    /// Whether a subscription CLI is installed and signed in.
+    pub fn check(&self, id: &'static str) -> oneshot::Receiver<Access> {
+        let (tx, rx) = oneshot::channel();
+        self.rt.spawn(async move {
+            let _ = tx.send(access(id).await);
+        });
+        rx
     }
 
-    pub fn start(&self, choice: &ModelChoice, updates: mpsc::UnboundedSender<Update>) -> Chat {
+    pub fn start(
+        &self,
+        root: &Path,
+        choice: &ModelChoice,
+        effort: Option<String>,
+        updates: mpsc::UnboundedSender<Update>,
+    ) -> Chat {
         let (prompts, mut rx) = mpsc::unbounded_channel::<String>();
         let cancel = Arc::new(Mutex::new(CancellationToken::new()));
         let agent = {
             let _rt = self.rt.enter();
-            self.agent(choice, Arc::new(Gate(updates.clone())))
+            self.agent(root, choice, effort, Arc::new(Gate(updates.clone())))
         };
-        let prompt = system_prompt(self.root());
+        let prompt = system_prompt(root);
         let current = cancel.clone();
         self.rt.spawn(async move {
             let agent = match agent {
@@ -137,7 +141,19 @@ impl Backend {
         Chat { prompts, cancel }
     }
 
-    fn agent(&self, choice: &ModelChoice, gate: Arc<dyn ApprovalGate>) -> anyhow::Result<Agent> {
+    fn agent(
+        &self,
+        root: &Path,
+        choice: &ModelChoice,
+        effort: Option<String>,
+        gate: Arc<dyn ApprovalGate>,
+    ) -> anyhow::Result<Agent> {
+        let workspace = Workspace::new(root)
+            .with_context(|| format!("cannot open the folder {}", root.display()))?;
+        let policy = Arc::new(ApprovalPolicy::for_project(
+            ApprovalMode::AutoWorkspace,
+            workspace.root(),
+        )?);
         let id = new_session_id();
         let audit = AuditLog::from_env(&id).map(Arc::new);
         let temp = SessionTemp::create(&id).ok().map(Arc::new);
@@ -145,7 +161,7 @@ impl Backend {
             let mut exec = ToolExecutor::new(
                 self.tools.clone(),
                 gate.clone(),
-                self.policy.clone(),
+                policy.clone(),
                 platform_sandbox(),
             )
             .with_audit(audit.clone())
@@ -154,7 +170,7 @@ impl Backend {
             exec
         };
         let mcp = |provider: &str| -> anyhow::Result<(PathBuf, Vec<String>)> {
-            let root = self.root().display().to_string();
+            let root = workspace.root().display().to_string();
             let args = [
                 "mcp-serve",
                 "--workspace",
@@ -179,17 +195,20 @@ impl Backend {
         let provider: Arc<dyn Provider> = if id_ == CLAUDE_CLI_ID {
             let (rozu, args) = mcp(id_)?;
             let binary = find_claude_binary().ok_or_else(|| missing("claude"))?;
-            let config = ClaudeCliConfig::new(binary, self.root(), rozu, args, gate.clone());
+            let mut config =
+                ClaudeCliConfig::new(binary, workspace.root(), rozu, args, gate.clone());
+            config.effort = effort;
             Arc::new(ClaudeCliProvider::new(config)?)
         } else if id_ == CODEX_ID {
             let (rozu, args) = mcp(id_)?;
             let binary = find_codex_binary().ok_or_else(|| missing("codex"))?;
-            let config = CodexConfig::new(binary, self.workspace.clone(), rozu, args, exec(id_));
+            let mut config = CodexConfig::new(binary, workspace.clone(), rozu, args, exec(id_));
+            config.effort = effort;
             Arc::new(CodexAppServerProvider::new(config)?)
         } else if id_ == GROK_ID {
             let (rozu, args) = mcp(id_)?;
             let binary = find_grok_binary().map_err(|err| anyhow!(err))?;
-            let config = GrokConfig::new(binary, self.workspace.clone(), &rozu, args, exec(id_));
+            let config = GrokConfig::new(binary, workspace.clone(), &rozu, args, exec(id_));
             Arc::new(GrokSession::new(config)?)
         } else {
             let (key, _) =
@@ -203,20 +222,97 @@ impl Backend {
             registry::build(choice.provider, key, None, None)?
         };
         let config = AgentConfig::new(&choice.model).with_model_info(choice.info.clone());
-        Ok(
-            Agent::new(provider, self.tools.clone(), self.workspace.clone(), config)
-                .with_approval_policy(self.policy.clone())
-                .with_approval_gate(gate)
-                .with_audit(audit)
-                .with_session_temp(temp),
-        )
+        Ok(Agent::new(provider, self.tools.clone(), workspace, config)
+            .with_approval_policy(policy)
+            .with_approval_gate(gate)
+            .with_audit(audit)
+            .with_session_temp(temp))
     }
 }
 
-/// The models this Mac can use: installed subscription CLIs first, then API keys that are set.
-pub fn choices() -> Vec<ModelChoice> {
+/// A subscription the app can sign in with: its CLI, and how to install it and sign in.
+pub struct Plan {
+    pub id: &'static str,
+    pub name: &'static str,
+    pub plan: &'static str,
+    pub install: &'static str,
+    pub login: &'static str,
+}
+
+pub const PLANS: &[Plan] = &[
+    Plan {
+        id: CLAUDE_CLI_ID,
+        name: "Claude",
+        plan: "Claude Pro or Max, through Claude Code",
+        install: "curl -fsSL https://claude.ai/install.sh | bash",
+        login: "claude auth login",
+    },
+    Plan {
+        id: CODEX_ID,
+        name: "ChatGPT",
+        plan: "ChatGPT Plus or Pro, through Codex",
+        install: "npm install -g @openai/codex",
+        login: "codex login",
+    },
+    Plan {
+        id: GROK_ID,
+        name: "Grok",
+        plan: "SuperGrok, through Grok Build",
+        install: "npm install -g @xai-official/grok",
+        login: "grok login",
+    },
+];
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Access {
+    Checking,
+    Missing,
+    SignedOut,
+    Ready,
+    /// Installed; Grok Build can't say whether it is signed in.
+    Installed,
+}
+
+async fn access(id: &str) -> Access {
+    match id {
+        CLAUDE_CLI_ID => match find_claude_binary().filter(|p| p.exists()) {
+            None => Access::Missing,
+            Some(bin) => match claude_auth_status(&bin).await.map(|s| s.logged_in) {
+                Ok(Some(false)) => Access::SignedOut,
+                Ok(Some(true)) => Access::Ready,
+                _ => Access::Installed,
+            },
+        },
+        CODEX_ID => match find_codex_binary().filter(|p| p.exists()) {
+            None => Access::Missing,
+            Some(bin) => match codex_login_status(&bin).await {
+                Ok(LoginStatus::NotLoggedIn) => Access::SignedOut,
+                Ok(LoginStatus::ChatGpt | LoginStatus::ApiKey) => Access::Ready,
+                _ => Access::Installed,
+            },
+        },
+        _ => match find_grok_binary() {
+            Ok(p) if p.exists() => Access::Installed,
+            _ => Access::Missing,
+        },
+    }
+}
+
+/// Runs `command` in a new Terminal window (installs and sign-ins need one).
+pub fn in_terminal(command: &str) {
+    let script = format!(
+        "tell application \"Terminal\"\nactivate\ndo script \"{}\"\nend tell",
+        command.replace('\\', "\\\\").replace('"', "\\\"")
+    );
+    let _ = std::process::Command::new("osascript")
+        .args(["-e", &script])
+        .spawn();
+}
+
+/// The providers this Mac can use: installed subscription CLIs first, then API keys that are set.
+pub fn providers() -> Vec<&'static ProviderInfo> {
     let store = KeyringStore::default();
-    let mut all = PROVIDERS
+    let mut all: Vec<_> = PROVIDERS
         .iter()
         .filter(|p| match p.id {
             CLAUDE_CLI_ID => find_claude_binary().is_some_and(|p| p.exists()),
@@ -227,23 +323,55 @@ pub fn choices() -> Vec<ModelChoice> {
                 Ok(Some(_))
             ),
         })
-        .filter_map(|p| registry::resolve(Some(p.id), None).ok())
-        .collect::<Vec<_>>();
-    all.sort_by_key(|c| !c.provider.is_cli_backed());
+        .collect();
+    all.sort_by_key(|p| !p.is_cli_backed());
     all
 }
 
-/// How the composer names a model.
-pub fn label(choice: &ModelChoice) -> String {
-    let name = match choice.provider.id {
-        CLAUDE_CLI_ID => "Claude",
-        CODEX_ID => "ChatGPT",
-        GROK_ID => "Grok",
-        _ => choice.provider.label,
-    };
-    match choice.model.as_str() {
+/// Every model `provider` offers.
+pub fn models(provider: &ProviderInfo) -> Vec<ModelChoice> {
+    registry::models_for(provider.id)
+        .into_iter()
+        .filter_map(|m| registry::resolve(Some(provider.id), Some(&m.id)).ok())
+        .collect()
+}
+
+/// The effort levels a provider takes; empty when rozu can't set it.
+pub fn efforts(provider: &str) -> &'static [&'static str] {
+    match provider {
+        CLAUDE_CLI_ID => &["low", "medium", "high", "xhigh", "max"],
+        CODEX_ID => &["low", "medium", "high", "xhigh"],
+        _ => &[],
+    }
+}
+
+/// How a provider is named in the app.
+pub fn provider_name(provider: &ProviderInfo) -> &'static str {
+    PLANS
+        .iter()
+        .find(|p| p.id == provider.id)
+        .map_or(provider.label, |p| p.name)
+}
+
+/// How a model is named in the app: `opus` → `Opus`, `default` → `Default`.
+pub fn model_name(model: &str) -> String {
+    let mut chars = model.chars();
+    match chars.next() {
+        Some(c) if !model.contains('-') => c.to_uppercase().chain(chars).collect(),
+        _ => model.to_owned(),
+    }
+}
+
+/// How the composer names a model: `Claude Opus · high`.
+pub fn label(choice: &ModelChoice, effort: Option<&str>) -> String {
+    let name = provider_name(choice.provider);
+    let model = match choice.model.as_str() {
         "default" => name.to_owned(),
-        model => format!("{name} {model}"),
+        model => format!("{name} {}", model_name(model)),
+    };
+    match effort {
+        Some(effort) => format!("{model} · {effort}"),
+        None => model,
     }
 }
 
@@ -270,4 +398,24 @@ fn system_prompt(root: &Path) -> String {
          changing code. Be concise, and cite file paths when you refer to code.",
         root.display()
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn names_models_like_the_app() {
+        let opus = registry::resolve(Some(CLAUDE_CLI_ID), Some("opus")).unwrap();
+        assert_eq!(label(&opus, Some("high")), "Claude Opus · high");
+        let codex = registry::resolve(Some(CODEX_ID), None).unwrap();
+        assert_eq!(label(&codex, None), "ChatGPT");
+        assert_eq!(model_name("claude-opus-5-5"), "claude-opus-5-5");
+        let names: Vec<_> = models(registry::provider_info(CLAUDE_CLI_ID).unwrap())
+            .iter()
+            .map(|m| model_name(&m.model))
+            .collect();
+        assert_eq!(names, ["Sonnet", "Opus", "Fable", "Haiku"]);
+        assert!(efforts(GROK_ID).is_empty());
+    }
 }
