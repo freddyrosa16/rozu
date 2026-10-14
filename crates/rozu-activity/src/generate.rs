@@ -259,6 +259,14 @@ fn symbol(
     )
 }
 
+/// The breathing globe at breath `b` (0 small and dim, 1 full and bright): Waiting, and what Done
+/// and Error become right after Waiting (see [`crate::Orb`]).
+pub fn breath(size: OrbSize, i: usize, b: f64) -> Dot {
+    let k = size.dot();
+    let p = globe(size, i, 0.0, R * (0.96 + 0.06 * b));
+    dot(p, 0.2 + 0.5 * b, (0.9 + 0.25 * b) * k, 0.6 + 0.4 * b)
+}
+
 /// Dot `i` of `state` at `t` seconds into the state, for `size`.
 pub fn generate(size: OrbSize, state: ActivityState, i: usize, t: f64) -> Dot {
     let k = size.dot();
@@ -352,11 +360,7 @@ pub fn generate(size: OrbSize, state: ActivityState, i: usize, t: f64) -> Dot {
             dot(p, lit * 0.75, (0.9 + 0.25 * lit) * k, 0.5 + 0.5 * lit)
         }
         // The globe stops and breathes, asking for you.
-        ActivityState::Waiting => {
-            let b = 0.5 + 0.5 * (TAU * t / 1.8).sin();
-            let p = globe(size, i, 0.0, R * (0.96 + 0.06 * b));
-            dot(p, 0.2 + 0.5 * b, (0.9 + 0.25 * b) * k, 0.6 + 0.4 * b)
-        }
+        ActivityState::Waiting => breath(size, i, 0.5 + 0.5 * (TAU * t / 1.8).sin()),
         // The dots gather into a check that draws itself, pops, then holds.
         ActivityState::Done => {
             let pop = if t > 0.7 && t < 0.95 {

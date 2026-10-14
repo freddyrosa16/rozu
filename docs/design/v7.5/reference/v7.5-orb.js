@@ -69,8 +69,7 @@ const ORBS={
  running:{tone:"none",tempo:.9,gen(i,t,P){ // the globe spins fast with a helical stripe racing round it
    const [phi,lam]=P.grid[i],yaw=2.4*t*P.speed,p=globe(P,i,yaw),s=.5+.5*Math.sin(2*phi+lam-TAU*t/.9),lit=cl(s*1.4-.4);
    return Q(p,lit*.75,(.9+.25*lit)*P.dot,.5+.5*lit)}},
- waiting:{tone:"warning",tempo:1.8,gen(i,t,P){ // the globe stops and breathes, asking for you
-   const b=.5+.5*Math.sin(TAU*t/1.8),p=globe(P,i,0,R*(.96+.06*b));return Q(p,.2+.5*b,(.9+.25*b)*P.dot,.6+.4*b)}},
+ waiting:{tone:"warning",tempo:1.8,gen(i,t,P){return breath(P,i,.5+.5*Math.sin(TAU*t/1.8))}}, // the globe stops and breathes, asking for you
  done:{tone:"success",tempo:0,plays_once:true,gen(i,t,P){ // the dots gather into a check that draws itself, pops, then holds
    return symbol(P,i,[CHECK],.42,0,cl((t-.25)/.45),t>.7&&t<.95?Math.sin(Math.PI*(t-.7)/.25):0,.25)}},
  error:{tone:"danger",tempo:0,plays_once:true,gen(i,t,P){ // a cross that shakes once, like a head saying no, then holds
@@ -79,15 +78,26 @@ const ORBS={
    const [phi,lam,j]=P.grid[i],p=globe(P,i,.12*t,R*.92),slot=Math.floor(t/.4),off=hash2(j,slot)<.42||hash2(i,slot)<.12;
    return Q(p,0,(off?0:.85)*P.dot,off?0:.45)}},
 };
+// The breathing globe at breath b (0 small and dim, 1 full and bright): Waiting, and what Done and
+// Error become after Waiting (the breath fills up and holds, in green or red, instead of a morph).
+const breath=(P,i,b)=>{const p=globe(P,i,0,R*(.96+.06*b));return Q(p,.2+.5*b,(.9+.25*b)*P.dot,.6+.4*b)};
 const ORDER=["thinking","reading","searching","editing","running","waiting","done","error","offline"];
 const STILL={thinking:.55,reading:.6,searching:.3,editing:1.1,running:.3,waiting:.45,done:1.5,error:1.5,offline:.3};
 const MORPH=.6,STAG_TOTAL=.3; // dot i starts hash(i)·STAG_TOTAL late: a dissolve across the globe, whatever its size
+const SETTLE=1.3; // Done and Error are settled this long after they start
 const crit=u=>u<=0?0:u>=1.6?1:1-(1+7*u)*Math.exp(-7*u);
+// Done or Error right after Waiting: no morph; the breath keeps going and fills up to the full bright globe over SETTLE.
+const fromWaiting=(tl,k)=>k>0&&ORBS[tl[k].orb].plays_once&&tl[k-1].orb==="waiting";
+// Segment k's own dot i at T (what it generates, before any morph).
+function genAt(tl,k,i,T,P){const seg=tl[k],tin=T-seg.start;
+  if(fromWaiting(tl,k)){const e=crit(1.6*tin/SETTLE),b=.5+.5*Math.sin(TAU*(T-tl[k-1].start)/1.8);return breath(P,i,b+(1-b)*e)}
+  return ORBS[seg.orb].gen(i,tin,P)}
 // tl: [{orb, start}], consecutive entries with different orbs. P: LARGE or SMALL.
 function sample(tl,T,P=LARGE){let k=0;while(k+1<tl.length&&tl[k+1].start<=T)k++;const cur=tl[k],tin=T-cur.start,S=ORBS[cur.orb];
-  const out=[];for(let i=0;i<P.N;i++){const b=S.gen(i,tin,P);
+  const out=[];for(let i=0;i<P.N;i++){const b=genAt(tl,k,i,T,P);
     if(k===0){out.push({...b,tone:S.tone,dim:S.dim});continue}
-    const pv=tl[k-1],Pv=ORBS[pv.orb],a=Pv.gen(i,T-pv.start,P),q=crit((tin-hash(i)*STAG_TOTAL)/MORPH),lift=.55*Math.sin(Math.PI*q);
+    if(fromWaiting(tl,k)){out.push({...b,lit:cl(b.lit+(tin<.15?.8*Math.sin(Math.PI*tin/.15):0)),tone:S.tone,dim:S.dim});continue}
+    const pv=tl[k-1],Pv=ORBS[pv.orb],a=genAt(tl,k-1,i,T,P),q=crit((tin-hash(i)*STAG_TOTAL)/MORPH),lift=.55*Math.sin(Math.PI*q);
     out.push({p:[a.p[0]+(b.p[0]-a.p[0])*q,a.p[1]+(b.p[1]-a.p[1])*q,a.p[2]+(b.p[2]-a.p[2])*q+lift],lit:cl(a.lit+(b.lit-a.lit)*q+(tin<.15?.8*Math.sin(Math.PI*tin/.15):0)),s:a.s+(b.s-a.s)*q,
       a:a.a+(b.a-a.a)*q,tone:q>.5?S.tone:Pv.tone,dim:q>.5?S.dim:Pv.dim})}return out}
 function css(v){return getComputedStyle(document.body).getPropertyValue(v).trim()}
@@ -102,4 +112,4 @@ function drawOrb(canvas,tl,T){const dpr=(window.devicePixelRatio||1),size=canvas
     if(small&&r*dpr<1.6){ctx.fillRect(Math.round((b.x-r)*dpr)/dpr,Math.round((b.y-r)*dpr)/dpr,Math.max(px,Math.round(2*r*dpr)/dpr),Math.max(px,Math.round(2*r*dpr)/dpr))}
     else{ctx.beginPath();ctx.arc(b.x,b.y,r,0,TAU);ctx.fill()}}
   ctx.globalAlpha=1}
-if(typeof module!=="undefined")module.exports={LARGE,SMALL,ORBS,ORDER,STILL,sample,hash,vnoise};
+if(typeof module!=="undefined")module.exports={LARGE,SMALL,ORBS,ORDER,STILL,sample,hash,vnoise,breath};
