@@ -1,8 +1,8 @@
-//! v7.3 activity pill demo: the dot orb (22px in the pill, 88px large), the label and a mono
-//! timer.
+//! v7.5 activity pill demo: the dotted-globe orb (22px in the pill, 88px large; each size has its
+//! own point set), the label and a mono timer.
 //!
 //! Two modes (key A switches; `-- --agent` starts in the second):
-//! - **cycle** (default): all ten states, 3.2s each. Labels come from a scripted turn run through
+//! - **cycle** (default): all nine states, 3.2s each. Labels come from a scripted turn run through
 //!   `rozu_activity::ActivityTracker`; Offline is set directly.
 //! - **agent**: replays `rozu_activity::replay::demo_turn()`, a real `rozu_core::AgentEvent`
 //!   turn, through the AgentEvent → ActivityState mapping and the pill's debouncer
@@ -32,7 +32,7 @@ use gpui::{
 use rozu_activity::replay::{demo_turn, replay};
 use rozu_activity::tokens::{ORB_LG_PX, ORB_PX, PILL_HEIGHT_DOCK_PX, Palette, Theme};
 use rozu_activity::{
-    Activity, ActivityEvent, ActivityState, ActivityTracker, DrawDot, FramePolicy, Orb,
+    Activity, ActivityEvent, ActivityState, ActivityTracker, DrawDot, FramePolicy, Orb, OrbSize,
     ProjectOptions, ReducedMotion, Sample, project_with,
 };
 
@@ -135,9 +135,12 @@ fn event_name(event: &rozu_core::AgentEvent) -> &'static str {
 /// `frame`; anything else that changes the drawing (a new state, theme, options) bumps `change`.
 struct OrbClock {
     orb: Orb,
+    /// The 22px pill's own point set, kept on the same timeline as `orb`.
+    orb_small: Orb,
     /// Advances only while frames are drawn.
     anim_t: f64,
     samples: Vec<Sample>,
+    samples_small: Vec<Sample>,
     opts: ProjectOptions,
     palette: Palette,
     /// The policy's rate at the last frame.
@@ -150,6 +153,7 @@ struct OrbClock {
 impl OrbClock {
     fn resample(&mut self) {
         self.orb.sample_into(self.anim_t, &mut self.samples);
+        self.orb_small.sample_into(self.anim_t, &mut self.samples_small);
     }
 
     /// Redraws both orbs now.
@@ -164,6 +168,7 @@ impl OrbClock {
 struct OrbView {
     clock: Entity<OrbClock>,
     size_px: f32,
+    small: bool,
     _observe: Subscription,
 }
 
@@ -178,14 +183,16 @@ impl OrbView {
                 cx.notify();
             }
         });
-        OrbView { clock, size_px, _observe: observe }
+        let small = OrbSize::for_px(f64::from(size_px)) == OrbSize::Small;
+        OrbView { clock, size_px, small, _observe: observe }
     }
 }
 
 impl Render for OrbView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let c = self.clock.read(cx);
-        let dots = project_with(&c.samples, self.size_px, window.scale_factor(), c.opts);
+        let samples = if self.small { &c.samples_small } else { &c.samples };
+        let dots = project_with(samples, self.size_px, window.scale_factor(), c.opts);
         orb_canvas(dots, self.size_px, c.palette)
     }
 }
@@ -309,11 +316,15 @@ impl Demo {
         let motion = ReducedMotion::new(platform::reduce_motion());
         let clock = cx.new(|_| {
             let mut orb = Orb::new(ActivityState::Thinking, 0.0);
+            let mut orb_small = Orb::with_size(OrbSize::Small, ActivityState::Thinking, 0.0);
             orb.set_reduced_motion(motion.effective());
+            orb_small.set_reduced_motion(motion.effective());
             let mut clock = OrbClock {
                 orb,
+                orb_small,
                 anim_t: 0.0,
                 samples: Vec::new(),
+                samples_small: Vec::new(),
                 opts: ProjectOptions::default(),
                 palette,
                 fps: 0,
@@ -459,7 +470,9 @@ impl Demo {
         self.step = step;
         if let Some(activity) = activity {
             self.clock.update(cx, |c, cx| {
-                if c.orb.set_state(activity.state, c.anim_t) {
+                let changed = c.orb.set_state(activity.state, c.anim_t);
+                c.orb_small.set_state(activity.state, c.anim_t);
+                if changed {
                     c.changed(cx);
                 }
             });
@@ -472,6 +485,7 @@ impl Demo {
         let on = self.motion.effective();
         self.clock.update(cx, |c, cx| {
             c.orb.set_reduced_motion(on);
+            c.orb_small.set_reduced_motion(on);
             c.changed(cx);
         });
     }

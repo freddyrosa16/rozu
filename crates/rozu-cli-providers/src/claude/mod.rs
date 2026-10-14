@@ -348,7 +348,7 @@ impl Provider for ClaudeCliProvider {
                     },
                     Next::Line(Ok(None)) => {
                         let status = process.exit_status(Duration::from_secs(2)).await;
-                        let stderr = process.stderr_tail().join("\n").to_lowercase();
+                        let stderr = process.stderr_tail().await.join("\n").to_lowercase();
                         state.process = None;
                         let err = if looks_logged_out(&stderr) {
                             classify_error("", "not logged in")

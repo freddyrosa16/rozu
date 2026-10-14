@@ -207,7 +207,7 @@ impl Provider for GrokHeadless {
                         }
                     }
                     Ok(None) => {
-                        let stderr = process.stderr_tail().join("\n").to_lowercase();
+                        let stderr = process.stderr_tail().await.join("\n").to_lowercase();
                         yield Err(if protocol::looks_logged_out(&stderr) {
                             protocol::classify_error("not signed in")
                         } else {

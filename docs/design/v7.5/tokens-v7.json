@@ -1,5 +1,5 @@
 {
-  "$description": "rozu tokens v7 (CURRENT SPEC: v7.3 activity orb pill). Layered after tokens-v6.json. Deprecated from v6: bead.*, size.beadDiameter22, motion.morph 480ms, trail, arcBow, and the v5 progress line under the pill. CSS: tokens.css \u2192 tokens-v4.css \u2192 tokens-v5.css \u2192 tokens-v6.css \u2192 tokens-v7.css.",
+  "$description": "rozu tokens v7 (CURRENT SPEC: v7.5 activity orb pill: a dotted globe per state at two tuned sizes). Layered after tokens-v6.json. Deprecated from v6: bead.*, size.beadDiameter22, motion.morph 480ms, trail, arcBow, and the v5 progress line under the pill. CSS: tokens.css \u2192 tokens-v4.css \u2192 tokens-v5.css \u2192 tokens-v6.css \u2192 tokens-v7.css.",
   "color": {
     "orbDot": {
       "$type": "color",
@@ -85,12 +85,13 @@
   "orb": {
     "points": {
       "$type": "number",
-      "$value": 120,
-      "$description": "hard max"
+      "$value": 284,
+      "$description": "hard max; the large point set"
     },
     "points22": {
       "$type": "number",
-      "$value": 60
+      "$value": 86,
+      "$description": "the 22px point set"
     },
     "camera": {
       "$type": "number",
@@ -115,12 +116,12 @@
     },
     "dotBase": {
       "$type": "number",
-      "$value": 0.017,
+      "$value": 0.011,
       "$description": "\u00d7 orb size"
     },
     "dotBase22": {
       "$type": "number",
-      "$value": 0.05
+      "$value": 0.045
     },
     "litSize": {
       "$type": "number",
@@ -138,20 +139,15 @@
       "$type": "number",
       "$value": 1.6
     },
-    "contextAlpha": {
+    "globe": {
       "$type": "number",
-      "$value": [
-        0.18,
-        0.3
-      ],
-      "$description": "faded context dots (cue dots \u03b1 1)"
-    },
-    "cueSize": {
-      "$type": "number",
-      "$value": [
-        1.25,
-        1.4
-      ]
+      "$value": {
+        "radius": 0.9,
+        "tilt": 0.3,
+        "large": { "rings": 15, "lon": 30, "dots": 284, "dotMul": 1, "speedMul": 1 },
+        "small": { "rings": 9, "lon": 15, "dots": 86, "dotMul": 1.15, "speedMul": 1.15 }
+      },
+      "$description": "the dotted globe: lines of latitude, up to `lon` dots round the equator; the 22px size is its own point set"
     }
   },
   "motion": {
@@ -159,9 +155,15 @@
       "$type": "duration",
       "$value": "600ms"
     },
+    "orbAfterWaiting": {
+      "$type": "duration",
+      "$value": "1.3s",
+      "$description": "Done or Error right after Waiting: no morph; the breath fills up to the full globe over the settle, in the new tone"
+    },
     "orbStagger": {
       "$type": "duration",
-      "$value": "2.5ms"
+      "$value": "300ms",
+      "$description": "across the whole cloud: dot i starts hash(i)·300ms late"
     },
     "orbLift": {
       "$type": "number",
@@ -182,52 +184,52 @@
     "orbTempo": {
       "thinking": {
         "$type": "duration",
-        "$value": "1.6s"
+        "$value": "1.6s",
+        "$description": "two sparks ripple out, offset by half a period; the globe turns at .35 rad/s"
+      },
+      "reading": {
+        "$type": "duration",
+        "$value": "2.2s",
+        "$description": "a band reads down the globe"
       },
       "searching": {
         "$type": "duration",
         "$value": "2.4s",
-        "$description": "lens orbit"
-      },
-      "reading": {
-        "$type": "duration",
-        "$value": "2.2s"
-      },
-      "readingBand": {
-        "$type": "duration",
-        "$value": "4.4s"
-      },
-      "notes": {
-        "$type": "duration",
-        "$value": "3.0s"
+        "$description": "a lens roams the surface"
       },
       "editing": {
         "$type": "duration",
-        "$value": "530ms"
+        "$value": "2.6s",
+        "$description": "a caret writes every dot from the bottom of the globe to the top over 2s, holds, then clears in .3s"
       },
       "running": {
         "$type": "duration",
-        "$value": "800ms"
+        "$value": "900ms",
+        "$description": "a helical stripe; the globe spins at 2.4 rad/s"
       },
       "waiting": {
         "$type": "duration",
-        "$value": "2.6s"
+        "$value": "1.8s",
+        "$description": "the globe breathes ±3%"
       },
-      "offlineTick": {
+      "doneDraw": {
         "$type": "duration",
-        "$value": "300ms"
+        "$value": "500ms",
+        "$description": "the globe fills up green, then a 300ms pop"
       },
-      "doneRipple": {
+      "errorShake": {
         "$type": "duration",
-        "$value": "1.1s"
+        "$value": "900ms",
+        "$description": "damped shake, from 300ms"
+      },
+      "offline": {
+        "$type": "duration",
+        "$value": "2.4s",
+        "$description": "rings drop out in 400ms slots"
       },
       "settle": {
         "$type": "duration",
         "$value": "1.3s"
-      },
-      "notesStroke": {
-        "$type": "duration",
-        "$value": "1.5s"
       }
     }
   },

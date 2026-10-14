@@ -514,8 +514,10 @@ fn warnings_go_to_the_log_file_not_stderr() {
         .clone();
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("error:"), "{stderr}");
+    // No tracing `WARN` lines on stderr. (The Linux "NO OS SANDBOX" banner says "WARNING", so
+    // match the level token with its spaces.)
     assert!(
-        !stderr.contains("WARN") && !stderr.contains("retrying request"),
+        !stderr.contains(" WARN ") && !stderr.contains("retrying request"),
         "{stderr}"
     );
 
