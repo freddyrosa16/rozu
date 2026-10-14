@@ -1,0 +1,49 @@
+<!doctype html><html><head><meta charset=utf-8><title>rozu v7.5 orbs</title>
+<style>
+[data-theme=dark]{--bg-app:#0E0E10;--bg-surface:#151517;--border-subtle:#232327;--text-primary:#F4F1EA;--text-secondary:#B4B4BB;--text-muted:#7A7A82;
+  --orb-dot:#F4F1EA;--orb-pill-bg:#1B1B1D;--orb-pill-border:#2A2A2E;--orb-label:#F4F1EA;--orb-meta:#9A9AA2;--warning:#FBBF24;--success:#4ADE80;--danger:#F87171}
+[data-theme=light]{--bg-app:#F7F7F8;--bg-surface:#FFFFFF;--border-subtle:#E4E4E7;--text-primary:#18181B;--text-secondary:#46464D;--text-muted:#6B6B73;
+  --orb-dot:#25242A;--orb-pill-bg:#ECECEF;--orb-pill-border:#DCDCE0;--orb-label:#25242A;--orb-meta:#55555C;--warning:#8A5206;--success:#126B33;--danger:#B91C1C}
+*{box-sizing:border-box;margin:0}
+body{width:1400px;background:var(--bg-app);color:var(--text-primary);font:13px/1.5 Inter,system-ui,sans-serif;padding:28px 36px}
+.eyebrow{font:600 12px/1 system-ui;letter-spacing:.06em;text-transform:uppercase;color:var(--text-muted)}
+h1{font-size:26px;font-weight:600;margin:6px 0 4px}.sub{color:var(--text-secondary);max-width:1000px}
+.grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:12px;margin-top:18px}
+canvas.big{width:96px;height:96px}
+.card{border-radius:14px;background:var(--bg-surface);border:1px solid var(--border-subtle);padding:14px;display:flex;flex-direction:column;gap:12px}
+.name{font-weight:600}.big{display:block;margin:0 auto}
+.pill{display:inline-flex;align-items:center;gap:8px;height:32px;padding:0 12px 0 6px;border-radius:999px;align-self:flex-start;max-width:100%;white-space:nowrap;
+  background:var(--orb-pill-bg);border:1px solid var(--orb-pill-border)}
+.pill canvas{width:22px;height:22px;flex:none}.pill .l{font-weight:500;color:var(--orb-label);overflow:hidden;text-overflow:ellipsis}
+.pill .t{font:11px ui-monospace,monospace;color:var(--orb-meta)}
+.l.warning{color:var(--warning)}.l.success{color:var(--success)}.l.danger{color:var(--danger)}
+.meta{font:11px/1.5 ui-monospace,monospace;color:var(--text-muted)}
+.uses{font:11px/1.5 ui-monospace,monospace;color:var(--text-secondary)}
+</style></head>
+<body data-theme="dark">
+<div class="eyebrow">rozu v7.5 · activity orbs</div>
+<h1>A dotted globe, doing what the agent does</h1>
+<div class="sub">Every state is the same globe of small dots on lines of latitude; what it does is the state. The 22px pill draws its own smaller point set, tuned rather than scaled.</div>
+<div class="grid" id="grid"></div>
+<script src="v7.5-orb.js"></script><script>
+const CARDS=[
+ {orb:"thinking",name:"Thinking",label:"Thinking…",t:"0:01",meta:"sparks flash and ripple out over a slowly turning globe"},
+ {orb:"reading",name:"Reading",label:"Reading README.md",t:"0:03",meta:"a lit band reads down the globe"},
+ {orb:"searching",name:"Searching",label:'Searching "set_size"',t:"0:01",meta:"a lens roams the surface; the dots under it swell"},
+ {orb:"editing",name:"Editing",label:"Editing src/term/view.rs",t:"0:12",meta:"a caret writes every dot from the bottom of the globe to the top, then clears"},
+ {orb:"running",name:"Running",label:"Running cargo test",t:"0:08",meta:"a fast spin with a helical stripe"},
+ {orb:"waiting",name:"Waiting",label:"Waiting for approval",tone:"warning",t:"Y / N",meta:"the globe stops and breathes"},
+ {orb:"done",name:"Done",label:"Done",tone:"success",t:"42s · 2 files",meta:"the globe fills up green, pops once, then holds"},
+ {orb:"error",name:"Error",label:"Command failed",tone:"danger",t:"R retry",meta:"the full red globe shakes once, then holds"},
+ {orb:"offline",name:"Offline",label:"Offline · retrying",t:"in 3s",meta:"the globe dims and its rings drop out"},
+];
+const g=document.getElementById('grid');
+for(const c of CARDS){g.insertAdjacentHTML('beforeend',`<div class="card"><div class="name">${c.name}</div><canvas class="big" data-orb="${c.orb}"></canvas>
+ <div class="pill"><canvas data-orb="${c.orb}"></canvas><span class="l ${c.tone||''}">${c.label}</span><span class="t">${c.t}</span></div>
+ <div class="meta">${c.meta}</div></div>`)}
+const q=new URLSearchParams(location.search);document.body.dataset.theme=q.get('theme')||'dark';
+const still=q.has('still'),fixed=q.get('T');
+function frame(T){for(const cv of document.querySelectorAll('canvas[data-orb]')){const o=cv.dataset.orb;
+  const tt=fixed!=null?(+fixed):still?STILL[o]:(ORBS[o].loop?T:Math.min(T%3.2,3.2));drawOrb(cv,[{orb:o,start:0}],tt)}}
+if(fixed!=null||still)frame(0);else{const t0=performance.now();(function loop(now){frame((now-t0)/1000);requestAnimationFrame(loop)})(t0)}
+</script></body></html>

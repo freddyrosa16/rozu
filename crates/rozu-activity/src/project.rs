@@ -1,16 +1,14 @@
-//! Projection to a draw list: perspective, depth size/α, the top-left light, the lit boost, the
-//! 22px subsample and the depth sort (`drawOrb` in the reference, minus the canvas calls).
+//! Projection to a draw list: perspective, depth size/α, the top-left light, the lit boost and
+//! the depth sort (`drawOrb` in the reference, minus the canvas calls).
 
-use crate::generate::CAMERA;
+use crate::generate::{CAMERA, MAX_DOTS, OrbSize};
 use crate::orb::Sample;
 use crate::state::Tone;
 
-/// Most dots in one orb's draw list.
-pub const MAX_POINTS: usize = 120;
-/// Dots drawn at the 22px optical size (any orb ≤ 30px).
-pub const POINTS_22: usize = 60;
-/// Orbs at or under this size (logical px) use the 22px optical size.
-const SMALL_PX: f64 = 30.0;
+/// Most dots in one orb's draw list ([`OrbSize::Large`]).
+pub const MAX_POINTS: usize = MAX_DOTS;
+/// Dots drawn at the 22px optical size (any orb ≤ 30px), from [`OrbSize::Small`].
+pub const POINTS_22: usize = 86;
 /// At the small size, dots under this many device px are drawn as pixel-snapped squares.
 const SQUARE_DEVICE_PX: f64 = 1.6;
 /// The light direction (top-left, toward the viewer); not normalised, as in the reference.
@@ -49,8 +47,8 @@ fn js_round(v: f32) -> f32 {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ProjectOptions {
     /// Multiply each dot's radius by its state size multiplier `s` (`base · s · k · …`), and
-    /// skip dots with `s ≤ .02`. On by default, as in the v7.3 reference `drawOrb`; this is what
-    /// draws the 1.3× cue dots, Editing's empty wedge and Offline's sparse cloud. Off reproduces
+    /// skip dots with `s ≤ .02`. On by default, as in the v7.3+ reference `drawOrb`; this is what
+    /// draws the lit dots larger and leaves Offline's dropped rings empty. Off reproduces
     /// the v7.2 reference bug, where the perspective factor shadowed `s` (`{...b, s: F/(F-z)}`).
     pub apply_state_size: bool,
 }
@@ -63,14 +61,14 @@ impl Default for ProjectOptions {
     }
 }
 
-/// [`project_with`] with the default (v7.3 reference) options.
+/// [`project_with`] with the default (v7.5 reference) options.
 pub fn project(points: &[Sample], size_px: f32, scale: f32) -> Vec<DrawDot> {
     project_with(points, size_px, scale, ProjectOptions::default())
 }
 
 /// Projects `points` (an [`crate::Orb::sample`]) into a draw list for an orb `size_px` logical px
-/// wide at `scale` device px per logical px. At most [`MAX_POINTS`] dots, [`POINTS_22`] for
-/// orbs ≤ 30px, sorted far to near.
+/// wide at `scale` device px per logical px, sorted far to near. The sample should come from an
+/// orb of [`OrbSize::for_px`]`(size_px)`; at most [`MAX_POINTS`] dots are drawn.
 pub fn project_with(
     points: &[Sample],
     size_px: f32,
@@ -79,9 +77,9 @@ pub fn project_with(
 ) -> Vec<DrawDot> {
     let size = f64::from(size_px);
     let dpr = f64::from(scale.max(0.01));
-    let small = size <= SMALL_PX;
+    let small = OrbSize::for_px(size) == OrbSize::Small;
     let r_orb = size * 0.4;
-    let base = if small { size * 0.05 } else { size * 0.017 };
+    let base = if small { size * 0.045 } else { size * 0.011 };
     let px = 1.0 / dpr;
 
     struct Projected {
@@ -91,10 +89,7 @@ pub fn project_with(
     let mut out: Vec<Projected> = points
         .iter()
         .take(MAX_POINTS)
-        .enumerate()
-        // Keeps both parities, so alternating-bar states keep both bars.
-        .filter(|(i, _)| !small || ((i >> 1) + i) % 2 == 0)
-        .filter_map(|(_, b)| {
+        .filter_map(|b| {
             let z = b.p[2];
             let k = CAMERA / (CAMERA - z);
             let s = if opts.apply_state_size { b.s } else { 1.0 };
@@ -139,17 +134,16 @@ mod tests {
     use crate::state::ActivityState;
 
     #[test]
-    fn subsample_22px_gives_60() {
-        let picked = (0..MAX_POINTS).filter(|i| ((i >> 1) + i) % 2 == 0).count();
-        assert_eq!(picked, POINTS_22);
-        let pts = Orb::new(ActivityState::Thinking, 0.0).sample(0.5);
-        assert_eq!(project(&pts, 22.0, 2.0).len(), POINTS_22);
-        assert_eq!(project(&pts, 30.0, 1.0).len(), POINTS_22);
-        assert_eq!(project(&pts, 88.0, 2.0).len(), MAX_POINTS);
+    fn each_size_draws_its_own_dots() {
+        let small = Orb::with_size(OrbSize::Small, ActivityState::Thinking, 0.0).sample(0.5);
+        assert_eq!(project(&small, 22.0, 2.0).len(), POINTS_22);
+        assert_eq!(project(&small, 30.0, 1.0).len(), POINTS_22);
+        let large = Orb::new(ActivityState::Thinking, 0.0).sample(0.5);
+        assert_eq!(project(&large, 88.0, 2.0).len(), MAX_POINTS);
     }
 
     #[test]
-    fn at_most_120_points() {
+    fn at_most_max_points() {
         for state in ActivityState::ALL {
             let mut orb = Orb::new(ActivityState::Running, 0.0);
             orb.set_state(state, 0.5);
@@ -167,7 +161,7 @@ mod tests {
         for state in ActivityState::ALL {
             let pts = Orb::new(state, 0.0).sample(0.8);
             let dots = project(&pts, 88.0, 2.0);
-            // Dots with a state size of 0 (Editing's wedge, Offline's hidden cloud) are skipped.
+            // Dots with a state size of 0 (Offline's dropped rings, Editing's blinked-off caret) are skipped.
             let shown: Vec<_> = pts.iter().filter(|p| p.s > 0.02).collect();
             assert_eq!(dots.len(), shown.len());
             // The nearest drawn sample is drawn last.
@@ -180,7 +174,6 @@ mod tests {
             for d in &dots {
                 assert!(d.alpha >= 0.0 && d.alpha <= 1.0, "{state:?}: {d:?}");
                 assert!(d.radius > 0.0 && d.x.is_finite() && d.y.is_finite());
-                // Error's scatter overshoots the sphere (as in the reference renders).
                 assert!(
                     d.x > -30.0 && d.x < 118.0 && d.y > -30.0 && d.y < 118.0,
                     "{state:?}: {d:?}"
@@ -192,7 +185,7 @@ mod tests {
 
     #[test]
     fn small_dots_become_pixel_squares() {
-        let pts = Orb::new(ActivityState::Offline, 0.0).sample(0.75);
+        let pts = Orb::with_size(OrbSize::Small, ActivityState::Offline, 0.0).sample(0.75);
         let dots = project(&pts, 22.0, 1.0);
         assert!(dots.iter().any(|d| d.pixel_square));
         for d in dots.iter().filter(|d| d.pixel_square) {
@@ -212,10 +205,12 @@ mod tests {
     fn light_and_depth_brighten_the_front() {
         let mut near = Orb::new(ActivityState::Done, 0.0).sample(5.0)[0];
         near.lit = 0.0;
+        near.s = 1.0;
         near.p = [0.0, 0.0, 1.0];
         let mut far = near;
         far.p = [0.0, 0.0, -1.0];
-        let d = project(&[near, far], 88.0, 1.0);
+        // At 4× the minimum radius doesn't floor the far dot.
+        let d = project(&[near, far], 88.0, 4.0);
         let (back, front) = (d[0], d[1]);
         assert!(front.radius > 2.0 * back.radius);
         assert!(front.alpha > 3.0 * back.alpha);
@@ -224,14 +219,14 @@ mod tests {
     #[test]
     fn state_size_is_applied_by_default() {
         assert!(ProjectOptions::default().apply_state_size);
-        // Editing's wedge (s = 0) is empty by default; the v7.2 legacy mode draws every dot.
-        let pts = Orb::new(ActivityState::Editing, 0.0).sample(0.06);
+        // Offline's dropped rings (s = 0) are empty by default; the v7.2 legacy mode draws every dot.
+        let pts = Orb::new(ActivityState::Offline, 0.0).sample(0.0);
         let shown = project(&pts, 88.0, 2.0).len();
         let legacy = ProjectOptions {
             apply_state_size: false,
         };
         assert_eq!(project_with(&pts, 88.0, 2.0, legacy).len(), MAX_POINTS);
-        assert!(shown < MAX_POINTS, "the wedge's dots have s = 0");
+        assert!(shown < MAX_POINTS, "the gap's dots have s = 0");
     }
 
     #[test]

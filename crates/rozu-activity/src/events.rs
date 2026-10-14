@@ -99,9 +99,9 @@ impl Activity {
 pub fn tool_state(name: &str) -> Option<ActivityState> {
     let words = words(name);
     let has = |list: &[&str]| words.iter().any(|w| list.contains(&w.as_str()));
-    // Order matters: `TodoWrite` is notes, not editing.
+    // Note-taking tools (`TodoWrite`, memory, plans) are editing too.
     if has(&["notes", "note", "todo", "todos", "memory", "plan"]) {
-        Some(ActivityState::Notes)
+        Some(ActivityState::Editing)
     } else if has(&["grep", "search", "glob", "find", "rg"]) {
         Some(ActivityState::Searching)
     } else if has(&["write", "edit", "multiedit", "patch", "replace", "create"]) {
@@ -543,8 +543,8 @@ mod tests {
             ("shell", Running),
             ("Bash", Running),
             ("mcp__rozu__shell", Running),
-            ("notes", Notes),
-            ("TodoWrite", Notes),
+            ("notes", Editing),
+            ("TodoWrite", Editing),
         ] {
             assert_eq!(tool_state(name), Some(state), "{name}");
         }
@@ -790,7 +790,7 @@ mod tests {
         assert_eq!(state(&ev("write_file", "{}")), Some(Editing));
         assert_eq!(state(&ev("apply_patch", "{}")), Some(Editing));
         assert_eq!(state(&ev("shell", r#"{"command":"ls"}"#)), Some(Running));
-        assert_eq!(state(&ev("TodoWrite", "{}")), Some(Notes));
+        assert_eq!(state(&ev("TodoWrite", "{}")), Some(Editing));
         assert_eq!(
             state(&AgentEvent::ToolCallFinished {
                 id: "c1".into(),

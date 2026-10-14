@@ -1,0 +1,9 @@
+<!doctype html><html><head><meta charset=utf-8><style>
+[data-theme=dark]{--bg:#1B1B1D;--orb-dot:#F4F1EA;--warning:#FBBF24;--success:#4ADE80;--danger:#F87171}
+[data-theme=light]{--bg:#ECECEF;--orb-dot:#25242A;--warning:#8A5206;--success:#126B33;--danger:#B91C1C}
+body{margin:0;background:var(--bg);display:grid;grid-template-columns:repeat(8,auto);gap:4px;padding:8px;width:max-content;height:max-content}
+canvas{width:96px;height:96px}</style></head><body data-theme="dark"><script src="v7.5-orb.js"></script><script>
+const q=new URLSearchParams(location.search);document.body.dataset.theme=q.get('theme')||'dark';
+const tl=[{orb:q.get('from')||'running',start:0},{orb:q.get('to')||'done',start:1}];
+for(const t of [.9,1.05,1.15,1.25,1.4,1.6,1.9,2.4]){const c=document.createElement('canvas');document.body.appendChild(c);drawOrb(c,tl,t)}
+</script></body></html>

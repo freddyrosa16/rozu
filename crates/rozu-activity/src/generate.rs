@@ -1,13 +1,11 @@
-//! Per-state point generators, ported 1:1 from `docs/design/v7.3/reference/v7.3-orb.js`.
+//! Per-state point generators, ported 1:1 from `docs/design/v7.5/reference/v7.5-orb.js`.
 //!
-//! Every state is the same spherical cloud of [`N_POINTS`] dots: dot `i` has a Fibonacci-sphere
-//! direction `d_i` and a phase `φ_i = (t/T + hash i) mod 1`, and states differ only in how the
-//! flow behaves. The arithmetic (including JS's truncating `%`) is kept as in the reference so
+//! Every state is the same object: a globe of small matte dots on lines of latitude
+//! ([`OrbSize::grid`]), and the state is what the globe is doing; Done and Error are the full
+//! globe in green and red (filling up with a pop, or shaking once). There are two sizes, tuned
+//! separately rather than scaled: [`OrbSize::Large`] (15 rings) and [`OrbSize::Small`] (the 22px
+//! pill, 9 rings). The arithmetic (including JS's truncating `%`) is kept as in the reference so
 //! samples match it at the same `t`.
-//!
-//! Thinking, Reading, Editing and Running are unchanged from v7.2. Searching, Notes, Waiting,
-//! Done, Error and Offline are the v7.3 redesigns: one bold lit cue against faded context dots
-//! (the reference's `C` helper, `cue` here).
 
 use std::f64::consts::{PI, TAU};
 
@@ -16,11 +14,94 @@ use crate::state::ActivityState;
 /// A point in orb space (unit-radius sphere, +y up, +z toward the camera).
 pub type Vec3 = [f64; 3];
 
-/// Dots per orb (≥30px). 22px orbs draw a 60-dot subsample.
-pub const N_POINTS: usize = 120;
-
 /// Camera distance: perspective `k = F / (F − z)`.
 pub const CAMERA: f64 = 3.2;
+
+/// The globe's radius.
+pub const R: f64 = 0.9;
+/// The globe's tilt toward the camera (rad).
+const TILT: f64 = 0.3;
+/// Which tuned point set to draw: each size is its own dot grid, not a subsample.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum OrbSize {
+    /// Orbs over 30px: 15 lines of latitude, up to 30 dots round the equator (284 dots).
+    Large,
+    /// The 22px pill: 9 lines of latitude, up to 15 dots round the equator (86 dots).
+    Small,
+}
+
+impl OrbSize {
+    pub const ALL: [OrbSize; 2] = [OrbSize::Large, OrbSize::Small];
+
+    /// The size for an orb `px` logical px wide.
+    pub fn for_px(px: f64) -> Self {
+        if px <= 30.0 {
+            OrbSize::Small
+        } else {
+            OrbSize::Large
+        }
+    }
+
+    /// Lines of latitude.
+    pub const fn rings(self) -> usize {
+        match self {
+            OrbSize::Large => 15,
+            OrbSize::Small => 9,
+        }
+    }
+
+    /// Dots round the equator; rings nearer the poles get proportionally fewer (at least 3).
+    pub const fn lon(self) -> usize {
+        match self {
+            OrbSize::Large => 30,
+            OrbSize::Small => 15,
+        }
+    }
+
+    /// Dot size multiplier (`P.dot`).
+    pub const fn dot(self) -> f64 {
+        match self {
+            OrbSize::Large => 1.0,
+            OrbSize::Small => 1.15,
+        }
+    }
+
+    /// Spin speed multiplier (`P.speed`).
+    pub const fn speed(self) -> f64 {
+        match self {
+            OrbSize::Large => 1.0,
+            OrbSize::Small => 1.15,
+        }
+    }
+
+    /// Dots in ring `j`.
+    fn ring_len(self, j: usize) -> usize {
+        let phi = -PI / 2.0 + PI * (j as f64 + 0.5) / self.rings() as f64;
+        ((self.lon() as f64 * phi.cos()).round() as usize).max(3)
+    }
+
+    /// Total dots (`P.N`).
+    pub fn dots(self) -> usize {
+        (0..self.rings()).map(|j| self.ring_len(j)).sum()
+    }
+
+    /// Dot `i`'s `(latitude, longitude, ring)`: `P.grid[i]`.
+    pub fn grid(self, i: usize) -> (f64, f64, usize) {
+        let mut rest = i;
+        for j in 0..self.rings() {
+            let n = self.ring_len(j);
+            if rest < n {
+                let phi = -PI / 2.0 + PI * (j as f64 + 0.5) / self.rings() as f64;
+                return (phi, TAU * rest as f64 / n as f64, j);
+            }
+            rest -= n;
+        }
+        panic!("dot {i} is past the {self:?} grid");
+    }
+}
+
+/// Most dots in any size ([`OrbSize::Large`]).
+pub const MAX_DOTS: usize = 284;
 
 /// One generated dot: position, lit amount, state size multiplier and α multiplier.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -35,16 +116,8 @@ pub struct Dot {
     pub a: f64,
 }
 
-fn cl(v: f64) -> f64 {
+pub(crate) fn cl(v: f64) -> f64 {
     v.clamp(0.0, 1.0)
-}
-
-/// Fibonacci-sphere direction `i` of `n`.
-pub fn fib(i: usize, n: usize) -> Vec3 {
-    let y = 1.0 - 2.0 * (i as f64 + 0.5) / n as f64;
-    let r = (1.0 - y * y).sqrt();
-    let a = i as f64 * 2.399_963_23;
-    [a.cos() * r, y, a.sin() * r]
 }
 
 pub(crate) fn rot_x(p: Vec3, a: f64) -> Vec3 {
@@ -63,217 +136,196 @@ pub fn hash(i: usize) -> f64 {
     x - x.floor()
 }
 
-/// Elastic overshoot spring (ζ≈.55), used by Error's scatter.
-fn spr_o(u: f64) -> f64 {
-    if u <= 0.0 {
-        0.0
-    } else if u >= 1.6 {
-        1.0
-    } else {
-        1.0 - (-6.0 * u).exp() * ((9.0 * u).cos() + 0.65 * (9.0 * u).sin())
-    }
+/// Deterministic hash of two values in [0, 1).
+pub fn hash2(a: f64, b: f64) -> f64 {
+    let x = (a * 12.9898 + b * 78.233).sin() * 43_758.545_3;
+    x - x.floor()
 }
 
-fn dir(i: usize) -> Vec3 {
-    fib(i, N_POINTS)
-}
-
-/// The shared camera: yaw `t·yaw` around y, then a fixed .3 rad tilt.
-fn view(p: Vec3, t: f64, yaw: f64) -> Vec3 {
-    rot_x(rot_y(p, t * yaw), 0.3)
-}
-
-fn sc(d: Vec3, r: f64) -> Vec3 {
-    [d[0] * r, d[1] * r, d[2] * r]
-}
-
-fn hypot3(p: Vec3) -> f64 {
-    (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt()
-}
-
-/// `Math.hypot(...p) || 1`.
-fn len_or_one(p: Vec3) -> f64 {
-    let m = hypot3(p);
-    if m == 0.0 { 1.0 } else { m }
+/// Smooth value noise on a 2D lattice.
+pub fn vnoise(x: f64, y: f64) -> f64 {
+    let (xi, yi) = (x.floor(), y.floor());
+    let (mut fx, mut fy) = (x - xi, y - yi);
+    fx = fx * fx * (3.0 - 2.0 * fx);
+    fy = fy * fy * (3.0 - 2.0 * fy);
+    let a = hash2(xi, yi);
+    let b = hash2(xi + 1.0, yi);
+    let c = hash2(xi, yi + 1.0);
+    let d = hash2(xi + 1.0, yi + 1.0);
+    a + (b - a) * fx + (c - a) * fy + (a - b - c + d) * fx * fy
 }
 
 fn dot(p: Vec3, lit: f64, s: f64, a: f64) -> Dot {
     Dot { p, lit, s, a }
 }
 
-/// The v7.3 cue helper `C(p, on, sizeOn, sizeOff, alphaOff)`: cue dots are lit at full α and
-/// `size_on`; context dots are unlit, `size_off` and faded to `alpha_off`.
-fn cue(p: Vec3, on: bool, size_on: f64, size_off: f64, alpha_off: f64) -> Dot {
-    if on {
-        dot(p, 1.0, size_on, 1.0)
-    } else {
-        dot(p, 0.0, size_off, alpha_off)
-    }
+/// Dot `i`'s unit direction before the spin.
+fn dir(size: OrbSize, i: usize) -> Vec3 {
+    let (phi, lam, _) = size.grid(i);
+    let c = phi.cos();
+    [c * lam.cos(), phi.sin(), c * lam.sin()]
 }
 
-/// Dot `i` of `state` at `t` seconds into the state.
-pub fn generate(state: ActivityState, i: usize, t: f64) -> Dot {
-    let h = hash(i);
+/// Dot `i` on the globe of radius `r`, spun by `yaw` radians and tilted toward the camera.
+fn globe(size: OrbSize, i: usize, yaw: f64, r: f64) -> Vec3 {
+    let d = dir(size, i);
+    rot_x(rot_y([d[0] * r, d[1] * r, d[2] * r], yaw), TILT)
+}
+
+/// Fraction `0..1` round a ring, starting at the front and going round the back (writing order).
+fn round_from(size: OrbSize, i: usize) -> f64 {
+    ((-front(size, i, 0.0)) % TAU + TAU) % TAU / TAU
+}
+
+/// Geodesic angle (rad) between dot `i` and the surface point `(phi0, lam0)`.
+fn geo(size: OrbSize, i: usize, phi0: f64, lam0: f64) -> f64 {
+    let (phi, lam, _) = size.grid(i);
+    (phi.sin() * phi0.sin() + phi.cos() * phi0.cos() * (lam - lam0).cos())
+        .clamp(-1.0, 1.0)
+        .acos()
+}
+
+/// Where dot `i` faces the camera: 0 at the front, ±π at the back, after a spin of `yaw`.
+fn front(size: OrbSize, i: usize, yaw: f64) -> f64 {
+    let a = size.grid(i).1 - yaw - PI / 2.0;
+    a.sin().atan2(a.cos())
+}
+
+/// The breathing globe at breath `b` (0 small and dim, 1 full and bright): Waiting, and what Done
+/// and Error become right after Waiting (see [`crate::Orb`]).
+pub fn breath(size: OrbSize, i: usize, b: f64) -> Dot {
+    let k = size.dot();
+    let p = globe(size, i, 0.0, R * (0.96 + 0.06 * b));
+    dot(p, 0.2 + 0.5 * b, (0.9 + 0.25 * b) * k, 0.6 + 0.4 * b)
+}
+
+/// Dot `i` of `state` at `t` seconds into the state, for `size`.
+pub fn generate(size: OrbSize, state: ActivityState, i: usize, t: f64) -> Dot {
+    let k = size.dot();
     match state {
-        // Bright dense core: dots rush in, then linger at the core (φ^.55); core dots lit.
+        // Two sparks take turns: each flashes at a point on the front of the slowly turning
+        // globe, and a ripple spreads out from it and fades.
         ActivityState::Thinking => {
-            let ph = (t / 1.6 + h) % 1.0;
-            let r = 1.0 - 0.88 * ph.powf(0.55);
-            let core = r < 0.42;
-            dot(
-                view(sc(dir(i), r), t, 0.5),
-                if core { 1.0 } else { 0.0 },
-                if core { 1.3 } else { 0.6 },
-                if core { 1.0 } else { 0.4 },
-            )
-        }
-        // Scan lens: a bright lit cap orbits the rim like a lens sweeping; the rest flows in,
-        // faded.
-        ActivityState::Searching => {
-            let ph = (t / 2.4 + h) % 1.0;
-            let mut p = view(sc(dir(i), 1.0 - 0.5 * ph * ph), t, 0.2);
-            let a = TAU * t / 2.4;
-            let c0 = [0.78 * a.cos(), 0.5 * a.sin(), 0.45];
-            let cm = hypot3(c0);
-            let c = [c0[0] / cm, c0[1] / cm, c0[2] / cm];
-            let m = len_or_one(p);
-            let on = (p[0] * c[0] + p[1] * c[1] + p[2] * c[2]) / m > 0.86;
-            if on {
-                p[0] *= 1.06;
-                p[1] *= 1.06;
+            let yaw = 0.35 * t * size.speed();
+            let p = globe(size, i, yaw, R);
+            let mut lit: f64 = 0.0;
+            for s in 0..2 {
+                const T: f64 = 1.6;
+                let off = s as f64 * T / 2.0;
+                let age = (t + off) % T;
+                let cycle = ((t + off) / T).floor();
+                let (h1, h2) = (hash2(cycle, s as f64 + 1.0), hash2(s as f64 + 1.0, cycle));
+                let d = geo(
+                    size,
+                    i,
+                    (2.0 * h1 - 1.0) * 0.6,
+                    yaw + PI / 2.0 + (2.0 * h2 - 1.0) * 1.1,
+                );
+                let ring = (-((d - age * 1.1) / 0.3).powi(2)).exp() * (1.0 - age / T).powf(1.5);
+                let spark = if d < 0.25 {
+                    (1.0 - age / 0.4).max(0.0)
+                } else {
+                    0.0
+                };
+                lit = lit.max(ring).max(spark);
             }
-            cue(p, on, 1.35, 0.5, 0.25)
+            dot(p, lit, (0.85 + 0.45 * lit) * k, 0.45 + 0.55 * lit)
         }
-        // Tilted lit band across a gently inflowing cloud, sliding slowly.
+        // Three lines of text write themselves round the globe, hold, then start over.
         ActivityState::Reading => {
-            let ph = (t / 2.2 + h) % 1.0;
-            let p = view(sc(dir(i), 1.0 - 0.18 * ph), t, 0.25);
-            let c = 0.25 * (TAU * t / 4.4).sin();
-            let v = 0.75 * p[1] - 0.66 * p[0];
-            let on = (v - c).abs() < 0.17;
-            dot(
-                p,
-                if on { 1.0 } else { 0.0 },
-                if on { 1.2 } else { 0.7 },
-                if on { 1.0 } else { 0.55 },
-            )
+            let (phi, _, _) = size.grid(i);
+            let p = globe(size, i, 0.25 * t * size.speed(), R);
+            let yb = PI / 2.0 - PI * ((t % 2.2) / 2.2) * 1.15 + 0.07;
+            let on = (-((phi - yb) / 0.17).powi(2)).exp();
+            dot(p, on, (0.8 + 0.5 * on) * k, 0.35 + 0.65 * on)
         }
-        // Ink stroke: a lit comet stroke writes round a tilted latitude, its tail fading; the
-        // cloud drifts out, faded.
-        ActivityState::Notes => {
-            let d = dir(i);
-            let ph = (t / 3.0 + h) % 1.0;
-            let p = view(sc(d, 0.7 + 0.3 * ph), t, 0.15);
-            let lon = d[2].atan2(d[0]);
-            let lag = ((TAU * t / 1.5 - lon) % TAU + TAU) % TAU;
-            let band = (d[1] - 0.45 * lon.sin()).abs() < 0.26;
-            let on = band && lag < 4.4;
-            let mut q = cue(p, on, 1.25 - 0.3 * lag / 4.4, 0.45, 0.18);
-            if on {
-                q.a = 1.0 - 0.35 * lag / 4.4;
-            }
-            q
+        // A lens roams the surface; the dots under it swell.
+        ActivityState::Searching => {
+            let (phi, _, _) = size.grid(i);
+            let yaw = 0.3 * t * size.speed();
+            let p = globe(size, i, yaw, R);
+            let a = TAU * t / 2.4;
+            let cphi = 0.35 * (a * 0.7).sin();
+            let clam = front(size, i, yaw) - 0.9 * a.sin();
+            let d = (phi - cphi).hypot(clam * cphi.cos());
+            let lit = cl((0.42 - d) / 0.12);
+            dot(p, lit, (0.85 + 0.55 * lit) * k, 0.4 + 0.6 * lit)
         }
-        // Tight ball with a gap: a compressed ball clicking inward every 530ms; a caret-shaped
-        // wedge on the right is empty (s = 0).
+        // One full line of a page is revised: a caret sweeps round it and the dots behind it
+        // brighten as new text, settling back over half a lap.
         ActivityState::Editing => {
-            let u = (t % 0.53) / 0.53;
-            let pulse = if u < 0.12 {
-                u / 0.12
+            // A caret writes every dot, ring by ring, from the bottom of the globe to the top:
+            // written over 2s, held, then cleared over the last .3s.
+            let (_, _, j) = size.grid(i);
+            let p = globe(size, i, 0.0, R);
+            let ph = t % 2.6;
+            let rings = size.rings() as f64;
+            let o = (j as f64 + round_from(size, i)) / rings;
+            let w = (ph / 2.0).min(1.0);
+            if ph >= 2.3 {
+                let q = (ph - 2.3) / 0.3;
+                return dot(p, 0.75 * (1.0 - q), (1.15 - 0.4 * q) * k, 0.9 - 0.6 * q);
+            }
+            if o >= w {
+                return dot(p, 0.0, 0.75 * k, 0.3);
+            }
+            // The last ring and a half is fresh; the newest dot is the caret.
+            let fresh = (1.0 - (w - o) * rings / 1.5).max(0.0);
+            let head = ph < 2.0 && (w - o) * rings * (size.ring_len(j) as f64) < 1.0;
+            if head {
+                dot(p, 1.0, 1.7 * k, 0.9 + 0.1 * fresh)
             } else {
-                (-(u - 0.12) * 9.0).exp()
-            };
-            let ph = (t / 2.4 + h) % 1.0;
-            let p = view(
-                sc(dir(i), (0.66 - 0.08 * ph) * (1.0 - 0.22 * pulse)),
-                0.0,
-                0.0,
-            );
-            let gap = p[1].atan2(p[0]).abs() < 0.75;
-            dot(
-                p,
-                if pulse > 0.5 { 0.8 } else { 0.2 },
-                if gap { 0.0 } else { 1.15 },
-                1.0,
-            )
+                dot(
+                    p,
+                    0.75 + 0.25 * fresh,
+                    (1.15 + 0.5 * fresh) * k,
+                    0.9 + 0.1 * fresh,
+                )
+            }
         }
-        // Two spiral arms: fast inflow; the twist grows into the core so the lit arms wind.
+        // The globe spins fast with a helical stripe racing round it.
         ActivityState::Running => {
-            let ph = (t / 0.8 + h) % 1.0;
-            let d = dir(i);
-            let arm = (2.0 * d[2].atan2(d[0])).cos() > 0.55;
-            let r = 1.0 - 0.86 * ph;
-            let p = rot_x(rot_y(sc(d, r), 2.6 * ph + t * 2.5), 1.15);
+            let (phi, lam, _) = size.grid(i);
+            let p = globe(size, i, 2.4 * t * size.speed(), R);
+            let s = 0.5 + 0.5 * (2.0 * phi + lam - TAU * t / 0.9).sin();
+            let lit = cl(s * 1.4 - 0.4);
+            dot(p, lit * 0.75, (0.9 + 0.25 * lit) * k, 0.5 + 0.5 * lit)
+        }
+        // The globe stops and breathes, asking for you.
+        ActivityState::Waiting => breath(size, i, 0.5 + 0.5 * (TAU * t / 1.8).sin()),
+        // The globe fills up green over .5s, pops once, then holds.
+        ActivityState::Done => {
+            let d = breath(size, i, cl(t / 0.5));
+            let pop = if t > 0.5 && t < 0.8 {
+                (PI * (t - 0.5) / 0.3).sin()
+            } else {
+                0.0
+            };
+            dot(d.p, d.lit, d.s * (1.0 + 0.15 * pop), d.a)
+        }
+        // The full red globe shakes once, like a head saying no, then holds.
+        ActivityState::Error => {
+            let st = t - 0.3;
+            let dx = if st > 0.0 && st < 0.9 {
+                0.13 * (-5.0 * st).exp() * (28.0 * st).sin()
+            } else {
+                0.0
+            };
+            let d = breath(size, i, 1.0);
+            dot([d.p[0] + dx, d.p[1], d.p[2]], d.lit, d.s, d.a)
+        }
+        // The globe dims and its rings drop out, one flicker at a time.
+        ActivityState::Offline => {
+            let (_, _, j) = size.grid(i);
+            let p = globe(size, i, 0.12 * t, R * 0.92);
+            let slot = (t / 0.4).floor();
+            let off = hash2(j as f64, slot) < 0.42 || hash2(i as f64, slot) < 0.12;
             dot(
                 p,
-                if arm { 1.0 } else { 0.0 },
-                if arm { 1.35 } else { 0.45 },
-                if arm { 1.0 } else { 0.18 },
+                0.0,
+                if off { 0.0 } else { 0.85 * k },
+                if off { 0.0 } else { 0.45 },
             )
-        }
-        // Pause bars: two lit vertical bands on a frozen cloud that breathes.
-        ActivityState::Waiting => {
-            let ph = h * 0.85;
-            let b = (TAU * t / 2.6).sin();
-            let p = view(
-                sc(dir(i), (1.0 - 0.5 * ph * ph) * (1.0 + 0.06 * b)),
-                0.0,
-                0.0,
-            );
-            let on = (p[0].abs() - 0.32).abs() < 0.12 && p[1].abs() < 0.7;
-            let mut q = cue(p, on, 1.3, 0.5, 0.22);
-            if on {
-                q.lit = 0.7 + 0.3 * (b * 0.5 + 0.5);
-            }
-            q
-        }
-        // Halo: the cloud settles on the shell; after one outward ripple its silhouette rim
-        // lights as a bright halo.
-        ActivityState::Done => {
-            let d = dir(i);
-            let front = 1.0 - 2.0 * cl(t / 1.1);
-            let rip = if t < 1.3 {
-                0.12 * (-((d[1] - front) / 0.18).powi(2)).exp()
-            } else {
-                0.0
-            };
-            let p = view(sc(d, 0.84 + rip), t, 0.12);
-            let on = 1.0 - p[2].abs() / len_or_one(p) > 0.6;
-            cue(p, on || rip > 0.06, 1.3, 0.55, 0.3)
-        }
-        // Break: the flow stalls, then a lit third is flung out once into a ragged outer ring;
-        // the core stays dim.
-        ActivityState::Error => {
-            let d = dir(i);
-            let ph = h * 0.85;
-            let r0 = 0.55 - 0.3 * ph * ph;
-            let out = hash(i + 7) < 0.38;
-            let sct = if t < 0.18 {
-                0.0
-            } else {
-                spr_o((t - 0.18) / 0.5)
-            };
-            let r = if out {
-                r0 + (0.6 + 0.15 * hash(i + 3)) * sct
-            } else {
-                r0 * (1.0 - 0.1 * sct)
-            };
-            cue(view(sc(d, r), 0.0, 0.0), out, 1.3, 0.55, 0.28)
-        }
-        // Broken ring: a lit vertical ring with a dark gap; a dim spark sputters across the gap
-        // on .3s ticks; the rest is a faint sparse cloud.
-        ActivityState::Offline => {
-            let k = (t / 0.3).floor();
-            let burst = if k % 4.0 < 2.0 { (t % 0.3) / 0.3 } else { 1.0 };
-            let ph = ((k + burst) * 0.07 + h) % 1.0;
-            let p = view(sc(dir(i), 1.0 - 0.4 * ph * ph), t, 0.18);
-            let ring = p[0].abs() < 0.15;
-            let gap = p[1] > -0.05 && p[1] < 0.5;
-            let spark = gap && ring && k % 4.0 == 1.0;
-            if !ring && i % 3 != 0 {
-                return dot(p, 0.0, 0.0, 1.0);
-            }
-            cue(p, ring && (!gap || spark), 1.25, 0.5, 0.2)
         }
     }
 }
@@ -301,23 +353,60 @@ pub(crate) fn pulse(tin: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ActivityState::*;
+    use OrbSize::*;
+
+    fn frame(size: OrbSize, state: ActivityState, t: f64) -> Vec<Dot> {
+        (0..size.dots())
+            .map(|i| generate(size, state, i, t))
+            .collect()
+    }
+
+    fn xy_len(d: &Dot) -> f64 {
+        d.p[0].hypot(d.p[1])
+    }
+
+    #[test]
+    fn grids_match_the_reference() {
+        assert_eq!(Large.dots(), MAX_DOTS);
+        assert_eq!(Small.dots(), 86);
+        assert_eq!(OrbSize::for_px(22.0), Small);
+        assert_eq!(OrbSize::for_px(30.0), Small);
+        assert_eq!(OrbSize::for_px(88.0), Large);
+        for size in OrbSize::ALL {
+            let mut last = (0, 0.0);
+            for i in 0..size.dots() {
+                let (phi, lam, j) = size.grid(i);
+                assert!(phi.abs() < PI / 2.0 && (0.0..TAU).contains(&lam));
+                assert!(j >= last.0, "rings are in order");
+                if j == last.0 && i > 0 {
+                    assert!(lam > last.1, "dots go round each ring");
+                }
+                last = (j, lam);
+            }
+            assert_eq!(last.0, size.rings() - 1);
+        }
+    }
 
     #[test]
     fn every_state_is_finite() {
-        for state in ActivityState::ALL {
-            for k in 0..200 {
-                let t = k as f64 * 0.037;
-                for i in 0..N_POINTS {
-                    let d = generate(state, i, t);
-                    let vals = [d.p[0], d.p[1], d.p[2], d.lit, d.s, d.a];
-                    assert!(
-                        vals.iter().all(|v| v.is_finite()),
-                        "{state:?} i={i} t={t}: {d:?}"
-                    );
-                    assert!(
-                        d.p.iter().all(|v| v.abs() < 2.0),
-                        "{state:?} escaped: {d:?}"
-                    );
+        for size in OrbSize::ALL {
+            for state in ActivityState::ALL {
+                for k in 0..120 {
+                    let t = k as f64 * 0.037;
+                    for d in frame(size, state, t) {
+                        let vals = [d.p[0], d.p[1], d.p[2], d.lit, d.s, d.a];
+                        assert!(
+                            vals.iter().all(|v| v.is_finite()),
+                            "{size:?} {state:?} t={t}: {d:?}"
+                        );
+                        assert!(
+                            d.p.iter().all(|v| v.abs() < 1.2),
+                            "{state:?} escaped: {d:?}"
+                        );
+                        assert!((0.0..=1.0).contains(&d.lit), "{state:?}: {d:?}");
+                        assert!((0.0..=1.0).contains(&d.a), "{state:?}: {d:?}");
+                    }
                 }
             }
         }
@@ -326,88 +415,98 @@ mod tests {
     #[test]
     fn deterministic() {
         for state in ActivityState::ALL {
-            for i in [0, 1, 59, 119] {
-                assert_eq!(generate(state, i, 0.731), generate(state, i, 0.731));
+            for i in [0, 1, 59, 85] {
+                assert_eq!(
+                    generate(Small, state, i, 0.731),
+                    generate(Small, state, i, 0.731)
+                );
             }
         }
     }
 
+    /// Whole-cloud checksums, Σ value·(1 + i/7) over all dots, from the JS reference
+    /// (`docs/design/v7.5/reference/v7.5-orb.js`) at the same times, for both sizes.
     #[test]
-    fn fib_is_on_unit_sphere() {
-        for i in 0..N_POINTS {
-            assert!((hypot3(fib(i, N_POINTS)) - 1.0).abs() < 1e-12);
-        }
-    }
-
-    /// Thinking, Reading, Editing and Running are the liked v7.2 states and must not change in
-    /// v7.3. These values were captured from the v7.2 generators before the v7.3 port.
-    #[test]
-    fn liked_four_are_unchanged_from_v7_2() {
-        use ActivityState::*;
+    fn matches_the_reference() {
         #[rustfmt::skip]
-        let points: [(ActivityState, usize, f64, Vec3, f64, f64, f64); 28] = [
-            (Thinking, 0, 0.0, [0.027229338167722324, 0.2002356779112461, 0.061940153643105345], 1.0, 1.3, 1.0),
-            (Thinking, 7, 0.37, [-0.20617695716085296, 0.6555120824840291, -0.07300789561602741], 0.0, 0.6, 0.4),
-            (Thinking, 59, 1.23, [-0.2841845318677268, -0.0319623534947184, 0.11198606262838304], 1.0, 1.3, 1.0),
-            (Thinking, 119, 4.9, [0.05185013168818953, -0.42088829455088655, -0.10710287757121442], 0.0, 0.6, 0.4),
-            (Thinking, 3, 0.5, [0.03923522799964504, 0.12433155698947855, 0.07077803936582296], 1.0, 1.3, 1.0),
-            (Thinking, 42, 0.06, [0.48606045410082455, 0.11091179978121796, 0.15746482220710084], 0.0, 0.6, 0.4),
-            (Thinking, 88, 2.71, [-0.3377442997046392, -0.2930258814473795, 0.17530492742743348], 0.0, 0.6, 0.4),
-            (Reading, 0, 0.0, [0.10983082899294276, 0.8076601187841367, 0.24983855210394762], 0.0, 0.7, 0.55),
-            (Reading, 7, 0.37, [-0.2578108148797743, 0.9414422417923811, -0.12840043765079817], 0.0, 0.7, 0.55),
-            (Reading, 59, 1.23, [-0.9181146213641125, -0.014784031715579585, 0.073769324530391], 0.0, 0.7, 0.55),
-            (Reading, 119, 4.9, [-0.006477417415013221, -0.8775184001034685, -0.15154867517369075], 0.0, 0.7, 0.55),
-            (Reading, 3, 0.5, [0.19999255434221594, 0.700986979998921, 0.42884032133587097], 0.0, 0.7, 0.55),
-            (Reading, 42, 0.06, [0.8731091580682094, 0.19610149004152072, 0.2964518639978432], 0.0, 0.7, 0.55),
-            (Reading, 88, 2.71, [-0.7335675385864536, -0.3714212542145827, -0.1399017866807512], 0.0, 0.7, 0.55),
-            (Editing, 0, 0.0, [0.07658376860561912, 0.5631720730517805, 0.17420953696271455], 0.2, 1.15, 1.0),
-            (Editing, 7, 0.37, [-0.14580724455402252, 0.6291939712179894, -0.09923565863064213], 0.2, 1.15, 1.0),
-            (Editing, 59, 1.23, [-0.5905406250431272, 0.04498027941590709, -0.12832069931215434], 0.2, 1.15, 1.0),
-            (Editing, 119, 4.9, [-0.07181190414977058, -0.557295911999208, -0.1500170798926752], 0.2, 1.15, 1.0),
-            (Editing, 3, 0.5, [0.12140266034855403, 0.4865632233258464, 0.3162629506552611], 0.2, 1.15, 1.0),
-            (Editing, 42, 0.06, [0.46399829651790775, 0.10257035102281994, 0.16483648966758083], 0.8, 0.0, 1.0),
-            (Editing, 88, 2.71, [-0.3143592354695935, -0.1339102859199668, -0.3242886982744833], 0.8, 1.15, 1.0),
-            (Running, 0, 0.0, [-0.020195611735898625, 0.14909907081355758, 0.25420068070032703], 1.0, 1.35, 1.0),
-            (Running, 7, 0.37, [-0.22173185320901168, 0.022673206198646573, 0.6349080212900531], 0.0, 0.45, 0.18),
-            (Running, 59, 1.23, [0.4521350514174245, 0.41823252312633535, -0.18130907496346158], 1.0, 1.35, 1.0),
-            (Running, 119, 4.9, [-0.020293043049231612, -0.29264623766424697, -0.48280971725261645], 1.0, 1.35, 1.0),
-            (Running, 3, 0.5, [0.14299591644922277, 0.5016884272549142, 0.5811655241257057], 0.0, 0.45, 0.18),
-            (Running, 42, 0.06, [0.4401138616034285, 0.5248274855615337, -0.015948097269680633], 1.0, 1.35, 1.0),
-            (Running, 88, 2.71, [-0.821148248482257, -0.16872640933502628, -0.410158834443344], 0.0, 0.45, 0.18),
+        let sums: [(OrbSize, ActivityState, f64, [f64; 6]); 72] = [
+            (Large, Thinking, 0.0, [-14.3261699283, 1680.3413729625, 400.0591006128, 387.4496292860, 5295.4809046073, 2924.2830103930]),
+            (Large, Thinking, 0.37, [-28.9775422074, 1679.5115993655, 402.7415330729, 439.0638579348, 5318.7073074992, 2952.6708361499]),
+            (Large, Thinking, 1.1, [-56.2353429481, 1676.2769666866, 413.1982211685, 400.7733464505, 5301.4765773313, 2931.6110548335]),
+            (Large, Thinking, 2.9, [-104.7255635489, 1660.7772209091, 463.3046855648, 499.6818797709, 5345.9854173255, 2986.0107481597]),
+            (Large, Reading, 0.0, [-14.3261699283, 1680.3413729625, 400.0591006128, 45.2770853182, 4842.5242569448, 2138.1301054568]),
+            (Large, Reading, 0.37, [-24.8303417106, 1679.8058072945, 401.7904388206, 837.5500181440, 5238.6607233577, 2653.1075117936]),
+            (Large, Reading, 1.1, [-44.8484301683, 1677.9216017252, 407.8815631932, 751.6159917159, 5195.6937101437, 2597.2503946153]),
+            (Large, Reading, 2.9, [-86.5750639697, 1669.0324718584, 436.6177034873, 1135.9465122519, 5387.8589704117, 2847.0652329638]),
+            (Large, Searching, 0.0, [-14.3261699283, 1680.3413729625, 400.0591006128, 183.2012363579, 5221.8892514254, 2519.8635989576]),
+            (Large, Searching, 0.37, [-26.9085465527, 1679.6643718063, 402.2476613038, 210.9734411250, 5237.1639640473, 2536.5269218178]),
+            (Large, Searching, 1.1, [-50.6184276323, 1677.1455654870, 410.3902773810, 240.0116248777, 5253.1349651113, 2553.9498320695]),
+            (Large, Searching, 2.9, [-96.6647224556, 1665.0996269529, 449.3315218981, 152.9210072179, 5205.2351253984, 2501.6954614736]),
+            (Large, Editing, 0.0, [-14.3261699283, 1680.3413729625, 400.0591006128, 0.0000000000, 4518.6428571429, 1807.4571428571]),
+            (Large, Editing, 0.37, [-14.3261699283, 1680.3413729625, 400.0591006128, 56.0183862434, 4561.4153439153, 1848.7923544974]),
+            (Large, Editing, 1.1, [-14.3261699283, 1680.3413729625, 400.0591006128, 1676.1117952928, 5588.9950191571, 3100.2304324028]),
+            (Large, Editing, 2.9, [-14.3261699283, 1680.3413729625, 400.0591006128, 27.1539682540, 4539.6222222222, 1827.4346031746]),
+            (Large, Running, 0.0, [-14.3261699283, 1680.3413729625, 400.0591006128, 1750.9560271176, 6006.0234376106, 4179.7325895069]),
+            (Large, Running, 0.37, [-97.7795423163, 1664.5824531054, 451.0034043503, 1810.0277819481, 6025.7140225541, 4219.1137593940]),
+            (Large, Running, 1.1, [-42.4368628374, 1614.8641847116, 611.7290498463, 1771.2386231926, 6012.7843029690, 4193.2543202237]),
+            (Large, Running, 2.9, [-82.8083238083, 1670.2386922715, 432.7183208102, 1771.2386231926, 6012.7843029690, 4193.2543202237]),
+            (Large, Waiting, 0.0, [-14.1829082290, 1663.5379592329, 396.0585096067, 2711.1857142857, 6175.4785714286, 4819.8857142857]),
+            (Large, Waiting, 0.37, [-14.5960441811, 1711.9953931708, 407.5953542926, 4159.0518130180, 6899.4116207947, 5978.1785932715]),
+            (Large, Waiting, 1.1, [-13.9066476933, 1631.1348807954, 388.3439186162, 1743.0098338957, 5691.3906312336, 4045.3450099737]),
+            (Large, Waiting, 2.9, [-13.9066476933, 1631.1348807954, 388.3439186162, 1743.0098338957, 5691.3906312336, 4045.3450099737]),
+            (Large, Done, 0.0, [-13.7531231312, 1613.1277180440, 384.0567365883, 1204.9714285714, 5422.3714285714, 3614.9142857143]),
+            (Large, Done, 0.37, [-14.3892050760, 1687.7348750035, 401.8193606555, 3434.1685714286, 6536.9700000000, 5398.2720000000]),
+            (Large, Done, 1.1, [-14.6126933269, 1713.9482004218, 408.0602826251, 4217.4000000000, 6928.5857142857, 6024.8571428571]),
+            (Large, Done, 2.9, [-14.6126933269, 1713.9482004218, 408.0602826251, 4217.4000000000, 6928.5857142857, 6024.8571428571]),
+            (Large, Error, 0.0, [-14.6126933269, 1713.9482004218, 408.0602826251, 4217.4000000000, 6928.5857142857, 6024.8571428571]),
+            (Large, Error, 0.37, [496.0428719251, 1713.9482004218, 408.0602826251, 4217.4000000000, 6928.5857142857, 6024.8571428571]),
+            (Large, Error, 1.1, [-20.3157822674, 1713.9482004218, 408.0602826251, 4217.4000000000, 6928.5857142857, 6024.8571428571]),
+            (Large, Error, 2.9, [-14.6126933269, 1713.9482004218, 408.0602826251, 4217.4000000000, 6928.5857142857, 6024.8571428571]),
+            (Large, Offline, 0.0, [-13.1800763340, 1545.9140631255, 368.0543725638, 0.0000000000, 2909.0642857143, 1540.0928571429]),
+            (Large, Offline, 0.37, [-17.8379005017, 1545.7105347446, 368.7123244887, 0.0000000000, 2909.0642857143, 1540.0928571429]),
+            (Large, Offline, 1.1, [-26.9158798983, 1545.1308807063, 370.5861884121, 0.0000000000, 3659.2500000000, 1937.2500000000]),
+            (Large, Offline, 2.9, [-48.2764293725, 1542.7216548927, 378.3745605044, 0.0000000000, 2682.6000000000, 1420.2000000000]),
+            (Small, Thinking, 0.0, [-4.2882595841, 162.1070954325, 32.5981228788, 41.7526745056, 616.0666519138, 296.6282566924]),
+            (Small, Thinking, 0.37, [-6.7281162861, 161.8642291347, 33.3832435949, 44.5541251019, 617.5164025974, 298.1690545203]),
+            (Small, Thinking, 1.1, [-11.0567956552, 161.0864827844, 35.8974861102, 41.2319266019, 615.7971648736, 296.3418453453]),
+            (Small, Thinking, 2.9, [-17.1011082795, 157.9329546918, 46.0919851275, 50.6259354995, 620.6585644782, 301.5085502390]),
+            (Small, Reading, 0.0, [-4.2882595841, 162.1070954325, 32.5981228788, 4.9262807383, 562.3240399959, 216.0520824799]),
+            (Small, Reading, 0.37, [-6.0439025529, 161.9445413919, 33.1236159007, 99.9153680539, 616.9427652024, 277.7949892350]),
+            (Small, Reading, 1.1, [-9.2892020114, 161.4672910655, 34.6664364627, 62.1929187029, 595.2523568256, 253.2753971569]),
+            (Small, Reading, 2.9, [-15.2949879432, 159.5443321866, 40.8828397497, 90.2811757469, 611.4031046259, 271.5327642355]),
+            (Small, Searching, 0.0, [-4.2882595841, 162.1070954325, 32.5981228788, 13.3427518296, 602.8989333893, 251.2627939549]),
+            (Small, Searching, 0.37, [-6.3874549279, 161.9054607497, 33.2499529926, 25.6880152250, 610.7073124869, 258.6699519921]),
+            (Small, Searching, 1.1, [-10.1933816669, 161.2851494915, 35.2552506550, 19.9693798627, 607.0902756203, 255.2387707748]),
+            (Small, Searching, 2.9, [-16.4258849341, 158.7609456372, 43.4153154953, 17.5052710003, 605.5317267648, 253.7603054573]),
+            (Small, Editing, 0.0, [-4.2882595841, 162.1070954325, 32.5981228788, 0.0000000000, 524.5232142857, 182.4428571429]),
+            (Small, Editing, 0.37, [-4.2882595841, 162.1070954325, 32.5981228788, 9.8983956916, 533.6784529478, 189.6408888889]),
+            (Small, Editing, 1.1, [-4.2882595841, 162.1070954325, 32.5981228788, 182.6410430839, 668.6715419501, 321.0129251701]),
+            (Small, Editing, 2.9, [-4.2882595841, 162.1070954325, 32.5981228788, 5.9348072562, 530.1232709751, 186.7358276644]),
+            (Small, Running, 0.0, [-4.2882595841, 162.1070954325, 32.5981228788, 175.9923256273, 696.8915819667, 421.3996456563]),
+            (Small, Running, 0.37, [-16.5349830834, 158.6601268010, 43.7412353845, 184.5160627863, 700.1590145443, 427.0821370956]),
+            (Small, Running, 1.1, [2.4975343182, 152.0930709925, 64.9707415183, 178.6768810017, 697.9206615269, 423.1893492393]),
+            (Small, Running, 2.9, [-15.9345538922, 155.1596255790, 55.0574042024, 178.6768810017, 697.9206615269, 423.1893492393]),
+            (Small, Waiting, 0.0, [-4.2453769882, 160.4860244782, 32.2721416500, 273.6642857143, 716.8483928571, 486.5142857143]),
+            (Small, Waiting, 0.37, [-4.3690411786, 165.1608447226, 33.2122014565, 419.8103942718, 800.8824052777, 603.4311725603]),
+            (Small, Waiting, 1.1, [-4.1626837844, 157.3600115066, 31.6435315654, 175.9376123416, 660.6555556678, 408.3329470161]),
+            (Small, Waiting, 2.9, [-4.1626837844, 157.3600115066, 31.6435315654, 175.9376123416, 660.6555556678, 408.3329470161]),
+            (Small, Done, 0.0, [-4.1167292007, 155.6228116152, 31.2941979636, 121.6285714286, 629.4278571429, 364.8857142857]),
+            (Small, Done, 0.37, [-4.3071279262, 162.8203666524, 32.7415546195, 346.6414285714, 758.8102500000, 544.8960000000]),
+            (Small, Done, 1.1, [-4.3740247758, 165.3492373412, 33.2500853364, 425.7000000000, 804.2689285714, 608.1428571429]),
+            (Small, Done, 2.9, [-4.3740247758, 165.3492373412, 33.2500853364, 425.7000000000, 804.2689285714, 608.1428571429]),
+            (Small, Error, 0.0, [-4.3740247758, 165.3492373412, 33.2500853364, 425.7000000000, 804.2689285714, 608.1428571429]),
+            (Small, Error, 0.37, [47.1710205431, 165.3492373412, 33.2500853364, 425.7000000000, 804.2689285714, 608.1428571429]),
+            (Small, Error, 1.1, [-4.9496886829, 165.3492373412, 33.2500853364, 425.7000000000, 804.2689285714, 608.1428571429]),
+            (Small, Error, 2.9, [-4.3740247758, 165.3492373412, 33.2500853364, 425.7000000000, 804.2689285714, 608.1428571429]),
+            (Small, Offline, 0.0, [-3.9451988173, 149.1385277979, 29.9902730485, 0.0000000000, 257.7807142857, 118.6714285714]),
+            (Small, Offline, 0.37, [-4.6258512881, 149.0822877678, 30.1720817765, 0.0000000000, 257.7807142857, 118.6714285714]),
+            (Small, Offline, 1.1, [-5.9407606625, 148.9454282839, 30.6145112819, 0.0000000000, 457.7492857143, 210.7285714286]),
+            (Small, Offline, 2.9, [-8.9681161518, 148.4677351366, 32.1587633635, 0.0000000000, 297.4392857143, 136.9285714286]),
         ];
-        for (state, i, t, p, lit, s, a) in points {
-            let d = generate(state, i, t);
-            let got = [d.p[0], d.p[1], d.p[2], d.lit, d.s, d.a];
-            let want = [p[0], p[1], p[2], lit, s, a];
-            for (g, w) in got.iter().zip(want) {
-                assert!((g - w).abs() < 1e-12, "{state:?} i={i} t={t}: {d:?}");
-            }
-        }
-
-        // Whole-cloud checksums: Σ value·(1 + i/7) over all 120 dots.
-        #[rustfmt::skip]
-        let sums: [(ActivityState, f64, [f64; 6]); 16] = [
-            (Thinking, 0.0, [7.351368077579412, -149.1781766309305, -32.38737006387468, 630.7142857142856, 1125.5000000000002, 834.4285714285714]),
-            (Thinking, 0.37, [28.516399631150318, -127.34101620198454, -33.50686809059141, 604.4285714285713, 1107.1, 818.6571428571428]),
-            (Thinking, 1.23, [1.160716440958479, -152.63502514901342, -45.36402347346189, 671.4285714285714, 1154.0000000000002, 858.8571428571431]),
-            (Thinking, 4.9, [-6.299094305682155, -136.20611076498952, -46.731825410350005, 601.8571428571425, 1105.3000000000004, 817.1142857142858]),
-            (Reading, 0.0, [0.4331893591776619, -300.43745229612034, -89.21884994815005, 246.0, 921.0, 737.6999999999999]),
-            (Reading, 0.37, [2.909786153492934, -298.5533083330603, -90.25283307472081, 183.57142857142856, 889.7857142857143, 709.6071428571429]),
-            (Reading, 1.23, [-5.447036796486336, -296.68631040203604, -94.79314563382081, 160.00000000000003, 878.0, 699.0000000000001]),
-            (Reading, 4.9, [5.205240253293128, -293.36398766234777, -95.9204811597193, 228.85714285714286, 912.4285714285716, 729.9857142857144]),
-            (Editing, 0.0, [0.10950432326276238, -204.1705395158404, -61.35015879186418, 228.0, 990.8071428571426, 1140.0]),
-            (Editing, 0.37, [1.1205155062208119, -203.4882487289253, -61.737297514602815, 228.0, 990.8071428571426, 1140.0]),
-            (Editing, 1.23, [-2.1460103899665226, -196.93049294938095, -61.376497823597376, 228.0, 990.8071428571426, 1140.0]),
-            (Editing, 4.9, [0.10613148594148192, -188.57524576978972, -58.91160531753327, 228.0, 990.8071428571426, 1140.0]),
-            (Running, 0.0, [10.108377701169927, -118.58742905742412, -168.3824970863756, 389.7142857142857, 863.7428571428569, 524.765714285714]),
-            (Running, 0.37, [-36.09462198837662, -61.61176721001049, -160.1908450345903, 389.7142857142857, 863.7428571428569, 524.765714285714]),
-            (Running, 1.23, [36.35348044651302, -117.9833376099485, -167.3649004490568, 389.7142857142857, 863.7428571428569, 524.765714285714]),
-            (Running, 4.9, [16.386718454929202, -104.16193039339737, -179.6586398077674, 389.7142857142857, 863.7428571428569, 524.765714285714]),
-        ];
-        for (state, t, want) in sums {
+        for (size, state, t, want) in sums {
             let mut got = [0.0; 6];
-            for i in 0..N_POINTS {
-                let d = generate(state, i, t);
+            for i in 0..size.dots() {
+                let d = generate(size, state, i, t);
                 for (g, v) in got
                     .iter_mut()
                     .zip([d.p[0], d.p[1], d.p[2], d.lit, d.s, d.a])
@@ -416,136 +515,259 @@ mod tests {
                 }
             }
             for (g, w) in got.iter().zip(want) {
-                assert!((g - w).abs() < 1e-9, "{state:?} t={t}: {got:?}");
+                assert!((g - w).abs() < 1e-9, "{size:?} {state:?} t={t}: {got:?}");
             }
         }
     }
 
-    const REDESIGNED: [ActivityState; 6] = [
-        ActivityState::Searching,
-        ActivityState::Notes,
-        ActivityState::Waiting,
-        ActivityState::Done,
-        ActivityState::Error,
-        ActivityState::Offline,
-    ];
-
-    fn frame(state: ActivityState, t: f64) -> Vec<Dot> {
-        (0..N_POINTS).map(|i| generate(state, i, t)).collect()
-    }
-
-    /// v7.3: each redesigned state's still frame shows one bold lit cue (α 1, large) against
-    /// faded context dots (small, α ≤ .3), in the full cloud and in the 22px subsample.
+    /// Every busy state keeps its dots on the globe (radius R, or Waiting's breath).
     #[test]
-    fn redesigned_still_frames_show_the_cue() {
-        for state in REDESIGNED {
-            let t = state.reduced_motion_time();
-            let dots = frame(state, t);
-            let is_cue = |d: &Dot| d.lit >= 0.7 && d.a >= 0.6 && d.s >= 0.95;
-            let is_faded = |d: &Dot| d.lit == 0.0 && d.a <= 0.3 && d.s > 0.0 && d.s <= 0.55;
-            let cue_n = dots.iter().filter(|d| is_cue(d)).count();
-            let faded_n = dots.iter().filter(|d| is_faded(d)).count();
-            assert!(cue_n >= 4, "{state:?}: only {cue_n} cue dots at t={t}");
-            assert!(
-                faded_n >= 4,
-                "{state:?}: only {faded_n} faded dots at t={t}"
-            );
-            // Every drawn dot is one or the other.
-            for d in dots.iter().filter(|d| d.s > 0.02) {
-                assert!(is_cue(d) || is_faded(d), "{state:?}: {d:?}");
-            }
-            let small_cue = dots
-                .iter()
-                .enumerate()
-                .filter(|(i, d)| ((i >> 1) + i) % 2 == 0 && is_cue(d))
-                .count();
-            assert!(small_cue >= 2, "{state:?}: cue lost at 22px");
-        }
-    }
-
-    #[test]
-    fn redesigned_cue_sizes_match_the_spec() {
-        for state in REDESIGNED {
-            for k in 0..60 {
-                for d in frame(state, k as f64 * 0.1) {
-                    if d.lit > 0.0 {
-                        // Notes' comet tail tapers from 1.25× down to .95×.
-                        assert!(d.s >= 0.95 && d.s <= 1.4, "{state:?}: {d:?}");
-                    } else if d.s > 0.0 {
-                        assert!(d.s >= 0.45 && d.s <= 0.55, "{state:?}: {d:?}");
-                        assert!(d.a >= 0.18 && d.a <= 0.3, "{state:?}: {d:?}");
+    fn busy_states_stay_on_the_globe() {
+        for size in OrbSize::ALL {
+            for state in [
+                Thinking, Reading, Searching, Editing, Running, Waiting, Done, Offline,
+            ] {
+                for t in [0.0, 0.7, 1.5, 3.3] {
+                    for d in frame(size, state, t) {
+                        let r = xy_len(&d).hypot(d.p[2]);
+                        assert!(
+                            (0.82..=0.92).contains(&r),
+                            "{size:?} {state:?} t={t} left the globe: {d:?}"
+                        );
                     }
                 }
             }
         }
     }
 
+    /// Each state's still frame differs from every other state's.
     #[test]
-    fn offline_shows_at_most_half_the_dots() {
-        for k in 0..100 {
-            let t = k as f64 * 0.05;
-            let shown = frame(ActivityState::Offline, t)
+    fn states_differ() {
+        for size in OrbSize::ALL {
+            let stills: Vec<Vec<Dot>> = ActivityState::ALL
                 .iter()
-                .filter(|d| d.s > 0.02)
-                .count();
-            assert!(shown * 2 <= N_POINTS, "t={t}: {shown} dots shown");
-            assert!(shown > 0);
+                .map(|s| frame(size, *s, s.reduced_motion_time()))
+                .collect();
+            for (a, sa) in stills.iter().enumerate() {
+                for (b, sb) in stills.iter().enumerate().skip(a + 1) {
+                    // Waiting (at full breath), Done and Error are the same full globe; the tone
+                    // (amber, green, red) tells them apart.
+                    let toned = [Waiting, Done, Error];
+                    if toned.contains(&ActivityState::ALL[a])
+                        && toned.contains(&ActivityState::ALL[b])
+                    {
+                        continue;
+                    }
+                    let diff: f64 = sa
+                        .iter()
+                        .zip(sb)
+                        .map(|(x, y)| {
+                            (x.p[0] - y.p[0]).abs()
+                                + (x.p[1] - y.p[1]).abs()
+                                + (x.lit - y.lit).abs()
+                                + (x.a - y.a).abs()
+                        })
+                        .sum();
+                    assert!(
+                        diff > 3.0,
+                        "{size:?}: {:?} and {:?} look alike ({diff})",
+                        ActivityState::ALL[a],
+                        ActivityState::ALL[b]
+                    );
+                }
+            }
         }
     }
 
     #[test]
-    fn offline_spark_fills_the_gap_on_tick_two() {
-        // Lit dots inside the ring's gap (x ≈ 0, y ∈ (−.05, .5)).
-        let lit_in_gap = |t: f64| {
-            frame(ActivityState::Offline, t)
+    fn thinking_sparks_ripple_on_the_front() {
+        let a = frame(Large, Thinking, 0.3);
+        let b = frame(Large, Thinking, 0.9);
+        assert_ne!(a[10].p, b[10].p, "the globe turns");
+        for t in [0.05, 0.3, 0.6, 1.0, 1.4] {
+            let f = frame(Large, Thinking, t);
+            let lit: Vec<&Dot> = f.iter().filter(|d| d.lit > 0.35).collect();
+            assert!(
+                lit.len() >= 3 && lit.len() < f.len() / 3,
+                "t={t}: {}",
+                lit.len()
+            );
+            let front = lit.iter().filter(|d| d.p[2] > 0.0).count();
+            assert!(
+                front * 3 > lit.len() * 2,
+                "t={t}: the ripples are on the front"
+            );
+        }
+        // A ripple's radius grows with its age.
+        let spread = |t: f64| {
+            let f = frame(Large, Thinking, t);
+            let lit: Vec<&Dot> = f.iter().filter(|d| d.lit > 0.35).collect();
+            let n = lit.len() as f64;
+            let (cx, cy) = lit
                 .iter()
-                .filter(|d| d.lit > 0.0 && d.p[1] > -0.05 && d.p[1] < 0.5)
+                .fold((0.0, 0.0), |(x, y), d| (x + d.p[0] / n, y + d.p[1] / n));
+            lit.iter()
+                .map(|d| (d.p[0] - cx).hypot(d.p[1] - cy))
+                .sum::<f64>()
+                / n
+        };
+        assert!(spread(0.5) > spread(0.1));
+    }
+
+    #[test]
+    fn reading_band_moves_down() {
+        let band_y = |t: f64| {
+            let f = frame(Large, Reading, t);
+            let (sum, n) = f
+                .iter()
+                .filter(|d| d.lit > 0.5)
+                .fold((0.0, 0), |(s, n), d| (s + d.p[1], n + 1));
+            assert!(n > 0, "nothing lit at t={t}");
+            sum / n as f64
+        };
+        assert!(band_y(0.4) > band_y(1.0));
+        assert!(band_y(1.0) > band_y(1.8));
+    }
+
+    #[test]
+    fn searching_lens_roams_the_front() {
+        for t in [0.0, 0.8, 1.6] {
+            let f = frame(Large, Searching, t);
+            let lens: Vec<&Dot> = f.iter().filter(|d| d.lit > 0.9).collect();
+            assert!(lens.len() >= 4, "t={t}: {}", lens.len());
+            for d in &lens {
+                assert!(d.p[2] > 0.3, "the lens is on the front: {d:?}");
+                assert!(d.s > 1.3);
+            }
+        }
+        let c = |t: f64| {
+            let f = frame(Large, Searching, t);
+            let l: Vec<&Dot> = f.iter().filter(|d| d.lit > 0.9).collect();
+            l.iter().map(|d| d.p[0]).sum::<f64>() / l.len() as f64
+        };
+        assert!((c(0.0) - c(0.8)).abs() > 0.1, "the lens moves");
+    }
+
+    #[test]
+    fn editing_writes_every_dot_from_the_bottom_to_the_top() {
+        let written = |t: f64| {
+            frame(Large, Editing, t)
+                .iter()
+                .filter(|d| d.lit > 0.0)
                 .count()
         };
-        // Tick 2 of every 4 (.3–.6s, then every 1.2s) is the spark; the other ticks leave the
-        // gap dark.
-        for cycle in [0.0, 1.2, 2.4] {
-            assert!(lit_in_gap(cycle + 0.45) > 0, "no spark at {}", cycle + 0.45);
-            for tick in [0.15, 0.75, 1.05] {
-                assert_eq!(lit_in_gap(cycle + tick), 0, "gap lit at {}", cycle + tick);
-            }
-        }
-    }
-
-    #[test]
-    fn error_settles() {
-        // The fling spring reaches 1 at .18 + 1.6·.5 = .98s, and Error has no yaw.
-        let settled = frame(ActivityState::Error, 0.98);
-        for t in [1.0, crate::SETTLE, 5.0, 60.0] {
-            assert_eq!(frame(ActivityState::Error, t), settled, "t={t}");
-        }
-        // The flung third (lit) sits outside the dim core.
-        let (out, core): (Vec<&Dot>, Vec<&Dot>) = settled.iter().partition(|d| d.lit > 0.0);
-        let n = out.len() as f64 / N_POINTS as f64;
-        assert!((0.25..0.5).contains(&n), "flung fraction {n}");
-        let min_out = out.iter().map(|d| hypot3(d.p)).fold(f64::MAX, f64::min);
-        let max_core = core.iter().map(|d| hypot3(d.p)).fold(0.0, f64::max);
-        assert!(min_out > max_core, "{min_out} vs {max_core}");
-    }
-
-    #[test]
-    fn done_settles() {
-        // After the ripple (1.3s) every dot sits on the .84 shell and only the silhouette
-        // rim is lit; the frame policy stops drawing from SETTLE.
-        for t in [crate::SETTLE, 1.6, 5.0] {
-            let dots = frame(ActivityState::Done, t);
-            for d in &dots {
-                assert!((hypot3(d.p) - 0.84).abs() < 1e-12, "t={t}: {d:?}");
-                let rim = 1.0 - d.p[2].abs() / hypot3(d.p) > 0.6;
-                assert_eq!(d.lit > 0.0, rim, "t={t}: {d:?}");
-            }
-        }
-        // Mid-ripple, some dots are pushed out and lit.
+        assert!(written(0.2) < written(1.0));
+        assert!(written(1.0) < written(1.9));
+        assert_eq!(written(2.1), Large.dots(), "every dot, then held");
+        // Then everything fades together.
+        let f = frame(Large, Editing, 2.5);
+        assert!(f.iter().all(|d| d.lit > 0.0 && d.lit < 0.5), "clearing");
+        assert!(frame(Large, Editing, 2.59).iter().all(|d| d.lit < 0.05));
+        // Half-way through, every written dot sits on a ring at or below every unwritten one,
+        // and the lowest ring went first.
+        let f = frame(Large, Editing, 1.0);
+        let top_written = (0..Large.dots())
+            .filter(|&i| f[i].lit > 0.0)
+            .map(|i| Large.grid(i).2)
+            .max()
+            .unwrap();
+        let bottom_unwritten = (0..Large.dots())
+            .filter(|&i| f[i].lit == 0.0)
+            .map(|i| Large.grid(i).2)
+            .min()
+            .unwrap();
+        assert!(top_written <= bottom_unwritten);
         assert!(
-            frame(ActivityState::Done, 0.5)
+            frame(Large, Editing, 0.1)
                 .iter()
-                .any(|d| hypot3(d.p) > 0.9 && d.lit > 0.0)
+                .enumerate()
+                .all(|(i, d)| d.lit == 0.0 || Large.grid(i).2 == 0)
         );
+        // Exactly one caret while writing, none while held or clearing.
+        let carets = |t: f64| {
+            frame(Large, Editing, t)
+                .iter()
+                .filter(|d| d.s == 1.7)
+                .count()
+        };
+        let counts: Vec<usize> = (0..20).map(|n| carets(0.1 * n as f64)).collect();
+        // (Briefly 0 or 2 where the edge crosses from one ring to the next.)
+        assert!(counts.iter().all(|&c| c <= 2), "{counts:?}");
+        assert!(
+            counts.iter().filter(|&&c| c == 1).count() >= 14,
+            "{counts:?}"
+        );
+        assert_eq!(carets(2.1), 0);
+    }
+
+    #[test]
+    fn running_spins_fast() {
+        let a = frame(Large, Running, 0.0);
+        let b = frame(Large, Running, 0.1);
+        let moved = a
+            .iter()
+            .zip(&b)
+            .map(|(x, y)| (x.p[0] - y.p[0]).abs() + (x.p[2] - y.p[2]).abs())
+            .sum::<f64>()
+            / a.len() as f64;
+        assert!(moved > 0.1, "{moved}");
+        assert!(a.iter().any(|d| d.lit > 0.6) && a.iter().any(|d| d.lit == 0.0));
+    }
+
+    #[test]
+    fn waiting_breathes() {
+        let r = |t: f64| {
+            let d = frame(Large, Waiting, t)[0];
+            xy_len(&d).hypot(d.p[2])
+        };
+        assert!(r(0.45) > r(1.35));
+        assert!(frame(Large, Waiting, 0.45)[0].lit > frame(Large, Waiting, 1.35)[0].lit);
+    }
+
+    #[test]
+    fn done_fills_up_pops_then_holds() {
+        for size in OrbSize::ALL {
+            let full: Vec<Dot> = (0..size.dots()).map(|i| breath(size, i, 1.0)).collect();
+            for t in [0.8, 1.0, crate::SETTLE, 5.0] {
+                assert_eq!(frame(size, Done, t), full, "t={t}");
+            }
+            let early = frame(size, Done, 0.2);
+            assert!(
+                early
+                    .iter()
+                    .zip(&full)
+                    .all(|(a, b)| a.lit < b.lit && a.s < b.s)
+            );
+            let pop = frame(size, Done, 0.65);
+            assert!(pop.iter().zip(&full).all(|(a, b)| a.s > b.s && a.p == b.p));
+        }
+    }
+
+    #[test]
+    fn error_shakes_then_holds() {
+        let full: Vec<Dot> = (0..Large.dots()).map(|i| breath(Large, i, 1.0)).collect();
+        for t in [crate::SETTLE, 5.0, 60.0] {
+            assert_eq!(frame(Large, Error, t), full, "t={t}");
+        }
+        let cx = |f: &[Dot]| f.iter().map(|d| d.p[0]).sum::<f64>() / f.len() as f64;
+        assert!((cx(&frame(Large, Error, 0.36)) - cx(&full)).abs() > 0.05);
+    }
+
+    #[test]
+    fn offline_dims_and_drops_rings() {
+        for size in OrbSize::ALL {
+            let mut any_off = false;
+            for k in 0..10 {
+                let f = frame(size, Offline, k as f64 * 0.4);
+                let off = f.iter().filter(|d| d.s == 0.0).count();
+                any_off |= off > 0;
+                assert!(off < f.len(), "never everything");
+                for d in f.iter().filter(|d| d.s > 0.0) {
+                    assert_eq!((d.lit, d.a), (0.0, 0.45));
+                }
+            }
+            assert!(any_off, "{size:?}: some rings drop out");
+        }
     }
 
     #[test]
@@ -553,6 +775,5 @@ mod tests {
         assert_eq!(crit(0.0), 0.0);
         assert_eq!(crit(1.6), 1.0);
         assert!(crit(1.59) > 0.999);
-        assert_eq!(spr_o(1.6), 1.0);
     }
 }

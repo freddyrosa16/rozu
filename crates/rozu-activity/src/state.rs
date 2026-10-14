@@ -14,7 +14,6 @@ pub enum Tone {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ActivityState {
     Thinking,
-    Notes,
     Reading,
     Searching,
     Editing,
@@ -27,9 +26,8 @@ pub enum ActivityState {
 
 impl ActivityState {
     /// All states, in the reference sheet's order.
-    pub const ALL: [ActivityState; 10] = [
+    pub const ALL: [ActivityState; 9] = [
         ActivityState::Thinking,
-        ActivityState::Notes,
         ActivityState::Reading,
         ActivityState::Searching,
         ActivityState::Editing,
@@ -44,7 +42,6 @@ impl ActivityState {
     pub fn label(self) -> &'static str {
         match self {
             ActivityState::Thinking => "Thinking…",
-            ActivityState::Notes => "Jotting down notes…",
             ActivityState::Reading => "Reading…",
             ActivityState::Searching => "Searching…",
             ActivityState::Editing => "Editing…",
@@ -82,17 +79,14 @@ impl ActivityState {
     }
 
     /// The state's loop period in seconds (`loop` in the reference); 0 for the play-once states.
-    /// Reading's band sweeps at twice this (4.4s); Notes' stroke writes round every 1.5s;
-    /// Offline advances in .3s ticks.
     pub fn tempo(self) -> f64 {
         match self {
             ActivityState::Thinking => 1.6,
-            ActivityState::Searching => 2.4,
             ActivityState::Reading => 2.2,
-            ActivityState::Notes => 3.0,
-            ActivityState::Editing => 1.06,
-            ActivityState::Running => 0.8,
-            ActivityState::Waiting => 2.6,
+            ActivityState::Searching => 2.4,
+            ActivityState::Editing => 2.6,
+            ActivityState::Running => 0.9,
+            ActivityState::Waiting => 1.8,
             ActivityState::Done | ActivityState::Error => 0.0,
             ActivityState::Offline => 2.4,
         }
@@ -103,20 +97,18 @@ impl ActivityState {
         matches!(self, ActivityState::Done | ActivityState::Error)
     }
 
-    /// The time (s) of the static frame drawn in reduced-motion mode (handoff §3). Each one shows
-    /// the state's signature cue.
+    /// The time (s) of the static frame drawn in reduced-motion mode (handoff §5). Each one shows
+    /// the state's motion: the written globe, the full green globe.
     pub fn reduced_motion_time(self) -> f64 {
         match self {
-            ActivityState::Thinking => 0.9,
-            ActivityState::Searching => 0.5,
-            ActivityState::Reading => 0.5,
-            ActivityState::Notes => 1.1,
-            ActivityState::Editing => 0.06,
-            ActivityState::Running => 0.35,
-            ActivityState::Waiting => 0.65,
-            ActivityState::Done => 1.6,
-            ActivityState::Error => 1.0,
-            ActivityState::Offline => 0.35,
+            ActivityState::Thinking => 0.55,
+            ActivityState::Reading => 0.6,
+            ActivityState::Searching => 0.3,
+            ActivityState::Editing => 1.1,
+            ActivityState::Running => 0.3,
+            ActivityState::Waiting => 0.45,
+            ActivityState::Done | ActivityState::Error => 1.5,
+            ActivityState::Offline => 0.3,
         }
     }
 }
