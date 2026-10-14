@@ -574,6 +574,11 @@ mod tests {
             Self { _dir: dir, ctx }
         }
 
+        /// A `shell` request under Seatbelt.
+        fn sh(&self, policy: &ApprovalPolicy, command: &str) -> ApprovalRequest {
+            self.request(policy, &Shell, shell(command), &Seatbelt)
+        }
+
         fn request(
             &self,
             policy: &ApprovalPolicy,
@@ -605,13 +610,25 @@ mod tests {
         json!({ "command": command })
     }
 
-    /// (risk, mode) → auto-approved? Uses the shell tool under Seatbelt.
+    const MODES: [ApprovalMode; 3] = [
+        ApprovalMode::ReadOnly,
+        ApprovalMode::AutoWorkspace,
+        ApprovalMode::FullAccess,
+    ];
+
+    fn rule(policy: &ApprovalPolicy, prefix: &str) {
+        policy.rules.lock().unwrap().rules.push(PrefixRule {
+            tool: "shell".into(),
+            prefix: prefix.into(),
+            host: None,
+        });
+    }
+
+    /// (command, risk, auto-approved in [read-only, auto, full]).
     #[test]
     fn approval_matrix() {
-        use ApprovalMode::*;
         let f = Fixture::new();
         let cases: &[(&str, Risk, [bool; 3])] = &[
-            //                                        read-only, auto, full
             ("ls", Risk::Read, [true, true, true]),
             ("cargo test", Risk::WriteWorkspace, [false, true, true]),
             ("cp a /etc/a", Risk::WriteOutside, [false, false, true]),
@@ -647,12 +664,9 @@ mod tests {
             ("sh /opt/x.sh", Risk::Opaque, [false, false, false]),
         ];
         for (command, risk, expected) in cases {
-            for (mode, auto) in [ReadOnly, AutoWorkspace, FullAccess]
-                .into_iter()
-                .zip(expected)
-            {
+            for (mode, auto) in MODES.into_iter().zip(expected) {
                 let policy = ApprovalPolicy::new(mode);
-                let req = f.request(&policy, &Shell, shell(command), &Seatbelt);
+                let req = f.sh(&policy, command);
                 assert_eq!(req.risk, *risk, "{command}");
                 assert_eq!(
                     policy.auto_approval(&req, &Shell).is_some(),
@@ -684,11 +698,7 @@ mod tests {
     #[test]
     fn every_mode_runs_shell_commands_in_the_sandbox() {
         let f = Fixture::new();
-        for mode in [
-            ApprovalMode::ReadOnly,
-            ApprovalMode::AutoWorkspace,
-            ApprovalMode::FullAccess,
-        ] {
+        for mode in MODES {
             let policy = ApprovalPolicy::new(mode);
             for command in [
                 "cargo test",
@@ -696,7 +706,7 @@ mod tests {
                 "python3 -c 'pass'",
                 "rm -rf build",
             ] {
-                let req = f.request(&policy, &Shell, shell(command), &Seatbelt);
+                let req = f.sh(&policy, command);
                 assert_eq!(
                     req.sandbox,
                     SandboxMode::Enforced("seatbelt"),
@@ -704,9 +714,9 @@ mod tests {
                 );
                 assert!(req.can_run_unsandboxed());
             }
-            let req = f.request(&policy, &Shell, shell("cargo test"), &Seatbelt);
+            let req = f.sh(&policy, "cargo test");
             assert!(!req.network, "{mode}");
-            let req = f.request(&policy, &Shell, shell("curl x"), &Seatbelt);
+            let req = f.sh(&policy, "curl x");
             assert!(
                 req.network,
                 "approved network calls get the network ({mode})"
@@ -726,7 +736,7 @@ mod tests {
         let target = outside.path().join("scratch/approved_canary.txt");
         let policy = ApprovalPolicy::new(ApprovalMode::AutoWorkspace);
         let command = format!("echo approved > {}", target.display());
-        let req = f.request(&policy, &Shell, shell(&command), &Seatbelt);
+        let req = f.sh(&policy, &command);
         assert_eq!(req.risk, Risk::Destructive);
         assert_eq!(
             req.extra_writes,
@@ -738,27 +748,19 @@ mod tests {
         );
         assert!(!req.outside_unknown);
         // Unknown and too-broad targets aren't granted.
-        let req = f.request(&policy, &Shell, shell("echo x > $NOWHERE/f"), &Seatbelt);
+        let req = f.sh(&policy, "echo x > $NOWHERE/f");
         assert!(req.extra_writes.is_empty() && req.outside_unknown);
-        let req = f.request(&policy, &Shell, shell("rm -rf /etc"), &Seatbelt);
+        let req = f.sh(&policy, "rm -rf /etc");
         assert!(req.extra_writes.is_empty() && req.outside_unknown);
     }
 
     #[test]
     fn destructive_always_prompts_even_with_a_rule() {
         let f = Fixture::new();
-        for mode in [
-            ApprovalMode::ReadOnly,
-            ApprovalMode::AutoWorkspace,
-            ApprovalMode::FullAccess,
-        ] {
+        for mode in MODES {
             let policy = ApprovalPolicy::new(mode);
-            policy.rules.lock().unwrap().rules.push(PrefixRule {
-                tool: "shell".into(),
-                prefix: "rm".into(),
-                host: None,
-            });
-            let req = f.request(&policy, &Shell, shell("rm -rf build"), &Seatbelt);
+            rule(&policy, "rm");
+            let req = f.sh(&policy, "rm -rf build");
             assert_eq!(req.risk, Risk::Destructive);
             assert_eq!(req.allow_rule, None, "{mode}");
             assert_eq!(policy.auto_approval(&req, &Shell), None, "{mode}");
@@ -775,16 +777,12 @@ mod tests {
         let f = Fixture::new();
         for mode in [ApprovalMode::AutoWorkspace, ApprovalMode::FullAccess] {
             let policy = ApprovalPolicy::new(mode);
-            policy.rules.lock().unwrap().rules.push(PrefixRule {
-                tool: "shell".into(),
-                prefix: "python3".into(),
-                host: None,
-            });
-            let req = f.request(&policy, &Shell, shell("python3 -c 'import os'"), &Seatbelt);
+            rule(&policy, "python3");
+            let req = f.sh(&policy, "python3 -c 'import os'");
             assert_eq!(req.allow_rule, None);
             assert_eq!(policy.auto_approval(&req, &Shell), None, "{mode}");
             // A named script may be.
-            let req = f.request(&policy, &Shell, shell("python3 gen.py"), &Seatbelt);
+            let req = f.sh(&policy, "python3 gen.py");
             assert_eq!(req.allow_rule, Some(AllowRule::prefix("python3 gen.py")));
             assert!(policy.auto_approval(&req, &Shell).is_some(), "{mode}");
         }
@@ -795,12 +793,7 @@ mod tests {
         let f = Fixture::new();
         let root = f.ctx.workspace.root();
         let policy = ApprovalPolicy::for_project(ApprovalMode::AutoWorkspace, root).unwrap();
-        let req = f.request(
-            &policy,
-            &Shell,
-            shell("curl -s https://example.com/a"),
-            &Seatbelt,
-        );
+        let req = f.sh(&policy, "curl -s https://example.com/a");
         assert_eq!(policy.auto_approval(&req, &Shell), None);
         assert_eq!(
             req.allow_rule,
@@ -808,7 +801,7 @@ mod tests {
         );
 
         policy.remember(&req).unwrap();
-        policy.remember(&req).unwrap(); // no duplicates
+        policy.remember(&req).unwrap();
         let saved = std::fs::read_to_string(approvals_path(root)).unwrap();
         let parsed: ApprovalRules = serde_json::from_str(&saved).unwrap();
         assert_eq!(
@@ -822,12 +815,7 @@ mod tests {
 
         // A fresh policy for the same project picks the rule up, for that host only.
         let reloaded = ApprovalPolicy::for_project(ApprovalMode::AutoWorkspace, root).unwrap();
-        let req = f.request(
-            &reloaded,
-            &Shell,
-            shell("curl https://example.com/b"),
-            &Seatbelt,
-        );
+        let req = f.sh(&reloaded, "curl https://example.com/b");
         assert_eq!(
             reloaded.auto_approval(&req, &Shell),
             Some(DecisionSource::Rule {
@@ -840,16 +828,11 @@ mod tests {
             "curl https://example.com && cp a /etc/a",
             "curl https://example.com > page.html",
         ] {
-            let req = f.request(&reloaded, &Shell, shell(other), &Seatbelt);
+            let req = f.sh(&reloaded, other);
             assert_eq!(reloaded.auto_approval(&req, &Shell), None, "{other}");
         }
         let read_only = ApprovalPolicy::for_project(ApprovalMode::ReadOnly, root).unwrap();
-        let req = f.request(
-            &read_only,
-            &Shell,
-            shell("curl https://example.com"),
-            &Seatbelt,
-        );
+        let req = f.sh(&read_only, "curl https://example.com");
         assert_eq!(read_only.auto_approval(&req, &Shell), None);
     }
 

@@ -302,17 +302,41 @@ mod tests {
 
     use super::*;
 
-    fn setup() -> (tempfile::TempDir, ToolExecutor, Workspace) {
-        let dir = tempfile::tempdir().unwrap();
-        let exec = ToolExecutor::new(
-            Arc::new(ToolRegistry::standard()),
-            Arc::new(ReadOnlyGate),
-            Arc::new(ApprovalPolicy::new(ApprovalMode::AutoWorkspace)),
-            Arc::new(NoSandbox),
-        )
-        .with_provider(Some("grok".into()));
-        let workspace = Workspace::new(dir.path()).unwrap();
-        (dir, exec, workspace)
+    struct Setup {
+        _dir: tempfile::TempDir,
+        exec: ToolExecutor,
+        workspace: Workspace,
+    }
+
+    impl Setup {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let exec = ToolExecutor::new(
+                Arc::new(ToolRegistry::standard()),
+                Arc::new(ReadOnlyGate),
+                Arc::new(ApprovalPolicy::new(ApprovalMode::AutoWorkspace)),
+                Arc::new(NoSandbox),
+            )
+            .with_provider(Some("grok".into()));
+            let workspace = Workspace::new(dir.path()).unwrap();
+            Self {
+                _dir: dir,
+                exec,
+                workspace,
+            }
+        }
+
+        fn answer(&self, id: Value, method: &str, params: &Value, cancelled: bool) -> Answer {
+            answer(
+                &id,
+                method,
+                params,
+                &self.exec,
+                &self.workspace,
+                None,
+                cancelled,
+            )
+        }
     }
 
     fn options() -> Value {
@@ -324,17 +348,8 @@ mod tests {
     }
 
     fn ask(tool_call: Value) -> Answer {
-        let (_dir, exec, workspace) = setup();
         let params = json!({"sessionId": "s1", "toolCall": tool_call, "options": options()});
-        answer(
-            &json!(7),
-            "session/request_permission",
-            &params,
-            &exec,
-            &workspace,
-            None,
-            false,
-        )
+        Setup::new().answer(json!(7), "session/request_permission", &params, false)
     }
 
     #[test]
@@ -373,47 +388,27 @@ mod tests {
 
     #[test]
     fn never_approves_for_the_session_and_cancels_when_cancelled() {
-        let (_dir, exec, workspace) = setup();
+        let setup = Setup::new();
         let call = json!({"toolCallId": "c1", "title": "use_tool",
             "rawInput": {"tool_name": "rozu__read_file", "tool_input": {}}});
         let only_always =
             json!({"toolCall": call, "options": [{"optionId": "a", "kind": "allow_always"}]});
-        let answer = answer(
-            &json!(1),
-            "session/request_permission",
-            &only_always,
-            &exec,
-            &workspace,
-            None,
-            false,
-        );
+        let answer = setup.answer(json!(1), "session/request_permission", &only_always, false);
         assert_eq!(answer.reply["result"]["outcome"]["outcome"], "cancelled");
         assert!(!answer.records[0].decision.is_approval());
 
         let params = json!({"toolCall": call, "options": options()});
-        let cancelled = super::answer(
-            &json!(2),
-            "session/request_permission",
-            &params,
-            &exec,
-            &workspace,
-            None,
-            true,
-        );
+        let cancelled = setup.answer(json!(2), "session/request_permission", &params, true);
         assert_eq!(cancelled.reply["result"]["outcome"]["outcome"], "cancelled");
         assert_eq!(cancelled.records[0].source, DecisionSource::Cancelled);
     }
 
     #[test]
     fn refuses_fs_and_terminal_requests() {
-        let (_dir, exec, workspace) = setup();
-        let answer = answer(
-            &json!("r1"),
+        let answer = Setup::new().answer(
+            json!("r1"),
             "fs/read_text_file",
             &json!({"path": "/etc/passwd"}),
-            &exec,
-            &workspace,
-            None,
             false,
         );
         assert_eq!(answer.reply["error"]["code"], METHOD_NOT_FOUND);

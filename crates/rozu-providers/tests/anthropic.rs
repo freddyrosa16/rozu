@@ -1,10 +1,8 @@
-//! Anthropic adapter tests against recorded Messages API SSE fixtures served by wiremock.
-
 mod common;
 
 use std::sync::Arc;
 
-use common::{AgentHarness, body, collect, fast_retry, request, sse};
+use common::{AgentHarness, body, collect, fast_retry, request, sse, stream_err};
 use rozu_core::{
     AgentError, AgentEvent, Message, Provider, ProviderError, StopReason, StreamEvent, TurnOutcome,
     Usage,
@@ -12,7 +10,6 @@ use rozu_core::{
 use rozu_providers::{AnthropicConfig, AnthropicProvider, registry};
 use secrecy::SecretString;
 use serde_json::json;
-use tokio_util::sync::CancellationToken;
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -233,11 +230,7 @@ async fn persistent_529_becomes_a_server_error() {
         .mount(&server)
         .await;
 
-    let err = provider(&server.uri())
-        .stream(request(MODEL, "hi"), CancellationToken::new())
-        .await
-        .err()
-        .unwrap();
+    let err = stream_err(provider(&server.uri()).as_ref(), request(MODEL, "hi")).await;
 
     assert_eq!(
         err,
@@ -260,11 +253,7 @@ async fn auth_and_bad_request_errors_are_typed_and_not_retried() {
             .mount(&server)
             .await;
 
-        let err = provider(&server.uri())
-            .stream(request(MODEL, "hi"), CancellationToken::new())
-            .await
-            .err()
-            .unwrap();
+        let err = stream_err(provider(&server.uri()).as_ref(), request(MODEL, "hi")).await;
 
         let expected = if status == 401 {
             ProviderError::Auth {

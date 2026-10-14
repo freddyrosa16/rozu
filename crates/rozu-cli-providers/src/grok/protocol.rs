@@ -476,16 +476,14 @@ mod tests {
             classify_error("boom"),
             ProviderError::Api { code: Some(c), .. } if c == "grok"
         ));
-        assert_eq!(stop_reason(Some("end_turn")), Ok(StopReason::EndTurn));
-        assert_eq!(
-            stop_reason(Some("max_turn_requests")),
-            Ok(StopReason::EndTurn)
-        );
-        assert_eq!(stop_reason(Some("max_tokens")), Ok(StopReason::MaxTokens));
-        assert_eq!(
-            stop_reason(Some("cancelled")),
-            Err(ProviderError::Cancelled)
-        );
+        for (reason, want) in [
+            ("end_turn", Ok(StopReason::EndTurn)),
+            ("max_turn_requests", Ok(StopReason::EndTurn)),
+            ("max_tokens", Ok(StopReason::MaxTokens)),
+            ("cancelled", Err(ProviderError::Cancelled)),
+        ] {
+            assert_eq!(stop_reason(Some(reason)), want, "{reason}");
+        }
     }
 
     #[test]

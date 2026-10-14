@@ -812,41 +812,27 @@ mod tests {
 
     #[test]
     fn claude_cli_then_codex_then_grok_are_the_defaults_without_api_keys() {
-        let no_keys = || false;
-        let keys = || true;
-        let both = |_: &str| true;
-        let neither = |_: &str| false;
-        let only_codex = |id: &str| id == "codex";
-        let codex_and_grok = |id: &str| id == "codex" || id == "grok";
-        let only_grok = |id: &str| id == "grok";
+        let only = |ids: &'static [&'static str]| move |id: &str| ids.contains(&id);
+        for (installed, expected) in [
+            (only(&["codex", "grok"]), "codex"),
+            (only(&["grok"]), "grok"),
+            (only(&["claude-cli", "codex", "grok"]), "claude-cli"),
+            (only(&["codex"]), "codex"),
+            // With nothing installed, claude-cli's error says how to install it.
+            (only(&[]), "claude-cli"),
+        ] {
+            assert_eq!(
+                default_provider(None, None, || false, installed).as_deref(),
+                Some(expected)
+            );
+        }
+        let all = |_: &str| true;
+        assert_eq!(default_provider(None, None, || true, all), None);
         assert_eq!(
-            default_provider(None, None, no_keys, codex_and_grok).as_deref(),
-            Some("codex")
-        );
-        assert_eq!(
-            default_provider(None, None, no_keys, only_grok).as_deref(),
-            Some("grok")
-        );
-        assert_eq!(
-            default_provider(None, None, no_keys, both).as_deref(),
-            Some("claude-cli")
-        );
-        assert_eq!(
-            default_provider(None, None, no_keys, only_codex).as_deref(),
-            Some("codex")
-        );
-        // With neither installed, claude-cli's error says how to install it.
-        assert_eq!(
-            default_provider(None, None, no_keys, neither).as_deref(),
-            Some("claude-cli")
-        );
-        assert_eq!(default_provider(None, None, keys, both), None);
-        // An explicit choice always wins, and a model picks its own provider.
-        assert_eq!(
-            default_provider(Some("xai".into()), None, no_keys, both).as_deref(),
+            default_provider(Some("xai".into()), None, || false, all).as_deref(),
             Some("xai")
         );
-        assert_eq!(default_provider(None, Some("gpt-5.1"), no_keys, both), None);
+        assert_eq!(default_provider(None, Some("gpt-5.1"), || false, all), None);
     }
 
     #[test]

@@ -145,6 +145,15 @@ mod tests {
         assert_eq!(parse_auth_status("not json"), AuthStatus::default());
     }
 
+    fn write_executable(path: &Path) {
+        std::fs::write(path, "#!/bin/sh\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+
     #[test]
     fn finds_binary_on_path_then_local_bin() {
         let dir = tempfile::tempdir().unwrap();
@@ -153,24 +162,11 @@ mod tests {
         std::fs::create_dir_all(&bin).unwrap();
         std::fs::create_dir_all(home.join(".local/bin")).unwrap();
         let local = home.join(".local/bin/claude");
-        std::fs::write(&local, "#!/bin/sh\n").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&local, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        write_executable(&local);
         let path = std::env::join_paths([&bin]).unwrap();
-        assert_eq!(
-            find_binary_in(None, Some(&path), Some(&home)),
-            Some(local.clone())
-        );
+        assert_eq!(find_binary_in(None, Some(&path), Some(&home)), Some(local));
         let on_path = bin.join("claude");
-        std::fs::write(&on_path, "#!/bin/sh\n").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&on_path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        write_executable(&on_path);
         assert_eq!(
             find_binary_in(None, Some(&path), Some(&home)),
             Some(on_path)

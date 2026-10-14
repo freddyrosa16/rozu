@@ -361,7 +361,6 @@ mod tests {
     #[test]
     fn timestamps_are_utc_iso8601() {
         assert_eq!(utc_timestamp(0, 0), "1970-01-01T00:00:00.000Z");
-        // 2026-10-13 19:40:12 UTC.
         assert_eq!(utc_timestamp(1_791_920_412, 7), "2026-10-13T19:40:12.007Z");
         assert_eq!(utc_timestamp(951_782_400, 0), "2000-02-29T00:00:00.000Z");
         let id = new_session_id();

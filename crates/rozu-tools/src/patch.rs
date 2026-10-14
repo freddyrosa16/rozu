@@ -295,22 +295,25 @@ mod tests {
 
     #[test]
     fn search_replace_rejects_missing_and_ambiguous() {
-        let err = apply_search_replace("x = 1\n", &[edit("y = 1", "y = 2")]).unwrap_err();
-        assert!(err.0.contains("edit 1: `old` text not found"), "{err}");
-
+        for (text, edit, want) in [
+            (
+                "x = 1\n",
+                edit("y = 1", "y = 2"),
+                "edit 1: `old` text not found",
+            ),
+            (
+                "    a\n    b\n",
+                edit("a\nb", "c"),
+                "ignoring whitespace starts at line 1",
+            ),
+            ("a\nb\na\n", edit("a", "c"), "matches 2 times (lines 1, 3)"),
+            ("a", edit("", "c"), "empty"),
+        ] {
+            let err = apply_search_replace(text, &[edit]).unwrap_err();
+            assert!(err.0.contains(want), "{err}");
+        }
         let err = apply_search_replace("    x = 1\n", &[edit("x  =  1", "")]).unwrap_err();
         assert!(!err.0.contains("ignoring whitespace"), "{err}");
-        let err = apply_search_replace("    a\n    b\n", &[edit("a\nb", "c")]).unwrap_err();
-        assert!(
-            err.0.contains("ignoring whitespace starts at line 1"),
-            "{err}"
-        );
-
-        let err = apply_search_replace("a\nb\na\n", &[edit("a", "c")]).unwrap_err();
-        assert!(err.0.contains("matches 2 times (lines 1, 3)"), "{err}");
-
-        let err = apply_search_replace("a", &[edit("", "c")]).unwrap_err();
-        assert!(err.0.contains("empty"), "{err}");
 
         let mut all = edit("a", "c");
         all.replace_all = true;

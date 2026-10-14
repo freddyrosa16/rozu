@@ -1,24 +1,20 @@
-//! OpenAI adapter tests against recorded Responses API SSE fixtures served by wiremock.
+mod common;
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use async_trait::async_trait;
-use futures::StreamExt;
+use common::{AgentHarness, body, collect, fast_retry, request, sse, stream_err};
 use rozu_core::{
-    Agent, AgentConfig, AgentError, AgentEvent, ChatRequest, Message, Provider, ProviderError,
-    Session, StopReason, StreamEvent, TurnOutcome, Usage,
+    AgentError, AgentEvent, Message, ProviderError, StopReason, StreamEvent, TurnOutcome, Usage,
 };
-use rozu_providers::{OpenAiConfig, OpenAiProvider, RetryPolicy};
-use rozu_tools::{Risk, Tool, ToolCtx, ToolOutput, ToolRegistry, Workspace};
+use rozu_providers::{OpenAiConfig, OpenAiProvider};
 use secrecy::SecretString;
-use serde_json::{Value, json};
+use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
-use tokio::sync::{mpsc, oneshot};
-use tokio_util::sync::CancellationToken;
+use tokio::sync::oneshot;
 use wiremock::matchers::{header, method, path};
-use wiremock::{Mock, MockServer, Request, ResponseTemplate};
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const TEXT: &str = include_str!("fixtures/openai/text.sse");
 const TOOL_CALL: &str = include_str!("fixtures/openai/tool_call.sse");
@@ -27,130 +23,13 @@ const TRUNCATED: &str = include_str!("fixtures/openai/truncated.sse");
 
 const API_KEY: &str = "sk-test-0123456789abcdef";
 
-fn sse(body: &str) -> ResponseTemplate {
-    ResponseTemplate::new(200)
-        .insert_header("content-type", "text/event-stream")
-        .set_body_string(body)
-}
-
-fn fast_retry() -> RetryPolicy {
-    RetryPolicy {
-        max_retries: 3,
-        base_delay: Duration::from_millis(1),
-        max_delay: Duration::from_millis(20),
-    }
-}
+const MODEL: &str = "gpt-5.1";
 
 fn provider(base_url: &str) -> Arc<OpenAiProvider> {
     let config = OpenAiConfig::new(SecretString::from(API_KEY))
         .with_base_url(base_url)
         .with_retry(fast_retry());
     Arc::new(OpenAiProvider::new(config).unwrap())
-}
-
-fn request(text: &str) -> ChatRequest {
-    ChatRequest {
-        model: "gpt-5.1".into(),
-        messages: vec![Message::user(text)],
-        tools: vec![],
-        max_output_tokens: None,
-    }
-}
-
-async fn collect(
-    provider: &OpenAiProvider,
-    req: ChatRequest,
-) -> Vec<Result<StreamEvent, ProviderError>> {
-    provider
-        .stream(req, CancellationToken::new())
-        .await
-        .unwrap()
-        .collect()
-        .await
-}
-
-fn body(request: &Request) -> Value {
-    serde_json::from_slice(&request.body).unwrap()
-}
-
-/// A fake tool that looks up a fixed value.
-struct Lookup;
-
-#[async_trait]
-impl Tool for Lookup {
-    fn name(&self) -> &'static str {
-        "lookup"
-    }
-    fn description(&self) -> &'static str {
-        "Look up a value by key"
-    }
-    fn schema(&self) -> Value {
-        json!({"type": "object", "properties": {"key": {"type": "string"}}, "required": ["key"]})
-    }
-    fn risk(&self, _: &Value, _: &ToolCtx) -> Risk {
-        Risk::Read
-    }
-    async fn call(&self, args: Value, _: &ToolCtx) -> ToolOutput {
-        match args["key"].as_str() {
-            Some("answer") => ToolOutput::ok("42"),
-            other => ToolOutput::error(format!("no value for {other:?}")),
-        }
-    }
-}
-
-struct AgentHarness {
-    _dir: tempfile::TempDir,
-    agent: Agent,
-    session: Session,
-}
-
-impl AgentHarness {
-    fn new(provider: Arc<OpenAiProvider>) -> Self {
-        let dir = tempfile::tempdir().unwrap();
-        let mut tools = ToolRegistry::new();
-        tools.register(Lookup);
-        let agent = Agent::new(
-            provider,
-            Arc::new(tools),
-            Workspace::new(dir.path()).unwrap(),
-            AgentConfig::new("gpt-5.1"),
-        );
-        Self {
-            _dir: dir,
-            agent,
-            session: Session::with_system_prompt("You are a test."),
-        }
-    }
-
-    /// Runs a turn; cancels it as soon as the first text delta arrives if `cancel_on_text`.
-    async fn run(
-        &mut self,
-        input: &str,
-        cancel_on_text: bool,
-    ) -> (Result<TurnOutcome, AgentError>, Vec<AgentEvent>) {
-        let (tx, mut rx) = mpsc::channel(16);
-        let cancel = CancellationToken::new();
-        let consumer_cancel = cancel.clone();
-        let consumer = async move {
-            let mut seen = Vec::new();
-            while let Some(event) = rx.recv().await {
-                if cancel_on_text && matches!(event, AgentEvent::TextDelta(_)) {
-                    consumer_cancel.cancel();
-                }
-                seen.push(event);
-            }
-            seen
-        };
-        let turn = async {
-            let result = self
-                .agent
-                .run_turn(input, &mut self.session, &tx, cancel)
-                .await;
-            drop(tx);
-            result
-        };
-        tokio::join!(turn, consumer)
-    }
 }
 
 #[tokio::test]
@@ -169,7 +48,7 @@ async fn streams_plain_text() {
         .await;
 
     let provider = provider(&format!("{}/v1", server.uri()));
-    let events: Vec<_> = collect(&provider, request("say hello"))
+    let events: Vec<_> = collect(provider.as_ref(), request(MODEL, "say hello"))
         .await
         .into_iter()
         .map(Result::unwrap)
@@ -191,7 +70,7 @@ async fn streams_plain_text() {
         ]
     );
     let sent = body(&server.received_requests().await.unwrap()[0]);
-    assert_eq!(sent["model"], "gpt-5.1");
+    assert_eq!(sent["model"], MODEL);
     assert_eq!(sent["stream"], true);
     assert_eq!(
         sent["input"],
@@ -202,7 +81,6 @@ async fn streams_plain_text() {
 #[tokio::test]
 async fn tool_call_round_trip_through_agent() {
     let server = MockServer::start().await;
-    // The first request gets a tool call; the follow-up (with the tool result) gets the answer.
     Mock::given(method("POST"))
         .and(path("/responses"))
         .respond_with(sse(TOOL_CALL))
@@ -217,8 +95,8 @@ async fn tool_call_round_trip_through_agent() {
         .mount(&server)
         .await;
 
-    let mut h = AgentHarness::new(provider(&server.uri()));
-    let (result, events) = h.run("what is the answer?", false).await;
+    let mut h = AgentHarness::new(provider(&server.uri()), MODEL, None);
+    let (result, events) = h.run("what is the answer?").await;
 
     assert_eq!(result.unwrap(), TurnOutcome::Completed);
     assert!(events.contains(&AgentEvent::ToolCallFinished {
@@ -260,8 +138,8 @@ async fn interrupted_stream_keeps_partial_text() {
         .mount(&server)
         .await;
 
-    let mut h = AgentHarness::new(provider(&server.uri()));
-    let (result, _) = h.run("list the files", false).await;
+    let mut h = AgentHarness::new(provider(&server.uri()), MODEL, None);
+    let (result, _) = h.run("list the files").await;
 
     assert!(
         matches!(
@@ -298,7 +176,7 @@ async fn retries_429_then_succeeds() {
         .await;
 
     let provider = provider(&server.uri());
-    let events = collect(&provider, request("hi")).await;
+    let events = collect(provider.as_ref(), request(MODEL, "hi")).await;
 
     assert_eq!(events.len(), 5);
     assert_eq!(
@@ -321,7 +199,7 @@ async fn retries_server_errors_with_backoff() {
         .mount(&server)
         .await;
 
-    let events = collect(&provider(&server.uri()), request("hi")).await;
+    let events = collect(provider(&server.uri()).as_ref(), request(MODEL, "hi")).await;
 
     assert!(events.iter().all(Result::is_ok));
     assert_eq!(server.received_requests().await.unwrap().len(), 3);
@@ -339,11 +217,7 @@ async fn gives_up_after_max_retries() {
         .mount(&server)
         .await;
 
-    let err = provider(&server.uri())
-        .stream(request("hi"), CancellationToken::new())
-        .await
-        .err()
-        .unwrap();
+    let err = stream_err(provider(&server.uri()).as_ref(), request(MODEL, "hi")).await;
 
     assert_eq!(
         err,
@@ -366,11 +240,7 @@ async fn auth_errors_are_typed_and_not_retried() {
         .mount(&server)
         .await;
 
-    let err = provider(&server.uri())
-        .stream(request("hi"), CancellationToken::new())
-        .await
-        .err()
-        .unwrap();
+    let err = stream_err(provider(&server.uri()).as_ref(), request(MODEL, "hi")).await;
 
     assert_eq!(
         err,
@@ -391,7 +261,7 @@ async fn stream_error_event_is_typed() {
         .mount(&server)
         .await;
 
-    let events = collect(&provider(&server.uri()), request("hi")).await;
+    let events = collect(provider(&server.uri()).as_ref(), request(MODEL, "hi")).await;
 
     assert_eq!(
         events,
@@ -410,7 +280,6 @@ async fn stalling_server(chunk: &'static str) -> (String, oneshot::Receiver<()>)
     let (closed_tx, closed_rx) = oneshot::channel();
     tokio::spawn(async move {
         let (mut socket, _) = listener.accept().await.unwrap();
-        // Read the request head and body.
         let mut buf = Vec::new();
         let mut tmp = [0u8; 4096];
         loop {
@@ -450,8 +319,8 @@ async fn cancel_mid_stream_keeps_partial_text_and_closes_connection() {
     let chunk = "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0,\"delta\":\"Partial answ\"}\n\n";
     let (base_url, closed) = stalling_server(chunk).await;
 
-    let mut h = AgentHarness::new(provider(&base_url));
-    let (result, events) = tokio::time::timeout(Duration::from_secs(10), h.run("hi", true))
+    let mut h = AgentHarness::new(provider(&base_url), MODEL, None);
+    let (result, events) = tokio::time::timeout(Duration::from_secs(10), h.run_with("hi", true))
         .await
         .expect("cancel stops the turn");
 

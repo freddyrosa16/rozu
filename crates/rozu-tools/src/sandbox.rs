@@ -396,14 +396,19 @@ mod tests {
             real.join("missing/f.txt")
         );
         let home = Path::new("/Users/me");
-        assert!(too_broad_to_grant(Path::new("/"), Some(home)));
-        assert!(too_broad_to_grant(Path::new("/etc"), Some(home)));
-        assert!(too_broad_to_grant(Path::new("/Users/me"), Some(home)));
-        assert!(!too_broad_to_grant(
-            Path::new("/Users/me/scratch"),
-            Some(home)
-        ));
-        assert!(!too_broad_to_grant(Path::new("/etc/hosts"), Some(home)));
+        for (path, broad) in [
+            ("/", true),
+            ("/etc", true),
+            ("/Users/me", true),
+            ("/Users/me/scratch", false),
+            ("/etc/hosts", false),
+        ] {
+            assert_eq!(
+                too_broad_to_grant(Path::new(path), Some(home)),
+                broad,
+                "{path}"
+            );
+        }
     }
 
     #[test]
