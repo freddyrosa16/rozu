@@ -8,7 +8,9 @@ mod context;
 mod factory;
 mod models;
 
-pub use approval::{ApprovalOptions, unsandboxed_action_label, unsandboxed_approval_label};
+pub use approval::{
+    ApprovalOptions, approval_text, unsandboxed_action_label, unsandboxed_approval_label,
+};
 pub use context::{APP_HOST, TERMINAL_HOST, load_memory, set_system, system_prompt};
 pub use factory::{AgentFactory, GROK_HOOK_MAX_BYTES_ENV};
 pub use models::{any_api_key, base_url_override, cli_installed, default_provider, resolve_choice};

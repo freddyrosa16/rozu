@@ -15,7 +15,7 @@ use rozu_cli_providers::{
 };
 use rozu_core::{
     Agent, AgentConfig, ApprovalGate, ApprovalMode, ApprovalPolicy, AuditLog, DEFAULT_MAX_STEPS,
-    MemoryPolicy, Provider, ToolExecutor, approvals_path,
+    MemoryPolicy, Provider, ToolExecutor,
 };
 use rozu_providers::ModelChoice;
 use rozu_providers::registry::{self, CODEX_ID, GROK_ID};
@@ -69,12 +69,8 @@ impl AgentFactory {
         gate: Arc<dyn ApprovalGate>,
         session_id: String,
     ) -> anyhow::Result<Self> {
-        let policy = ApprovalPolicy::for_project(mode, workspace.root()).with_context(|| {
-            format!(
-                "cannot read the approval rules in {}; fix or delete the file",
-                approvals_path(workspace.root()).display()
-            )
-        })?;
+        let policy = ApprovalPolicy::for_project(mode, workspace.root())
+            .context("cannot load this user's project approval rules")?;
         let temp = match SessionTemp::create(&session_id) {
             Ok(temp) => Some(Arc::new(temp)),
             Err(err) => {

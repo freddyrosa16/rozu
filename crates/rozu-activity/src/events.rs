@@ -188,11 +188,10 @@ fn path_arg(args: &Value) -> Option<&str> {
 
 /// The pill label for a tool call: the state's verb plus the file, query or command when the
 /// arguments have one.
-fn tool_label(state: ActivityState, args_json: &str) -> String {
-    let args: Value = serde_json::from_str(args_json).unwrap_or(Value::Null);
+fn tool_label(state: ActivityState, args: &Value) -> String {
     let arg = match state {
-        ActivityState::Reading | ActivityState::Editing => path_arg(&args).map(short_path),
-        ActivityState::Searching => str_arg(&args, &["pattern", "query", "q", "regex", "glob"])
+        ActivityState::Reading | ActivityState::Editing => path_arg(args).map(short_path),
+        ActivityState::Searching => str_arg(args, &["pattern", "query", "q", "regex", "glob"])
             .map(|q| format!("\"{}\"", clip(q))),
         ActivityState::Running => match args.get("command").or_else(|| args.get("cmd")) {
             Some(Value::String(s)) => Some(clip(s)),
@@ -250,6 +249,11 @@ impl ActivityTracker {
         self.current.as_ref()
     }
 
+    /// The running tool, even while an approval prompt keeps the pill on Waiting.
+    pub fn running_tool(&self) -> Option<&Activity> {
+        self.tool.as_ref()
+    }
+
     /// Applies one event. Returns the new activity if the pill changed (state or label).
     pub fn apply(&mut self, event: &ActivityEvent) -> Option<&Activity> {
         let next = match event {
@@ -270,13 +274,13 @@ impl ActivityTracker {
                 name, args_json, ..
             } => {
                 let state = tool_state(name).unwrap_or(ActivityState::Thinking);
+                let args = serde_json::from_str(args_json).unwrap_or(Value::Null);
                 if state == ActivityState::Editing
-                    && let Ok(args) = serde_json::from_str::<Value>(args_json)
                     && let Some(path) = path_arg(&args)
                 {
                     self.files.insert(path.to_string());
                 }
-                let activity = Activity::new(state, tool_label(state, args_json));
+                let activity = Activity::new(state, tool_label(state, &args));
                 self.tool = Some(activity.clone());
                 Some(activity)
             }
@@ -604,11 +608,12 @@ mod tests {
                 "Reading module.rs",
             ),
         ] {
-            assert_eq!(tool_label(state, args), label, "{args}");
+            let parsed = serde_json::from_str(args).unwrap_or(Value::Null);
+            assert_eq!(tool_label(state, &parsed), label, "{args}");
         }
         let long = tool_label(
             Running,
-            r#"{"command":"cargo test --workspace --all-features -- --nocapture"}"#,
+            &serde_json::json!({"command": "cargo test --workspace --all-features -- --nocapture"}),
         );
         assert!(long.ends_with('…') && long.chars().count() <= "Running ".len() + MAX_ARG_CHARS);
     }
@@ -643,6 +648,7 @@ mod tests {
         );
         let d = t.apply(&ActivityEvent::TurnCompleted).unwrap();
         assert_eq!((d.state, d.detail.as_deref()), (Done, Some("2 files")));
+        assert!(t.running_tool().is_none());
     }
 
     #[test]
@@ -696,12 +702,25 @@ mod tests {
         assert!(t.apply(&ActivityEvent::TextDelta).is_none());
         assert!(t.apply(&resolved("a", ApprovalOutcome::Approved)).is_none());
         assert_eq!(t.current().unwrap().state, Waiting);
+        assert_eq!(t.running_tool().unwrap().label, "Running make");
         assert_eq!(
             t.apply(&resolved("b", ApprovalOutcome::Approved))
                 .unwrap()
                 .state,
             Running
         );
+    }
+
+    #[test]
+    fn malformed_edits_do_not_count_as_written_files() {
+        let mut tracker = ActivityTracker::new();
+        for args in ["not json", "{}", r#"{"path":42}"#, r#"{"path":"a.rs"}"#] {
+            tracker.apply(&started("write_file", args));
+            tracker.apply(&finished("write_file", false));
+        }
+        let done = tracker.apply(&ActivityEvent::TurnCompleted).unwrap();
+        assert_eq!(done.detail.as_deref(), Some("1 file"));
+        assert!(tracker.running_tool().is_none());
     }
 
     #[test]

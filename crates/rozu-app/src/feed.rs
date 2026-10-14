@@ -36,6 +36,7 @@ pub struct Feed {
     pub items: Vec<Item>,
     pub running: bool,
     tracker: ActivityTracker,
+    thinking: Option<usize>,
 }
 
 impl Feed {
@@ -108,6 +109,7 @@ impl Feed {
 
     pub fn send(&mut self, text: String) {
         self.items.push(Item::User(text));
+        self.thinking = Some(self.items.len());
         self.items.push(Item::Step(Step::new(
             "",
             ActivityState::Thinking,
@@ -134,23 +136,11 @@ impl Feed {
                     _ => self.items.push(Item::Text(text)),
                 }
             }
-            AgentEvent::ToolCallStarted {
-                id,
-                name,
-                args_json,
-            } => {
+            AgentEvent::ToolCallStarted { id, .. } => {
                 self.end_thinking();
-                let ev = AgentEvent::ToolCallStarted {
-                    id: id.clone(),
-                    name: name.clone(),
-                    args_json,
-                };
-                let activity = from_agent_event(&ev);
-                let state = activity
-                    .as_ref()
-                    .map_or(ActivityState::Thinking, |a| a.state);
-                let label = activity.map_or(name, |a| a.label);
-                self.items.push(Item::Step(Step::new(&id, state, &label)));
+                let activity = self.tracker.running_tool().expect("tool just started");
+                self.items
+                    .push(Item::Step(Step::new(&id, activity.state, &activity.label)));
             }
             AgentEvent::ToolCallFinished {
                 id,
@@ -219,7 +209,9 @@ impl Feed {
     }
 
     fn end_thinking(&mut self) {
-        if let Some(step) = self.step("") {
+        if let Some(index) = self.thinking.take()
+            && let Some(Item::Step(step)) = self.items.get_mut(index)
+        {
             step.done = Some(format!(
                 "Thought for {}s",
                 step.started.elapsed().as_secs().max(1)
@@ -379,6 +371,88 @@ mod tests {
             Feed::from_session(&Session::new()).state(),
             ActivityState::Offline
         );
+    }
+
+    #[test]
+    fn tool_rows_keep_their_activity_while_approvals_overlap() {
+        use rozu_core::PendingApproval;
+
+        let mut feed = Feed::default();
+        feed.send("read it".into());
+        for id in ["a", "b"] {
+            feed.apply(AgentEvent::ApprovalPending(PendingApproval {
+                request_id: id.into(),
+                tool: "read_file".into(),
+                summary: "read".into(),
+                provider: "test".into(),
+            }));
+        }
+        feed.apply(tool("file", "read_file", r#"{"path":"README.md"}"#));
+        assert_eq!(feed.state(), ActivityState::Waiting);
+        assert!(matches!(feed.items.last(), Some(Item::Step(step))
+            if step.state == ActivityState::Reading && step.label == "Reading README.md"));
+        feed.apply(AgentEvent::ApprovalResolved {
+            request_id: "a".into(),
+            resolution: ApprovalResolution::Approved,
+        });
+        assert_eq!(feed.state(), ActivityState::Waiting);
+        feed.apply(AgentEvent::ApprovalResolved {
+            request_id: "b".into(),
+            resolution: ApprovalResolution::Expired,
+        });
+        assert_eq!(feed.state(), ActivityState::Reading);
+    }
+
+    #[test]
+    fn thinking_finishes_once_per_turn_after_resume_cancel_and_failure() {
+        use rozu_core::Message;
+
+        let mut session = Session::new();
+        session.messages.push(Message::user("old question"));
+        session.messages.push(Message::assistant("old answer"));
+        let mut feed = Feed::from_session(&session);
+        feed.send("cancel".into());
+        feed.apply(AgentEvent::TurnFinished(TurnOutcome::Cancelled));
+        feed.send("fail".into());
+        feed.fail("offline".into(), true);
+        assert_eq!(feed.state(), ActivityState::Offline);
+        feed.send("retry".into());
+        feed.apply(AgentEvent::TextDelta("one".into()));
+        let completed: Vec<_> = steps(&feed)
+            .into_iter()
+            .map(|(_, done)| done.unwrap().to_owned())
+            .collect();
+        assert_eq!(completed.len(), 3);
+        feed.apply(AgentEvent::TextDelta("two".into()));
+        assert_eq!(
+            steps(&feed)
+                .into_iter()
+                .map(|(_, done)| done.unwrap())
+                .collect::<Vec<_>>(),
+            completed
+        );
+        assert!(matches!(&feed.items[0], Item::User(text) if text == "old question"));
+        assert!(matches!(&feed.items[1], Item::Text(text) if text == "old answer"));
+        assert!(matches!(feed.items.last(), Some(Item::Text(text)) if text == "onetwo"));
+    }
+
+    #[test]
+    fn unknown_tools_and_malformed_arguments_keep_their_fallback_labels() {
+        for (name, args, state, label) in [
+            ("mystery", "{}", ActivityState::Thinking, "Thinking…"),
+            ("write_file", "not json", ActivityState::Editing, "Editing…"),
+            ("read_file", "[]", ActivityState::Reading, "Reading…"),
+            ("shell", "{", ActivityState::Running, "Running…"),
+        ] {
+            let mut feed = Feed::default();
+            feed.send("go".into());
+            feed.apply(tool("call", name, args));
+            assert!(
+                matches!(feed.items.last(), Some(Item::Step(step))
+                if step.state == state && step.label == label),
+                "{name}: {args}"
+            );
+        }
     }
 
     #[test]

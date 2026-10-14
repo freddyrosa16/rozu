@@ -117,17 +117,15 @@ pub fn pinned_len(messages: &[Message]) -> usize {
 /// Index of the first kept message: the `keep` -th last user message (or the end, if there are
 /// fewer older messages than that).
 pub fn recent_start(messages: &[Message], keep: usize) -> usize {
-    let users: Vec<usize> = messages
+    messages
         .iter()
         .enumerate()
-        .filter(|(_, m)| m.role == Role::User)
-        .map(|(i, _)| i)
-        .collect();
-    match keep {
-        0 => messages.len(),
-        _ if users.len() < keep => users.first().copied().unwrap_or(messages.len()),
-        _ => users[users.len() - keep],
-    }
+        .rev()
+        .filter(|(_, message)| message.role == Role::User)
+        .map(|(index, _)| index)
+        .take(keep)
+        .last()
+        .unwrap_or(messages.len())
 }
 
 /// Replaces long tool outputs before `end` with a stub. Returns how many it replaced.
@@ -135,14 +133,14 @@ pub fn mask_tool_outputs(messages: &mut [Message], end: usize) -> usize {
     let mut masked = 0;
     for message in &mut messages[..end] {
         for part in &mut message.content {
-            if let ContentPart::ToolResult { output, .. } = part {
-                if output.len() >= MASK_MIN_BYTES {
-                    *output = format!(
-                        "[output elided by rozu to save context: {} bytes; rerun the tool if needed]",
-                        output.len()
-                    );
-                    masked += 1;
-                }
+            if let ContentPart::ToolResult { output, .. } = part
+                && output.len() >= MASK_MIN_BYTES
+            {
+                *output = format!(
+                    "[output elided by rozu to save context: {} bytes; rerun the tool if needed]",
+                    output.len()
+                );
+                masked += 1;
             }
         }
     }

@@ -12,8 +12,26 @@ fn evals(sub: &str) -> PathBuf {
 }
 
 #[test]
+fn executable_evals_require_explicit_trust_before_loading_inputs() {
+    rozu()
+        .args(["eval", "tasks", "--dir", "/missing"])
+        .assert()
+        .failure()
+        .stderr(contains("pass --trusted"));
+    rozu()
+        .args(["eval", "replay", "missing.jsonl"])
+        .assert()
+        .failure()
+        .stderr(contains("pass --trusted"));
+}
+
+#[test]
 fn scripted_tasks_pass() {
-    let out = stdout_of(rozu().args(["eval", "tasks", "--dir"]).arg(evals("tasks")));
+    let out = stdout_of(
+        rozu()
+            .args(["eval", "tasks", "--trusted", "--dir"])
+            .arg(evals("tasks")),
+    );
     assert!(out.contains("6 of 6 tasks passed"), "{out}");
 }
 
@@ -21,7 +39,7 @@ fn scripted_tasks_pass() {
 fn a_recorded_session_replays_and_drift_is_caught() {
     let mut replay = rozu();
     replay
-        .args(["eval", "replay"])
+        .args(["eval", "replay", "--trusted"])
         .arg(evals("recorded/fix-failing-test.jsonl"))
         .arg("--workspace");
     let out = stdout_of(replay.arg(evals("recorded/fix-failing-test")));
@@ -37,7 +55,7 @@ fn a_recorded_session_replays_and_drift_is_caught() {
         .unwrap();
     }
     rozu()
-        .args(["eval", "replay"])
+        .args(["eval", "replay", "--trusted"])
         .arg(evals("recorded/fix-failing-test.jsonl"))
         .arg("--workspace")
         .arg(drifted.path())

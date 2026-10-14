@@ -99,9 +99,12 @@ impl Rozu {
         let title = match req.tool.as_str() {
             "shell" => "Run a command?".to_owned(),
             t if t.contains("patch") || t.contains("write") => "Edit a file?".to_owned(),
-            t => format!("Use {t}?"),
+            t => format!(
+                "Use {}?",
+                rozu_runtime::approval_text(t).replace('\n', "\\n")
+            ),
         };
-        let preview: String = req.preview.lines().take(24).collect::<Vec<_>>().join("\n");
+        let preview = rozu_runtime::approval_text(&req.preview);
         let options = rozu_runtime::ApprovalOptions::for_request(req);
         let mut choices = Vec::new();
         if options.approve {
@@ -157,16 +160,17 @@ impl Rozu {
                     .w(px(inner))
                     .max_h(px(168.))
                     .overflow_y_scroll()
-                    .overflow_x_hidden()
+                    .overflow_x_scroll()
                     .bg(rgb(BG))
                     .rounded(px(8.))
                     .child(
                         div()
-                            .w(px(inner))
+                            .min_w(px(inner))
                             .px(px(10.))
                             .py(px(8.))
                             .font_family("Menlo")
                             .text_size(px(13.))
+                            .whitespace_nowrap()
                             .child(preview),
                     ),
             )
@@ -313,13 +317,101 @@ pub(super) fn spans(t: markdown::Inline) -> StyledText {
 
 /// How an approved call would run.
 pub(super) fn confinement(req: &ApprovalRequest) -> String {
-    if req.blocked_retry {
-        return "The sandbox blocked this. Run it again without the sandbox?".into();
-    }
-    let network = if req.network {
-        "Network on."
+    let codex = req.sandbox == rozu_core::SandboxMode::Enforced(rozu_core::CODEX_SANDBOX);
+    let network = if req.network { "on" } else { "off" };
+    let mut text = if codex {
+        format!("Sandbox: Codex's own (rozu cannot remove it). Network requested: {network}.")
+    } else if req.sandbox == rozu_core::SandboxMode::Off {
+        "No OS sandbox: this call is not confined to workspace files or blocked from the network."
+            .into()
     } else {
-        "No network."
+        format!(
+            "Sandbox: {}. Network {network}.",
+            rozu_runtime::approval_text(&req.sandbox.to_string())
+        )
     };
-    format!("Sandbox: {}. {network}", req.sandbox)
+    if req.blocked_retry {
+        text.push_str("\nThe sandbox blocked the previous attempt.");
+    }
+    for path in &req.extra_writes {
+        let path = rozu_runtime::approval_text(&path.to_string_lossy()).replace('\n', "\\n");
+        if codex {
+            text.push_str(&format!(
+                "\nRequested write path (Codex's permissions still apply): {path}"
+            ));
+        } else {
+            text.push_str(&format!("\nAlso writable for this call: {path}"));
+        }
+    }
+    if req.outside_unknown {
+        text.push_str(
+            "\nThis call may write outside the workspace at paths rozu cannot determine.",
+        );
+        if req.can_run_unsandboxed() {
+            text.push_str(" Those writes may be blocked by the sandbox.");
+        }
+    }
+    if req.can_run_unsandboxed() && !codex {
+        text.push_str("\nRun without the sandbox gives this command full access to your files and network, for this call only.");
+    }
+    text
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rozu_core::{CODEX_SANDBOX, SandboxMode};
+    use rozu_tools::Risk;
+
+    fn request(sandbox: SandboxMode) -> ApprovalRequest {
+        ApprovalRequest {
+            call_id: "call".into(),
+            tool: "shell".into(),
+            args: Default::default(),
+            risk: Risk::WriteOutside,
+            preview: String::new(),
+            sandbox,
+            network: false,
+            extra_writes: Vec::new(),
+            outside_unknown: false,
+            blocked_retry: false,
+            allow_rule: None,
+        }
+    }
+
+    #[test]
+    fn confinement_includes_every_path_and_unknown_write_scope() {
+        let mut req = request(SandboxMode::Enforced("seatbelt"));
+        req.extra_writes = vec!["/one".into(), "/two\nnetwork on\u{1b}[2J".into()];
+        req.outside_unknown = true;
+        let text = confinement(&req);
+        assert!(text.contains("Also writable for this call: /one"));
+        assert!(text.contains("Also writable for this call: /two\\nnetwork on"));
+        assert!(!text.contains('\u{1b}'));
+        assert!(!text.contains("/two\nnetwork on"));
+        assert!(text.contains("paths rozu cannot determine"));
+        assert!(text.contains("full access to your files and network, for this call only"));
+    }
+
+    #[test]
+    fn codex_retry_does_not_offer_to_remove_its_sandbox() {
+        let mut req = request(SandboxMode::Enforced(CODEX_SANDBOX));
+        req.blocked_retry = true;
+        req.network = true;
+        req.outside_unknown = true;
+        let text = confinement(&req);
+        assert!(text.contains("rozu cannot remove it"));
+        assert!(text.contains("Network requested: on"));
+        assert!(text.contains("blocked the previous attempt"));
+        assert!(!text.contains("full access"));
+        assert!(!text.contains("Run without the sandbox"));
+    }
+
+    #[test]
+    fn no_sandbox_does_not_claim_to_block_network() {
+        let text = confinement(&request(SandboxMode::Off));
+        assert!(text.contains("No OS sandbox"));
+        assert!(!text.contains("Network off"));
+        assert!(!text.contains("Run without the sandbox"));
+    }
 }

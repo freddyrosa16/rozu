@@ -6,12 +6,12 @@ mod replay;
 mod tasks;
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Component, Path};
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use anyhow::Context;
+use anyhow::{Context, bail};
 use async_trait::async_trait;
 use clap::{Args, Subcommand, ValueEnum};
 use rozu_core::{AgentEvent, ApprovalGate, ApprovalRequest, Decision, Session, TurnOutcome, Usage};
@@ -39,7 +39,7 @@ enum EvalCommand {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum Mode {
-    /// Scripted model responses; no provider, no network.
+    /// Scripted model responses; no provider calls. Tools and check commands still execute.
     Dry,
     /// A real provider (--provider / --model, as for `rozu chat`).
     Live,
@@ -121,15 +121,27 @@ fn load_fixtures<T: DeserializeOwned>(dir: &Path, kind: &str) -> anyhow::Result<
 pub fn temp_repo(
     files: &BTreeMap<String, String>,
 ) -> anyhow::Result<(tempfile::TempDir, Workspace)> {
+    for path in files.keys() {
+        if path.is_empty()
+            || !Path::new(path)
+                .components()
+                .all(|part| matches!(part, Component::Normal(_) | Component::CurDir))
+        {
+            bail!("fixture path must be relative and contain no traversal: {path:?}");
+        }
+    }
     let dir = tempfile::tempdir()?;
+    let workspace = Workspace::new(dir.path())?;
     for (path, text) in files {
-        let path = dir.path().join(path);
+        let path = workspace.resolve_for_write(path)?;
+        if workspace.is_protected(&path) {
+            bail!("fixture cannot populate protected project settings");
+        }
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         std::fs::write(path, text)?;
     }
-    let workspace = Workspace::new(dir.path())?;
     Ok((dir, workspace))
 }
 
@@ -142,11 +154,17 @@ pub fn copy_dir(from: &Path, to: &Path) -> std::io::Result<()> {
             continue;
         }
         let dest = to.join(&name);
-        if entry.file_type()?.is_dir() {
+        let kind = entry.file_type()?;
+        if kind.is_dir() {
             std::fs::create_dir_all(&dest)?;
             copy_dir(&entry.path(), &dest)?;
-        } else {
+        } else if kind.is_file() {
             std::fs::copy(entry.path(), dest)?;
+        } else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "replay workspaces must contain only regular files and directories, not symlinks",
+            ));
         }
     }
     Ok(())
@@ -192,6 +210,52 @@ pub fn cache_hit_rate(usage: &Usage) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fixture_paths_cannot_overwrite_files_outside_the_temp_workspace() {
+        let outside = tempfile::tempdir().unwrap();
+        let canary = outside.path().join("canary");
+        std::fs::write(&canary, "unchanged").unwrap();
+        for path in [
+            canary.to_str().unwrap(),
+            "../canary",
+            "nested/../../canary",
+            "",
+            ".rozu/approvals.json",
+        ] {
+            let files = BTreeMap::from([(path.to_owned(), "overwritten".to_owned())]);
+            assert!(temp_repo(&files).is_err(), "{path:?}");
+            assert_eq!(std::fs::read_to_string(&canary).unwrap(), "unchanged");
+        }
+        let files = BTreeMap::from([("nested/rosé.txt".into(), "safe".into())]);
+        let (_dir, workspace) = temp_repo(&files).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(workspace.resolve("nested/rosé.txt").unwrap()).unwrap(),
+            "safe"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replay_copy_rejects_links_and_copies_normal_nested_files() {
+        let source = tempfile::tempdir().unwrap();
+        let dest = tempfile::tempdir().unwrap();
+        let outside = tempfile::NamedTempFile::new().unwrap();
+        std::os::unix::fs::symlink(outside.path(), source.path().join("linked")).unwrap();
+        assert_eq!(
+            copy_dir(source.path(), dest.path()).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+        assert!(!dest.path().join("linked").exists());
+        std::fs::remove_file(source.path().join("linked")).unwrap();
+        std::fs::create_dir(source.path().join("nested")).unwrap();
+        std::fs::write(source.path().join("nested/a"), "safe").unwrap();
+        copy_dir(source.path(), dest.path()).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dest.path().join("nested/a")).unwrap(),
+            "safe"
+        );
+    }
 
     #[derive(Debug, serde::Deserialize, PartialEq)]
     #[serde(deny_unknown_fields)]

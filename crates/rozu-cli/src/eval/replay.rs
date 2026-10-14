@@ -17,6 +17,9 @@ use super::{EvalGate, copy_dir, quiet_turn};
 
 #[derive(Debug, Args)]
 pub struct ReplayArgs {
+    /// Trust this fixture/recording to execute real tools and commands with your permissions.
+    #[arg(long)]
+    trusted: bool,
     /// A session file (`.jsonl`), or an id from `rozu sessions`.
     session: String,
     /// The files the session started from (copied to a temp dir first). Defaults to the
@@ -26,6 +29,11 @@ pub struct ReplayArgs {
 }
 
 pub async fn run(args: ReplayArgs) -> anyhow::Result<ExitCode> {
+    if !args.trusted {
+        bail!(
+            "eval tasks and replay execute real tools and commands; inspect the input and pass --trusted to run it"
+        );
+    }
     let path = PathBuf::from(&args.session);
     let (meta, recorded) = if path.extension().is_some_and(|e| e == "jsonl") {
         SessionStore::load_file(&path)
@@ -46,7 +54,7 @@ pub async fn run(args: ReplayArgs) -> anyhow::Result<ExitCode> {
     let workspace = Workspace::new(dir.path())?;
 
     let provider = Arc::new(ReplayProvider::from_session(&recorded.messages));
-    let policy = ApprovalPolicy::for_project(ApprovalMode::AutoWorkspace, workspace.root())?;
+    let policy = ApprovalPolicy::new(ApprovalMode::AutoWorkspace);
     let agent = Agent::new(
         provider.clone(),
         Arc::new(ToolRegistry::standard()),

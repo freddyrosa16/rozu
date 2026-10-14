@@ -41,9 +41,6 @@ pub const DISALLOWED_BUILTIN_TOOLS: &[&str] = &[
     "Task",
 ];
 
-/// Longest preview shown on an approval card for a built-in tool's input.
-const MAX_PREVIEW_CHARS: usize = 4000;
-
 /// How a permission prompt is decided.
 pub enum PermissionRequest {
     /// One of rozu's own tools: allowed here because the tool call itself goes through the
@@ -141,15 +138,21 @@ pub fn map_permission_request(
             let Some(path) = str_field("file_path").or_else(|| str_field("notebook_path")) else {
                 return deny(format!("{tool_name} without a file path"));
             };
-            let risk = match ctx.workspace.resolve_for_write(path) {
-                Ok(resolved) if ctx.workspace.is_protected(Path::new(&resolved)) => {
-                    return deny(format!(
-                        "{path} is inside {}, which only the user may change",
-                        rozu_tools::PROTECTED_DIR
-                    ));
-                }
-                Ok(_) => Risk::WriteWorkspace,
-                Err(_) => Risk::WriteOutside,
+            let resolved = ctx.workspace.resolve_for_write(path);
+            if ctx.workspace.is_protected(Path::new(path))
+                || resolved
+                    .as_ref()
+                    .is_ok_and(|path| ctx.workspace.is_protected(path))
+            {
+                return deny(format!(
+                    "{path} is inside {}, which only the user may change",
+                    rozu_tools::PROTECTED_DIR
+                ));
+            }
+            let risk = if resolved.is_ok() {
+                Risk::WriteWorkspace
+            } else {
+                Risk::WriteOutside
             };
             PermissionRequest::Policy {
                 request: request(
@@ -178,15 +181,10 @@ pub fn map_permission_request(
     }
 }
 
-/// `Tool input` as the approval card shows it, cut to a sane length.
+/// Complete input for inspection; the executor rejects oversized prompts instead of hiding it.
 fn preview(tool_name: &str, input: &Value) -> String {
     let body = serde_json::to_string_pretty(input).unwrap_or_else(|_| input.to_string());
-    let mut text = format!("{tool_name} {body}");
-    if text.chars().count() > MAX_PREVIEW_CHARS {
-        text = text.chars().take(MAX_PREVIEW_CHARS).collect();
-        text.push_str("\n…");
-    }
-    text
+    format!("{tool_name} {body}")
 }
 
 /// The text Claude expects back from the permission-prompt tool.
@@ -313,6 +311,31 @@ mod tests {
                 matches!(map(tool, input.clone()), PermissionRequest::Deny { .. }),
                 "{tool} {input}"
             );
+        }
+    }
+
+    #[test]
+    fn approval_preview_includes_the_complete_input() {
+        let input = json!({"content": "x".repeat(9000) + "visible-tail"});
+        assert!(preview("Write", &input).contains("visible-tail"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn protected_writes_stay_denied_when_settings_are_an_outside_symlink() {
+        let (dir, ctx) = ctx();
+        let outside = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.path().join(".rozu")).unwrap();
+        for tool in ["Write", "Edit", "MultiEdit", "NotebookEdit"] {
+            for path in [
+                ".rozu/pinned.md".to_owned(),
+                outside.path().join("pinned.md").display().to_string(),
+            ] {
+                assert!(matches!(
+                    map_permission_request(tool, &json!({"file_path":path}), "call", &ctx),
+                    PermissionRequest::Deny { .. }
+                ));
+            }
         }
     }
 

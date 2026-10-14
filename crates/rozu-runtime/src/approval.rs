@@ -3,6 +3,22 @@
 use rozu_core::{ApprovalRequest, CODEX_SANDBOX, SandboxMode};
 use rozu_tools::Risk;
 
+/// Keep approval text readable without terminal or bidirectional control effects.
+pub fn approval_text(text: &str) -> String {
+    let mut shown = String::with_capacity(text.len());
+    for c in text.chars() {
+        if c != '\n'
+            && (c.is_control()
+                || matches!(c, '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'))
+        {
+            shown.extend(c.escape_default());
+        } else {
+            shown.push(c);
+        }
+    }
+    shown
+}
+
 /// The approval actions a frontend may offer, in addition to denying the request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ApprovalOptions {
@@ -16,7 +32,11 @@ impl ApprovalOptions {
         Self {
             approve: !request.blocked_retry,
             always_allow: !request.blocked_retry
-                && !matches!(request.risk, Risk::Opaque | Risk::Destructive)
+                && !matches!(
+                    request.risk,
+                    Risk::Opaque | Risk::Destructive | Risk::Network
+                )
+                && (!request.network || request.sandbox == SandboxMode::Off)
                 && request.allow_rule.is_some(),
             unsandboxed: request.can_run_unsandboxed(),
         }
@@ -46,6 +66,17 @@ mod tests {
     use super::*;
     use rozu_tools::AllowRule;
 
+    #[test]
+    fn controls_are_visible_without_losing_unicode_or_lines() {
+        let text = "rm file #\u{1b}[2J\r\u{8}\u{9d}title\u{7}\u{202e}safe\u{200f}\nrosé";
+        let shown = approval_text(text);
+        assert_eq!(
+            shown,
+            "rm file #\\u{1b}[2J\\r\\u{8}\\u{9d}title\\u{7}\\u{202e}safe\\u{200f}\nrosé"
+        );
+        assert!(!shown.chars().any(|c| c.is_control() && c != '\n'));
+    }
+
     fn request(risk: Risk, sandbox: SandboxMode, blocked_retry: bool) -> ApprovalRequest {
         ApprovalRequest {
             call_id: "call".into(),
@@ -73,7 +104,7 @@ mod tests {
                 (true, true, false),
             ),
             (Risk::Read, SandboxMode::Off, false, (true, true, false)),
-            (Risk::Network, sandboxed, false, (true, true, true)),
+            (Risk::Network, sandboxed, false, (true, false, true)),
             (Risk::Opaque, sandboxed, false, (true, false, true)),
             (Risk::Destructive, sandboxed, false, (true, false, true)),
             (Risk::Network, sandboxed, true, (false, false, true)),
@@ -81,7 +112,7 @@ mod tests {
                 Risk::Network,
                 SandboxMode::Enforced(CODEX_SANDBOX),
                 false,
-                (true, true, true),
+                (true, false, true),
             ),
         ] {
             let options = ApprovalOptions::for_request(&request(risk, sandbox, retry));

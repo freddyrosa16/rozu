@@ -7,7 +7,8 @@
 //! Every path the file tools touch goes through [`Workspace::resolve`] (or
 //! [`Workspace::resolve_for_write`]), which rejects anything outside the workspace root,
 //! including `..` and symlink escapes. The write tools also refuse `.rozu/`, where the
-//! per-project approval allowlist lives.
+//! user-managed project settings and pinned memory live. Writes use directory handles to
+//! prevent a concurrent directory rename or symlink swap from redirecting an operation.
 
 mod command_risk;
 mod fs;
@@ -17,6 +18,7 @@ mod shell;
 mod tool;
 mod truncate;
 mod workspace;
+mod workspace_file;
 mod write;
 
 pub use command_risk::{

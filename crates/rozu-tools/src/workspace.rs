@@ -19,6 +19,8 @@ pub enum PathError {
 #[derive(Debug, Clone)]
 pub struct Workspace {
     root: Arc<PathBuf>,
+    #[cfg(unix)]
+    pub(crate) directory: Arc<std::fs::File>,
 }
 
 impl Workspace {
@@ -31,7 +33,11 @@ impl Workspace {
                 format!("{} is not a directory", root.display()),
             ));
         }
+        #[cfg(unix)]
+        let directory = Arc::new(crate::workspace_file::open_root(&root)?);
         Ok(Self {
+            #[cfg(unix)]
+            directory,
             root: Arc::new(root),
         })
     }
@@ -132,20 +138,23 @@ impl Workspace {
     }
 }
 
-/// Directory (relative to the root) holding rozu's per-project settings, such as the approval
-/// allowlist. Tools may not write there, so the agent can't approve itself.
+/// Directory (relative to the root) holding user-managed project settings and pinned memory.
+/// File tools may not modify it.
 pub const PROTECTED_DIR: &str = ".rozu";
 
 impl Workspace {
-    /// `<root>/.rozu`, which tools and sandboxed commands may not write to.
+    /// `<root>/.rozu`, which file tools and sandboxed commands may not write to.
     pub fn protected_dir(&self) -> PathBuf {
         self.root.join(PROTECTED_DIR)
     }
 
-    /// Whether a resolved path lies in [`Workspace::protected_dir`]. Case-insensitive, since
-    /// macOS file systems usually are.
+    /// Whether a path names protected settings, including aliases and missing descendants.
+    /// The directory name is case-insensitive, since macOS file systems usually are.
     pub fn is_protected(&self, path: &Path) -> bool {
-        path.strip_prefix(&*self.root)
+        let joined = self.root.join(path);
+        let path = normalize(&joined);
+        let named_settings = path
+            .strip_prefix(&*self.root)
             .ok()
             .and_then(|rel| rel.components().next())
             .is_some_and(|first| {
@@ -153,6 +162,13 @@ impl Workspace {
                     .as_os_str()
                     .to_string_lossy()
                     .eq_ignore_ascii_case(PROTECTED_DIR)
+            });
+        named_settings
+            || self.protected_dir().canonicalize().is_ok_and(|settings| {
+                joined
+                    .ancestors()
+                    .find_map(|ancestor| ancestor.canonicalize().ok())
+                    .is_some_and(|resolved| resolved.starts_with(settings))
             })
     }
 }
@@ -286,6 +302,37 @@ mod tests {
         std::os::unix::fs::symlink(dir.path(), ws.root().join("parent")).unwrap();
         assert!(outside(ws.resolve_for_write("parent/new.txt")));
         assert!(outside(ws.resolve_for_write("parent/secret.txt")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn protects_missing_files_through_outside_directory_aliases() {
+        let (_dir, ws) = setup();
+        let outside = tempfile::tempdir().unwrap();
+        fs::create_dir(outside.path().join("settings")).unwrap();
+        fs::create_dir(outside.path().join("other")).unwrap();
+        std::os::unix::fs::symlink(outside.path().join("settings"), ws.protected_dir()).unwrap();
+        std::os::unix::fs::symlink(outside.path(), ws.root().join("alias")).unwrap();
+
+        for path in [
+            PathBuf::from(".rozu/new/pinned.md"),
+            PathBuf::from("alias/settings/new/pinned.md"),
+            outside.path().join("settings/new/pinned.md"),
+            outside
+                .path()
+                .canonicalize()
+                .unwrap()
+                .join("settings/new/pinned.md"),
+        ] {
+            assert!(ws.is_protected(&path), "{}", path.display());
+        }
+        for path in [
+            PathBuf::from("alias/other/new.txt"),
+            outside.path().join("other/new.txt"),
+            PathBuf::from("src/new.txt"),
+        ] {
+            assert!(!ws.is_protected(&path), "{}", path.display());
+        }
     }
 
     #[test]

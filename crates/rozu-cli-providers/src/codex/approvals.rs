@@ -13,7 +13,7 @@
 //!
 //! Approvals are always one-time: rozu never answers `acceptForSession`, `approved_for_session`
 //! or an exec-policy / network-policy amendment. Its own "always allow" rules (for
-//! [`SHELL_TOOL`]) live in the project's `.rozu/approvals.json` like every other rule. Every
+//! [`SHELL_TOOL`]) live in private user configuration like every other rule. Every
 //! decision, including the refusals, goes to the audit log.
 
 use std::path::Path;
@@ -32,9 +32,6 @@ use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 use super::protocol::{METHOD_NOT_FOUND, Mapper, PATCH_TOOL, SHELL_TOOL, error_response, response};
-
-/// Longest preview shown on an approval card.
-const MAX_PREVIEW_CHARS: usize = 6000;
 
 /// What a request is answered with, and the decisions made on the way.
 #[derive(Debug)]
@@ -284,7 +281,7 @@ fn command_request(ask: &CommandAsk, ctx: &ApprovalCtx<'_>) -> (ApprovalRequest,
         tool: SHELL_TOOL.to_owned(),
         args,
         risk,
-        preview: clip(preview),
+        preview,
         sandbox: SandboxMode::Enforced(CODEX_SANDBOX),
         network,
         extra_writes: Vec::new(),
@@ -377,21 +374,23 @@ async fn patch_answer(
     for change in &ask.changes {
         let paths = std::iter::once(change.path.as_str()).chain(change.move_path.as_deref());
         for path in paths {
-            match ctx.workspace.resolve_for_write(path) {
-                Ok(resolved) if ctx.workspace.is_protected(Path::new(&resolved)) => {
-                    return denied(
-                        &ask.call_id,
-                        &preview,
-                        format!(
-                            "{path} is inside {}, which only the user may change",
-                            rozu_tools::PROTECTED_DIR
-                        ),
-                    );
-                }
-                Ok(_) => {}
-                Err(_) => {
-                    risk = risk.max(Risk::WriteOutside);
-                }
+            let resolved = ctx.workspace.resolve_for_write(path);
+            if ctx.workspace.is_protected(Path::new(path))
+                || resolved
+                    .as_ref()
+                    .is_ok_and(|path| ctx.workspace.is_protected(path))
+            {
+                return denied(
+                    &ask.call_id,
+                    &preview,
+                    format!(
+                        "{path} is inside {}, which only the user may change",
+                        rozu_tools::PROTECTED_DIR
+                    ),
+                );
+            }
+            if resolved.is_err() {
+                risk = risk.max(Risk::WriteOutside);
             }
         }
         if change.kind == "delete" {
@@ -445,7 +444,7 @@ fn patch_preview(ask: &PatchAsk) -> String {
     if let Some(reason) = &ask.reason {
         text.push_str(&format!("Codex says: {reason}\n"));
     }
-    clip(text.trim_end().to_owned())
+    text.trim_end().to_owned()
 }
 
 async fn permissions_answer(id: &Value, params: &Value, ctx: &ApprovalCtx<'_>) -> Answer {
@@ -477,7 +476,7 @@ async fn permissions_answer(id: &Value, params: &Value, ctx: &ApprovalCtx<'_>) -
         tool: "codex:permissions".to_owned(),
         args: permissions.clone(),
         risk,
-        preview: clip(preview),
+        preview,
         sandbox: SandboxMode::Enforced(CODEX_SANDBOX),
         network,
         extra_writes: Vec::new(),
@@ -525,11 +524,11 @@ fn elicitation_answer(id: &Value, params: &Value, ctx: &ApprovalCtx<'_>) -> Answ
                 tool: format!("{SERVER_NAME}:{}", tool.name()),
                 args,
                 risk,
-                preview: clip(format!(
+                preview: format!(
                     "Codex asks to run rozu's MCP tool `{}`; rozu mcp-serve decides the call \
                      itself",
                     tool.name()
-                )),
+                ),
                 sandbox,
                 network: false,
                 extra_writes: Vec::new(),
@@ -668,7 +667,7 @@ fn deny_by_policy(
         tool: tool.to_owned(),
         args: Value::Null,
         risk: Risk::Destructive,
-        preview: clip(preview.to_owned()),
+        preview: preview.to_owned(),
         sandbox: SandboxMode::Off,
         network: false,
         extra_writes: Vec::new(),
@@ -710,36 +709,34 @@ fn non_empty(value: &Value) -> Option<String> {
         .map(str::to_owned)
 }
 
-fn clip(mut text: String) -> String {
-    if text.chars().count() > MAX_PREVIEW_CHARS {
-        text = text.chars().take(MAX_PREVIEW_CHARS).collect();
-        text.push_str("\n…");
-    }
-    text
-}
-
-/// Shell names Codex wraps commands in.
-const SHELLS: &[&str] = &["sh", "bash", "zsh"];
+/// Only exact system executables are eligible for transparent vendor wrapping.
+const SHELLS: &[&str] = &[
+    "/bin/sh",
+    "/bin/bash",
+    "/bin/zsh",
+    "/usr/bin/sh",
+    "/usr/bin/bash",
+    "/usr/bin/zsh",
+];
 
 /// The script inside Codex's shell wrapper (`/bin/zsh -lc 'cargo test'` → `cargo test`), so
 /// the classifier sees what will actually run; anything else is returned unchanged.
 pub fn unwrap_shell(command: &str) -> String {
-    let trimmed = command.trim();
+    let trimmed = command.trim_matches([' ', '\t', '\n']);
     let Some((program, rest)) = trimmed.split_once(' ') else {
         return trimmed.to_owned();
     };
-    let name = program.rsplit('/').next().unwrap_or(program);
-    if !SHELLS.contains(&name) {
+    if !SHELLS.contains(&program) {
         return trimmed.to_owned();
     }
-    let rest = rest.trim_start();
+    let rest = rest.trim_start_matches([' ', '\t']);
     let Some(script) = ["-lc ", "-c "]
         .iter()
         .find_map(|flag| rest.strip_prefix(flag))
     else {
         return trimmed.to_owned();
     };
-    unquote(script.trim()).unwrap_or_else(|| trimmed.to_owned())
+    unquote(script.trim_matches([' ', '\t'])).unwrap_or_else(|| trimmed.to_owned())
 }
 
 /// One shell word that is a single- or double-quoted string (possibly built from several
@@ -766,18 +763,22 @@ fn unquote(word: &str) -> Option<String> {
                         '"' => break,
                         '\\' => match chars.next()? {
                             c @ ('"' | '\\' | '$' | '`') => out.push(c),
-                            '\n' => {}
+                            '\n' => return None,
                             c => {
                                 out.push('\\');
                                 out.push(c);
                             }
                         },
+                        '$' | '`' => return None,
                         c => out.push(c),
                     }
                 }
             }
-            '\\' => out.push(chars.next()?),
-            c if c.is_whitespace() => return None,
+            '\\' => match chars.next()? {
+                '\n' | '\r' => return None,
+                c => out.push(c),
+            },
+            c if c.is_whitespace() || "$`;&|()<>*?[]{}#".contains(c) => return None,
             c => out.push(c),
         }
     }
@@ -788,11 +789,11 @@ fn unquote(word: &str) -> Option<String> {
 /// shell-quoted where needed.
 fn join_argv(argv: &[Value]) -> String {
     let words: Vec<&str> = argv.iter().filter_map(Value::as_str).collect();
-    if let [program, flag, script] = words.as_slice() {
-        let name = program.rsplit('/').next().unwrap_or(program);
-        if SHELLS.contains(&name) && matches!(*flag, "-c" | "-lc") {
-            return format!("{program} {flag} {}", quote(script));
-        }
+    if let [program, flag, script] = words.as_slice()
+        && SHELLS.contains(program)
+        && matches!(*flag, "-c" | "-lc")
+    {
+        return format!("{program} {flag} {}", quote(script));
     }
     words.iter().map(|w| quote(w)).collect::<Vec<_>>().join(" ")
 }
@@ -839,12 +840,104 @@ impl Tool for NoRules {
 mod tests {
     use super::*;
 
+    fn executor(mode: rozu_core::ApprovalMode) -> ToolExecutor {
+        ToolExecutor::new(
+            Arc::new(rozu_tools::ToolRegistry::standard()),
+            Arc::new(rozu_core::ReadOnlyGate),
+            Arc::new(rozu_core::ApprovalPolicy::new(mode)),
+            Arc::new(rozu_tools::NoSandbox),
+        )
+    }
+
+    #[tokio::test]
+    async fn full_command_patch_and_permission_details_reach_the_approval_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = Workspace::new(dir.path()).unwrap();
+        let exec = executor(rozu_core::ApprovalMode::ReadOnly);
+        let cancel = CancellationToken::new();
+        let ctx = ApprovalCtx {
+            exec: &exec,
+            workspace: &workspace,
+            cancel: &cancel,
+            mapper: None,
+            prompts: None,
+        };
+        let padding = "true\n".repeat(1600);
+        for (method, params, tail) in [
+            (
+                "item/commandExecution/requestApproval",
+                json!({"itemId":"command", "command":format!("{padding}rm -rf visible-tail")}),
+                "rm -rf visible-tail",
+            ),
+            (
+                "applyPatchApproval",
+                json!({"callId":"patch", "fileChanges":{"file":{"type":"update", "unified_diff":format!("{padding}+visible-patch-tail")}}}),
+                "+visible-patch-tail",
+            ),
+            (
+                "item/permissions/requestApproval",
+                json!({"itemId":"permissions", "permissions":{"fileSystem":{"write":["a".repeat(8000),"/visible-permission-tail"]}}}),
+                "/visible-permission-tail",
+            ),
+        ] {
+            let result = answer(&json!(1), method, &params, &ctx).await;
+            assert_eq!(result.records.len(), 1);
+            assert!(result.records[0].preview.contains(tail), "{method}");
+            assert!(result.records[0].preview.len() > 6000);
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn protected_patch_sources_and_moves_are_denied_even_through_outside_aliases() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.path().join(".rozu")).unwrap();
+        let workspace = Workspace::new(dir.path()).unwrap();
+        let cancel = CancellationToken::new();
+        for mode in [
+            rozu_core::ApprovalMode::AutoWorkspace,
+            rozu_core::ApprovalMode::FullAccess,
+        ] {
+            let exec = executor(mode);
+            let ctx = ApprovalCtx {
+                exec: &exec,
+                workspace: &workspace,
+                cancel: &cancel,
+                mapper: None,
+                prompts: None,
+            };
+            for protocol in [Protocol::Legacy, Protocol::V2] {
+                for (path, move_path) in [
+                    (".rozu/pinned.md".into(), None),
+                    ("file".into(), Some(".rozu/pinned.md".into())),
+                    (outside.path().join("pinned.md").display().to_string(), None),
+                ] {
+                    let ask = PatchAsk {
+                        call_id: "patch".into(),
+                        changes: vec![Change {
+                            path,
+                            move_path,
+                            kind: "update".into(),
+                            diff: "+changed".into(),
+                        }],
+                        grant_root: None,
+                        reason: None,
+                    };
+                    let result = patch_answer(&json!(1), Some(ask), protocol, "patch", &ctx).await;
+                    assert_eq!(result.records[0].source, DecisionSource::Policy);
+                    assert!(!result.records[0].decision.is_approval());
+                }
+            }
+        }
+    }
+
     #[test]
     fn unwraps_codex_shell_wrappers() {
         for (command, inner) in [
             ("/bin/zsh -lc 'cargo test'", "cargo test"),
-            ("bash -lc \"git push --force\"", "git push --force"),
-            ("sh -c 'echo '\\''hi'\\'''", "echo 'hi'"),
+            ("/bin/bash -lc \"git push --force\"", "git push --force"),
+            ("/bin/sh -c 'echo '\\''hi'\\'''", "echo 'hi'"),
             ("ls -la", "ls -la"),
             // Not a single quoted word: left alone, so the classifier sees `sh -c`.
             ("bash -c foo bar", "bash -c foo bar"),
@@ -862,10 +955,33 @@ mod tests {
             "bash -lc 'rm -rf build'"
         );
         assert_eq!(
-            unwrap_shell(&join_argv(&argv(&["bash", "-lc", "it's"]))),
+            unwrap_shell(&join_argv(&argv(&["/bin/bash", "-lc", "it's"]))),
             "it's"
         );
         assert_eq!(join_argv(&argv(&["ls", "a b"])), "ls 'a b'");
+    }
+
+    #[test]
+    fn untrusted_or_expanding_shell_wrappers_stay_opaque() {
+        for command in [
+            "./sh -c 'ls'",
+            "/tmp/bash -lc 'ls'",
+            "bash -lc 'ls'",
+            "\u{a0}/bin/sh -c 'ls'",
+            "/bin/sh -c \"$COMMAND\"",
+            "/bin/sh -c \"$(cat command)\"",
+            "/bin/sh -c 'ls' extra",
+        ] {
+            assert_eq!(unwrap_shell(command), command);
+            let risk = rozu_tools::classify_command(
+                &unwrap_shell(command),
+                &rozu_tools::PathScope::new("/", Vec::new()),
+            );
+            assert!(
+                risk.risk >= Risk::Opaque && risk.unrulable,
+                "{command}: {risk:?}"
+            );
+        }
     }
 
     #[test]

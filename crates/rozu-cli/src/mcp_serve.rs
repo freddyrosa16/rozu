@@ -12,9 +12,7 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use clap::Args;
-use rozu_core::{
-    ApprovalMode, ApprovalPolicy, AuditLog, ToolExecutor, approvals_path, new_session_id,
-};
+use rozu_core::{ApprovalMode, ApprovalPolicy, AuditLog, ToolExecutor, new_session_id};
 use rozu_mcp::{McpServer, SocketGate};
 use rozu_tools::{ToolRegistry, Workspace, platform_sandbox};
 
@@ -46,12 +44,8 @@ async fn serve(args: McpServeArgs) -> anyhow::Result<ExitCode> {
     let workspace = Workspace::new(&args.workspace)
         .with_context(|| format!("cannot open workspace {}", args.workspace.display()))?;
     let mode = ApprovalMode::from(args.approval);
-    let policy = ApprovalPolicy::for_project(mode, workspace.root()).with_context(|| {
-        format!(
-            "cannot read the approval rules in {}",
-            approvals_path(workspace.root()).display()
-        )
-    })?;
+    let policy = ApprovalPolicy::for_project(mode, workspace.root())
+        .context("cannot load this user's project approval rules")?;
     let gate = SocketGate::from_env();
     if gate.path().is_none() {
         tracing::warn!(

@@ -110,7 +110,7 @@ pub trait SecretStore { fn get(&self, p: ProviderId) -> Result<Option<Credential
 - **Core agent loop:** `loop { stream; render deltas; if no tool calls break; for each call: policy → approval → execute (timeout, cancel) → append truncated tool_result }`. Independent read-only calls run in parallel. There are turn and token caps. Compaction kicks in at about 80% of the context window (summarize older turns, keep recent turns and pinned items).
 - **Providers:** see [Providers](#providers-http-adapters-and-cli-backed-providers) below for the CLI-backed path. HTTP adapters: one internal message and tool-schema model with an adapter per provider. OpenAI uses `/v1/responses` SSE. Anthropic uses Messages SSE (`content_block_*`, `input_json_delta`, with `cache_control` for prompt caching). xAI reuses the OpenAI adapter with base URL `https://api.x.ai/v1`. Built on `reqwest` + `eventsource-stream`. Partial tool JSON is accumulated until the block ends. 429/5xx get exponential backoff with jitter and respect `retry-after`, and errors are typed.
 - **Tools & sandbox:** `read_file`, `list_dir`, `grep`, `apply_patch`/`write_file`, `shell` (one-shot, `tokio::process`), `terminal` (PTY). On macOS, shell commands run under a `sandbox-exec` Seatbelt profile **in every approval mode**: writes only in the workspace, a per-session temp dir (the command's `$TMPDIR`) and the outside paths an approved call names, network denied unless approved. The sandbox is the boundary; the classifier only decides when to ask. Running without it takes the user's explicit "unsandboxed, this command only" (`u`) on a prompt. On timeout or cancel the whole process group is killed.
-- **Approvals:** three modes: read-only, auto-in-workspace (default) and full access. Destructive commands (`rm -rf`, `git push --force`, `git reset --hard`, branch deletion), interpreter code (`python -c`, `eval`, …) and output redirects always prompt. The approval card shows the exact command, and "always allow this prefix" is saved per project (per host for network clients). Every decision goes to the approval audit log (`approvals.jsonl`).
+- **Approvals:** three modes: read-only, auto-in-workspace (default) and full access. Destructive commands (`rm -rf`, `git push --force`, `git reset --hard`, branch deletion), interpreter code (`python -c`, `eval`, …) and output redirects always prompt. The approval card shows the exact command, and "always allow this prefix" is saved outside the repository per canonical project path (network grants are never remembered). Every decision goes to the approval audit log (`approvals.jsonl`).
 - **Terminal/PTY:** `portable-pty` (MIT) spawns the user's shell, and the `alacritty_terminal` (Apache-2.0) parser keeps the grid model. The GUI renders the grid (GPUI) or forwards bytes to xterm.js (Tauri). The agent can read the terminal buffer and, with approval, write to it. **Do not copy Zed's terminal code** (`crates/terminal`, `terminal_view`): it is GPL-3.0 and rozu is MIT. Zed may be read for ideas only; the pane is written from scratch on alacritty_terminal + portable-pty.
 - **Secrets:** the `keyring` crate (macOS Keychain, service `dev.rozu`) for the optional API keys. Keys are wrapped in `secrecy::SecretString`, so they never reach Debug or logs. A redaction filter on `tracing` output adds a second layer of protection. Logs go to a file (`~/Library/Logs/rozu/rozu.log` on macOS), not the terminal.
 - **Sign in with ChatGPT:** done by the official Codex CLI (`codex login` / app-server account APIs), not by rozu. rozu never reads `~/.codex/auth.json` or any other credential file.
@@ -297,11 +297,11 @@ Notes:
   filling a fresh cache needs one approved networked run. A read-write cache allowlist stays an option if this
   is frequent in dogfooding.
 - **Risk classifier** (`classify_command`): splits on `&&`, `||`, `;`, `|`, `&`, newlines, parentheses and
-  backticks, recurses into `sh -c`/`bash -c`/`eval`/`xargs`/`find -exec`, takes the max. Unknown commands are
-  `WriteWorkspace`. One rule for script files: `sh`/`bash`/`zsh` (any shell), `python`, `perl`, `ruby` or `node`
+  backticks, recurses into `sh -c`/`bash -c`/`eval`/`xargs`/`find -exec`, takes the max. Unknown commands,
+  options, executable paths, assignments and wrappers are opaque and cannot use remembered rules. One rule for script files: `sh`/`bash`/`zsh` (any shell), `python`, `perl`, `ruby` or `node`
   running a named script **inside the workspace** is `WriteWorkspace` (sandboxed, no prompt in auto/full), like
   `make`; the same script outside the workspace (or behind a `$VAR`), `python -m <module>` and other interpreters
-  (`osascript`, …) are `Opaque` but rule-able. `Opaque` and never rule-able: inline code (`-c`/`-e`, code on
+  (`osascript`, …) are `Opaque` and always prompt. `Opaque` and never rule-able: inline code (`-c`/`-e`, code on
   stdin or in a heredoc, `eval`, `source`/`.`, `exec`, those behind `xargs`/`find -exec`) and any output
   redirect or `tee` to a file. Redirects or `tee` to paths outside
   the workspace/session tmp are `Destructive`. It also collects the outside paths a command writes (`~`, `$HOME`,
@@ -311,10 +311,10 @@ Notes:
   shown on the card; `/`, top-level dirs and `$HOME` itself are too broad and never granted). The prompt's `u`
   (`Decision::ApproveUnsandboxed`) runs one command without the sandbox; it is never automatic and never stored.
   When the sandbox blocks an approved call, the gate is asked once whether to rerun it unsandboxed. "Always
-  allow" stores `{tool, prefix, host?}` in `.rozu/approvals.json` (shell prefix = program plus subcommand, e.g.
-  `cargo test`, or interpreter plus script, e.g. `python3 -m pytest`; network clients like `curl` get program +
-  host, never a blanket rule; every segment of a compound command must match; rules never apply to destructive
-  calls, inline interpreter code, output redirects, or in read-only mode). Every decision is an
+  allow" stores tool prefixes in private user configuration, keyed by the canonical workspace path; repository
+  `.rozu/approvals.json` files are ignored. Prefixes name a program/subcommand such as `cargo test` or a workspace
+  script such as `python3 tests.py`. Every command segment must match. Network, opaque and destructive calls
+  cannot use remembered rules; legacy host-scoped rules are inert. Read-only mode ignores rules. Every decision is an
   `AgentEvent::Approval`, a `tracing` event (target `rozu::approval`, now in `rozu.log` by default) and a line in
   the audit log (below).
 - **Audit log** (`rozu-core::audit`): `~/Library/Logs/rozu/approvals.jsonl` on macOS (`approvals.jsonl` in the

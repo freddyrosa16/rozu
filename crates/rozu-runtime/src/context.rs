@@ -18,9 +18,10 @@ pub fn system_prompt(root: &Path, mode: ApprovalMode, host: &str) -> String {
          The workspace root is {}; tool paths are relative to it.\n\
          Tools: read_file, list_dir and grep to look at files; apply_patch to edit a file \
          (exact search/replace edits or a unified diff) and write_file to create one; shell to \
-         run commands (non-interactive, with a timeout). Shell commands run in a sandbox that \
-         only allows writes in the workspace and $TMPDIR (a private temp dir) and blocks the \
-         network; set network: true when a command needs it.\n\
+         run commands (non-interactive, with a timeout). On macOS shell commands use Seatbelt, \
+         which allows writes in the workspace, private $TMPDIR and explicitly approved outside \
+         paths; network is blocked unless granted. Linux has no OS sandbox. Set network: true \
+         when a command needs it.\n\
          Approval mode: {mode}. Calls that need approval are shown to the user, who may deny \
          them with a reason; respect it and adapt. Destructive commands (rm -rf, force push, \
          git reset --hard, ...), interpreter one-liners (python -c, eval, ...) and output \

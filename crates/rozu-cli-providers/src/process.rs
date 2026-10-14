@@ -188,12 +188,7 @@ impl CliProcess {
     /// "not logged in" line printed just before exit is not missed.
     pub async fn stderr_tail(&mut self) -> Vec<String> {
         if let Some(reader) = self.stderr_reader.take() {
-            if tokio::time::timeout(Duration::from_millis(500), reader)
-                .await
-                .is_err()
-            {
-                // Still running (stderr open): read what's there now.
-            }
+            let _ = tokio::time::timeout(Duration::from_millis(500), reader).await;
         }
         self.stderr_tail
             .lock()
