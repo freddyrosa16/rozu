@@ -3,14 +3,14 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use gpui::{
-    AnyElement, App, Application, Bounds, Context, Corner, Div, Entity, FocusHandle, Focusable,
-    KeyBinding, Menu, MenuItem, MouseButton, PathPromptOptions, PromptLevel, ScrollHandle,
-    SharedString, Stateful, Subscription, Svg, Task, TitlebarOptions, Window, WindowBounds,
-    WindowOptions, actions, anchored, deferred, div, point, prelude::*, px, relative, rgb, size,
-    svg,
+    Animation, AnimationExt, AnyElement, App, Application, Bounds, Context, Corner, Div, Entity,
+    FocusHandle, Focusable, FontWeight, HighlightStyle, KeyBinding, Menu, MenuItem, MouseButton,
+    PathPromptOptions, PromptLevel, ScrollHandle, SharedString, Stateful, StyledText, Subscription,
+    Svg, Task, TitlebarOptions, Window, WindowBounds, WindowOptions, actions, anchored, deferred,
+    div, point, prelude::*, pulsating_between, px, relative, rgb, size, svg,
 };
 use rozu_activity::ActivityState;
 use rozu_core::{ApprovalRequest, Decision};
@@ -20,7 +20,7 @@ use tokio::sync::{mpsc, oneshot};
 use crate::backend::{self, Access, Backend, Chat, PLANS, Update};
 use crate::composer::{self, Composer, Sent};
 use crate::feed::{Ask, Feed, Item, Step};
-use crate::orb::OrbView;
+use crate::markdown::{self, Block};
 use crate::settings::Settings;
 use crate::theme::*;
 
@@ -47,7 +47,16 @@ pub fn run() {
                 name: "rozu".into(),
                 items: vec![MenuItem::action("Quit rozu", Quit)],
             }]);
-            let bounds = Bounds::centered(None, size(px(1280.), px(840.)), cx);
+            let screen = cx.primary_display().map(|d| d.bounds().size);
+            let fit = |want: f32, have: Option<f32>| px(have.map_or(want, |h| want.min(h - 80.)));
+            let bounds = Bounds::centered(
+                None,
+                size(
+                    fit(1280., screen.map(|s| s.width.into())),
+                    fit(840., screen.map(|s| s.height.into())),
+                ),
+                cx,
+            );
             let options = WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 titlebar: Some(TitlebarOptions {
@@ -69,6 +78,8 @@ pub fn run() {
 struct Thread {
     id: usize,
     root: PathBuf,
+    /// Whose model runs it, for the logo next to it.
+    provider: &'static str,
     title: SharedString,
     feed: Feed,
     chat: Option<Chat>,
@@ -107,7 +118,6 @@ struct Rozu {
     plan: &'static str,
     access: HashMap<&'static str, Access>,
     composer: Entity<Composer>,
-    orbs: HashMap<String, Entity<OrbView>>,
     scroll: ScrollHandle,
     _sent: Subscription,
 }
@@ -144,7 +154,8 @@ impl Rozu {
         let choice = settings
             .provider
             .as_deref()
-            .and_then(|p| registry::resolve(Some(p), settings.model.as_deref()).ok());
+            .and_then(|p| registry::resolve(Some(p), settings.model.as_deref()).ok())
+            .map(backend::pin);
         let first_run = choice.is_none();
         let mut app = Self {
             backend,
@@ -165,7 +176,6 @@ impl Rozu {
             plan: PLANS[0].id,
             access: HashMap::new(),
             composer,
-            orbs: HashMap::new(),
             scroll: ScrollHandle::new(),
             _sent: sent,
         };
@@ -228,6 +238,7 @@ impl Rozu {
                 self.threads.push(Thread {
                     id,
                     root,
+                    provider: self.choice.as_ref().map_or("", |c| c.provider.id),
                     title: title.into(),
                     feed: Feed::default(),
                     chat: None,
@@ -335,8 +346,6 @@ impl Rozu {
             chat.cancel();
         }
         self.threads.retain(|t| t.id != id);
-        self.orbs
-            .retain(|k, _| k != &format!("t{id}") && !k.starts_with(&format!("{id}-")));
         if self.page == Page::Thread(id) {
             self.open(Page::Home, cx);
         }
@@ -480,21 +489,6 @@ impl Rozu {
         self.open(Page::Home, cx);
     }
 
-    fn orb(
-        &mut self,
-        key: String,
-        state: ActivityState,
-        cx: &mut Context<Self>,
-    ) -> Entity<OrbView> {
-        let orb = self
-            .orbs
-            .entry(key)
-            .or_insert_with(|| cx.new(|cx| OrbView::new(state, cx)))
-            .clone();
-        orb.update(cx, |o, cx| o.set(state, cx));
-        orb
-    }
-
     fn sidebar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let nav = [
             ("chat", "New Chat"),
@@ -624,12 +618,14 @@ impl Rozu {
     }
 
     fn thread_row(&mut self, id: usize, cx: &mut Context<Self>) -> Stateful<Div> {
-        let state = self
-            .thread(id)
-            .map_or(ActivityState::Offline, |t| t.feed.state());
-        let orb = self.orb(format!("t{id}"), state, cx);
         let Some(thread) = self.threads.iter().find(|t| t.id == id) else {
             return div().id(("thread", id));
+        };
+        let dot = match thread.feed.state() {
+            ActivityState::Error => Some(BAD),
+            ActivityState::Waiting => Some(WARN),
+            _ if thread.feed.running => Some(WARN),
+            _ => None,
         };
         div()
             .id(("thread", id))
@@ -644,8 +640,9 @@ impl Rozu {
             .cursor_pointer()
             .hover(|s| s.bg(rgb(RAISE)))
             .when(self.page == Page::Thread(id), |r| r.bg(rgb(RAISE)))
-            .child(orb)
+            .child(logo(thread.provider))
             .child(div().flex_1().truncate().child(thread.title.clone()))
+            .children(dot.map(|c| div().size(px(7.)).flex_none().rounded_full().bg(rgb(c))))
             .child(
                 div()
                     .text_size(px(13.5))
@@ -670,33 +667,14 @@ impl Rozu {
         let Some(thread) = self.threads.iter().find(|t| t.id == id) else {
             return div().flex_1();
         };
-        let mut live = Vec::new();
-        for (i, item) in thread.feed.items.iter().enumerate() {
-            let state = match item {
-                Item::Step(s) => Some(match s.done {
-                    None => s.state,
-                    Some(_) if s.failed => ActivityState::Error,
-                    Some(_) => ActivityState::Done,
-                }),
-                Item::Ask(a) => Some(match a.answer {
-                    None => ActivityState::Waiting,
-                    Some("Denied" | "Expired") => ActivityState::Offline,
-                    Some(_) => ActivityState::Done,
-                }),
-                _ => None,
-            };
-            live.push((i, state));
-        }
         let steps: Vec<bool> = thread
             .feed
             .items
             .iter()
             .map(|item| matches!(item, Item::Step(_)))
             .collect();
-        let items: Vec<AnyElement> = live
-            .into_iter()
-            .map(|(i, state)| {
-                let orb = state.map(|s| self.orb(format!("{id}-{i}"), s, cx));
+        let items: Vec<AnyElement> = (0..steps.len())
+            .map(|i| {
                 let gap = match i {
                     0 => 0.,
                     _ if steps[i] && steps[i - 1] => 4.,
@@ -706,7 +684,7 @@ impl Rozu {
                     .w_full()
                     .min_w_0()
                     .mt(px(gap))
-                    .child(self.item(id, i, orb, cx))
+                    .child(self.item(id, i, cx))
                     .into_any_element()
             })
             .collect();
@@ -743,13 +721,7 @@ impl Rozu {
             .child(column().pb(px(16.)).child(self.composer_box(false, cx)))
     }
 
-    fn item(
-        &self,
-        id: usize,
-        i: usize,
-        orb: Option<Entity<OrbView>>,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    fn item(&self, id: usize, i: usize, cx: &mut Context<Self>) -> AnyElement {
         let Some(thread) = self.threads.iter().find(|t| t.id == id) else {
             return div().into_any_element();
         };
@@ -763,29 +735,18 @@ impl Rozu {
                 .py(px(12.))
                 .child(text.clone())
                 .into_any_element(),
-            Item::Text(text) => div()
-                .w_full()
-                .line_height(relative(1.6))
-                .child(text.clone())
-                .into_any_element(),
+            Item::Text(text) => rich(text).into_any_element(),
             Item::Note(text) => div()
                 .text_color(rgb(INK3))
                 .text_size(px(14.))
                 .child(text.clone())
                 .into_any_element(),
-            Item::Step(step) => step_row(step, orb).into_any_element(),
-            Item::Ask(ask) => self.ask_card(id, i, ask, orb, cx).into_any_element(),
+            Item::Step(step) => step_row(i, step).into_any_element(),
+            Item::Ask(ask) => self.ask_card(id, i, ask, cx).into_any_element(),
         }
     }
 
-    fn ask_card(
-        &self,
-        id: usize,
-        i: usize,
-        ask: &Ask,
-        orb: Option<Entity<OrbView>>,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    fn ask_card(&self, id: usize, i: usize, ask: &Ask, cx: &mut Context<Self>) -> impl IntoElement {
         let req = &ask.request;
         let title = match req.tool.as_str() {
             "shell" => "Run a command?".to_owned(),
@@ -826,7 +787,7 @@ impl Rozu {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .children(orb)
+                    .child(icon("ask", if ask.answer.is_none() { WARN } else { INK3 }))
                     .child(title),
             )
             .child(
@@ -1166,7 +1127,6 @@ impl Rozu {
                     .get(plan.id)
                     .copied()
                     .unwrap_or(Access::Checking);
-                let orb = self.orb(format!("plan-{}", plan.id), access_state(access), cx);
                 let on = self.plan == plan.id;
                 div()
                     .id(plan.id)
@@ -1180,7 +1140,7 @@ impl Rozu {
                     .border_color(rgb(if on { INK2 } else { LINE }))
                     .bg(rgb(BOX))
                     .cursor_pointer()
-                    .child(orb)
+                    .child(logo(plan.id).size(px(22.)))
                     .child(
                         div().flex_1().flex().flex_col().child(plan.name).child(
                             div()
@@ -1376,15 +1336,6 @@ fn name(root: &Path) -> SharedString {
         .into()
 }
 
-fn access_state(access: Access) -> ActivityState {
-    match access {
-        Access::Checking => ActivityState::Thinking,
-        Access::Missing => ActivityState::Offline,
-        Access::SignedOut => ActivityState::Waiting,
-        Access::Ready | Access::Installed => ActivityState::Done,
-    }
-}
-
 fn access_text(access: Access) -> &'static str {
     match access {
         Access::Checking => "Checking",
@@ -1445,13 +1396,37 @@ fn hover_icon(
         .child(icon(i, INK3))
 }
 
-fn step_row(step: &Step, orb: Option<Entity<OrbView>>) -> Div {
+fn step_row(i: usize, step: &Step) -> Div {
+    let (name, color) = match (&step.done, step.failed) {
+        (Some(_), true) => ("fail", BAD),
+        (Some(_), false) => ("check", INK3),
+        (None, _) => match step.state {
+            ActivityState::Reading => ("read", INK2),
+            ActivityState::Searching => ("search", INK2),
+            ActivityState::Editing => ("edit", INK2),
+            ActivityState::Running => ("run", INK2),
+            ActivityState::Waiting => ("ask", WARN),
+            _ => ("think", INK2),
+        },
+    };
+    let mark = icon(name, color).size(px(15.));
     let line = div()
         .flex()
         .items_center()
         .gap_2()
         .text_color(rgb(INK2))
-        .children(orb);
+        .child(match step.done {
+            Some(_) => mark.into_any_element(),
+            None => mark
+                .with_animation(
+                    ("step", i),
+                    Animation::new(Duration::from_millis(1600))
+                        .repeat()
+                        .with_easing(pulsating_between(0.3, 1.)),
+                    |s, a| s.opacity(a),
+                )
+                .into_any_element(),
+        });
     match &step.done {
         None => line.child(step.label.clone()),
         Some(done) if step.failed => line.text_color(rgb(BAD)).child(done.clone()),
@@ -1465,6 +1440,79 @@ fn step_row(step: &Step, orb: Option<Entity<OrbView>>) -> Div {
                     .child(div().text_color(rgb(INK3)).child(rest.to_owned())),
             )
         }
+    }
+}
+
+/// The agent's reply, Markdown drawn as paragraphs, headings, lists and code blocks.
+fn rich(text: &str) -> Div {
+    div()
+        .w_full()
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .gap(px(10.))
+        .line_height(relative(1.6))
+        .children(markdown::parse(text).into_iter().map(|block| {
+            match block {
+                Block::Para(t) => div().w_full().child(spans(t)),
+                Block::Heading(t) => div()
+                    .w_full()
+                    .pt(px(6.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(spans(t)),
+                Block::Item(marker, t) => div()
+                    .w_full()
+                    .flex()
+                    .gap(px(10.))
+                    .child(
+                        div()
+                            .flex_none()
+                            .min_w(px(14.))
+                            .text_color(rgb(INK3))
+                            .child(marker),
+                    )
+                    .child(div().flex_1().min_w_0().child(spans(t))),
+                Block::Code(code) => div()
+                    .w_full()
+                    .bg(rgb(CODE_BG))
+                    .border_1()
+                    .border_color(rgb(LINE))
+                    .rounded(px(10.))
+                    .px(px(14.))
+                    .py(px(10.))
+                    .font_family("Menlo")
+                    .text_size(px(13.))
+                    .line_height(relative(1.5))
+                    .text_color(rgb(INK2))
+                    .child(code),
+            }
+        }))
+}
+
+fn spans(t: markdown::Inline) -> StyledText {
+    let styles: Vec<_> = t
+        .spans
+        .into_iter()
+        .map(|(r, s)| {
+            let mut h = HighlightStyle::default();
+            if s.bold {
+                h.font_weight = Some(FontWeight::SEMIBOLD);
+            }
+            if s.code {
+                h.color = Some(rgb(INK).into());
+                h.background_color = Some(rgb(RAISE).into());
+            }
+            (r, h)
+        })
+        .collect();
+    StyledText::new(t.text).with_highlights(styles)
+}
+
+fn logo(provider: &str) -> Svg {
+    match provider {
+        "codex" | "openai" => icon("logo-openai", INK),
+        "grok" | "xai" => icon("logo-grok", INK),
+        _ => icon("logo-claude", CLAUDE),
     }
 }
 

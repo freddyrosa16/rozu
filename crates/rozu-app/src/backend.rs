@@ -352,6 +352,8 @@ pub fn models(provider: &ProviderInfo, live: &Live) -> Vec<ModelChoice> {
         std::iter::once("default".to_owned())
             .chain(live.iter().map(|(id, _)| id.clone()))
             .collect()
+    } else if provider.id == CLAUDE_CLI_ID {
+        claude_ids()
     } else {
         registry::models_for(provider.id)
             .into_iter()
@@ -361,6 +363,26 @@ pub fn models(provider: &ProviderInfo, live: &Live) -> Vec<ModelChoice> {
     ids.iter()
         .filter_map(|id| registry::resolve(Some(provider.id), Some(id)).ok())
         .collect()
+}
+
+/// Every Claude model by its full id, newest first, so the version shows.
+fn claude_ids() -> Vec<String> {
+    registry::models_for("anthropic")
+        .into_iter()
+        .map(|m| m.id)
+        .collect()
+}
+
+/// Swaps a Claude CLI alias (`opus`) saved by older builds for the model it stands for.
+pub fn pin(mut choice: ModelChoice) -> ModelChoice {
+    if choice.provider.id == CLAUDE_CLI_ID
+        && let Some(id) = claude_ids()
+            .into_iter()
+            .find(|id| id.starts_with(&format!("claude-{}-", choice.model)))
+    {
+        choice = registry::resolve(Some(CLAUDE_CLI_ID), Some(&id)).unwrap_or(choice);
+    }
+    choice
 }
 
 /// The effort levels a provider takes; empty when rozu can't set it.
@@ -381,11 +403,12 @@ pub fn provider_name(provider: &ProviderInfo) -> &'static str {
 }
 
 /// How a model is named in the app: the CLI's own name, else `opus` → `Opus`,
-/// `gpt-6.1-sol` → `GPT-6.1 Sol`, `claude-opus-5-5` → `Claude Opus 5.5`.
+/// `gpt-6.1-sol` → `GPT-6.1 Sol`, `claude-opus-5-5` → `Opus 5.5`.
 pub fn model_name(model: &str, live: &Live) -> String {
     if let Some((_, name)) = live.iter().find(|(id, _)| id == model) {
         return name.clone();
     }
+    let model = model.strip_prefix("claude-").unwrap_or(model);
     let mut words: Vec<String> = Vec::new();
     for part in model.split('-') {
         let short_num = |s: &str| s.len() <= 2 && s.chars().all(|c| c.is_ascii_digit());
@@ -457,12 +480,12 @@ mod tests {
     #[test]
     fn names_models_like_the_app() {
         let none = Live::new();
-        let opus = registry::resolve(Some(CLAUDE_CLI_ID), Some("opus")).unwrap();
-        assert_eq!(label(&opus, Some("high"), &none), "Claude Opus · high");
+        let opus = pin(registry::resolve(Some(CLAUDE_CLI_ID), Some("opus")).unwrap());
+        assert_eq!(label(&opus, Some("high"), &none), "Claude Opus 5.5 · high");
         let codex = registry::resolve(Some(CODEX_ID), None).unwrap();
         assert_eq!(label(&codex, None, &none), "ChatGPT");
         for (id, name) in [
-            ("claude-opus-5-5", "Claude Opus 5.5"),
+            ("claude-opus-5-5", "Opus 5.5"),
             ("gpt-6.1-sol", "GPT-6.1 Sol"),
             ("grok-4.7-build", "Grok 4.7 Build"),
             ("default", "Default"),
@@ -478,7 +501,11 @@ mod tests {
             .iter()
             .map(|m| model_name(&m.model, &none))
             .collect();
-        assert_eq!(names, ["Sonnet", "Opus", "Fable", "Haiku"]);
+        assert_eq!(
+            names[..4],
+            ["Fable 5.1", "Opus 5.5", "Sonnet 5.5", "Haiku 5.5"]
+        );
+        assert!(names.contains(&"Opus 4.6".to_owned()));
         assert!(efforts(GROK_ID).is_empty());
     }
 }
