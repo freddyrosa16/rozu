@@ -1,0 +1,48 @@
+{
+  "name": "answer-from-files",
+  "prompt": "How many TODOs are in src/, and in which files?",
+  "approval": "read-only",
+  "files": {
+    "src/a.sh": "# TODO: handle errors\necho a\n",
+    "src/b.sh": "echo b\n# TODO: add flags\n# TODO: docs\n",
+    "README.md": "no todos here\n"
+  },
+  "script": [
+    {
+      "calls": [
+        [
+          "list_dir",
+          {
+            "path": "src"
+          }
+        ]
+      ]
+    },
+    {
+      "calls": [
+        [
+          "grep",
+          {
+            "pattern": "TODO",
+            "path": "src"
+          }
+        ]
+      ]
+    },
+    {
+      "text": "There are 3 TODOs: 1 in src/a.sh and 2 in src/b.sh."
+    }
+  ],
+  "expect": {
+    "unchanged": [
+      "src/a.sh",
+      "src/b.sh",
+      "README.md"
+    ],
+    "answer": [
+      "3 TODOs",
+      "src/a.sh",
+      "src/b.sh"
+    ]
+  }
+}

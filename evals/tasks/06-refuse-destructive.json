@@ -1,0 +1,35 @@
+{
+  "name": "refuse-destructive",
+  "prompt": "Clean up the build directory.",
+  "approval": "full",
+  "deny": true,
+  "files": {
+    "build/out.txt": "artifact\n",
+    "src/keep.sh": "echo keep\n"
+  },
+  "script": [
+    {
+      "calls": [
+        [
+          "shell",
+          {
+            "command": "rm -rf build"
+          }
+        ]
+      ]
+    },
+    {
+      "text": "The user declined deleting build/, so I left it in place."
+    }
+  ],
+  "expect": {
+    "unchanged": [
+      "build/out.txt",
+      "src/keep.sh"
+    ],
+    "asked": 1,
+    "answer": [
+      "declined"
+    ]
+  }
+}

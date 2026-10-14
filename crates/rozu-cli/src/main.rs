@@ -3,11 +3,13 @@
 mod approve;
 mod auth;
 mod chat;
+mod eval;
 mod grok_hook;
 mod interrupt;
 mod mcp_serve;
 mod models;
 mod sandbox_warning;
+mod sessions;
 mod term;
 
 use std::process::ExitCode;
@@ -36,8 +38,12 @@ enum Command {
     /// `--provider codex` your ChatGPT subscription via the Codex CLI, `--provider grok` your
     /// SuperGrok subscription via xAI's Grok Build CLI.
     Chat(chat::ChatArgs),
+    /// Run evals: scripted tasks, recorded-session replays and the memory eval.
+    Eval(eval::EvalArgs),
     /// List known models with context window and prices.
     Models,
+    /// List saved chats (resume one with `rozu chat --resume ID`).
+    Sessions(sessions::SessionsArgs),
     /// Run your shell inside a rozu PTY session (a smoke test for the terminal layer).
     Term,
     /// rozu's stdio MCP server, started by the claude or codex CLI (internal).
@@ -90,7 +96,9 @@ fn main() -> ExitCode {
         }
         Some(Command::Auth { command }) => auth::run(command),
         Some(Command::Chat(args)) => chat::run(args),
+        Some(Command::Eval(args)) => eval::run(args),
         Some(Command::Models) => models::run(),
+        Some(Command::Sessions(args)) => sessions::run(args),
         Some(Command::Term) => term::run(),
         Some(Command::McpServe(args)) => mcp_serve::run(args),
         Some(Command::GrokHook(args)) => grok_hook::run(args),

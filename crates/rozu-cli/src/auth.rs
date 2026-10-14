@@ -302,6 +302,25 @@ mod tests {
 
     use super::*;
 
+    /// Writes an executable script, then waits out ETXTBSY: a parallel test's fork can briefly
+    /// hold the write fd open until it execs.
+    fn exe(path: &std::path::Path, body: &str) {
+        std::fs::write(path, body).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        for _ in 0..200 {
+            match std::process::Command::new(path)
+                .arg("--version")
+                .stdin(std::process::Stdio::null())
+                .output()
+            {
+                Err(e) if e.raw_os_error() == Some(26) => {
+                    std::thread::sleep(std::time::Duration::from_millis(10))
+                }
+                _ => return,
+            }
+        }
+    }
+
     /// The fake `claude` from the provider fixtures, wrapped so it finds its auth.json.
     fn fake_claude(dir: &std::path::Path) -> PathBuf {
         let fixtures = concat!(
@@ -309,14 +328,12 @@ mod tests {
             "/../rozu-cli-providers/tests/fixtures/claude"
         );
         let wrapper = dir.join("claude");
-        std::fs::write(
+        exe(
             &wrapper,
-            format!(
+            &format!(
                 "#!/bin/sh\nFAKE_CLAUDE_TURNS='{fixtures}' exec /bin/sh '{fixtures}/fake_claude.sh' \"$@\"\n"
             ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         wrapper
     }
 
@@ -346,12 +363,12 @@ mod tests {
             "/../rozu-cli-providers/tests/fixtures/codex/fake_codex.sh"
         );
         let wrapper = dir.join(format!("codex-{}", status.len()));
-        std::fs::write(
+        exe(
             &wrapper,
-            format!("#!/bin/sh\nFAKE_CODEX_LOGIN_STATUS='{status}' exec /bin/sh '{fake}' \"$@\"\n"),
-        )
-        .unwrap();
-        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+            &format!(
+                "#!/bin/sh\nFAKE_CODEX_LOGIN_STATUS='{status}' exec /bin/sh '{fake}' \"$@\"\n"
+            ),
+        );
         wrapper
     }
 
@@ -389,8 +406,7 @@ mod tests {
         );
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("grok");
-        std::fs::copy(fake, &bin).unwrap();
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        exe(&bin, &std::fs::read_to_string(fake).unwrap());
         let line = grok_cli_status(Ok(bin)).await;
         assert!(line.starts_with("grok: "), "{line}");
         assert!(line.contains("(1.0.52), login status unknown"), "{line}");

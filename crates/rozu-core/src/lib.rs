@@ -8,9 +8,11 @@
 pub mod agent;
 pub mod approval;
 pub mod audit;
+pub mod compact;
 pub mod exec;
 pub mod model;
 pub mod provider;
+pub mod replay;
 pub mod telemetry;
 
 pub use agent::{
@@ -23,12 +25,14 @@ pub use approval::{
     PendingApproval, PrefixRule, ReadOnlyGate, SandboxMode, approvals_path,
 };
 pub use audit::{AUDIT_LOG_ENV, AuditLog, audit_path_from_env, default_audit_path, new_session_id};
+pub use compact::{Compaction, MemoryPolicy};
 pub use exec::{ToolExecutor, log_decision};
 pub use model::{
     Billing, ChatRequest, ContentPart, LongContextPrices, MemoryFeatures, Message, ModelInfo,
     ProviderCaps, Role, StopReason, StreamEvent, ToolSpec, Usage,
 };
 pub use provider::{EventStream, Provider, ProviderError, ProviderKind, ProviderResult};
+pub use replay::ReplayProvider;
 pub use telemetry::{LogTarget, default_log_path, init_tracing, redact};
 
 /// Version of this crate.

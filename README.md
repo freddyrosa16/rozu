@@ -50,6 +50,22 @@ cargo build --release
 # `/model` alone shows the current one.
 ./target/release/rozu chat --workspace .
 
+# Every chat is saved. List them, then continue one (no ID: this workspace's latest).
+./target/release/rozu sessions                 # --all for every workspace, or a search word
+./target/release/rozu chat --resume
+./target/release/rozu chat --resume 20261014T1302Z -- "and now the tests"
+
+# Project memory: ROZU.md and AGENTS.md in the workspace root, plus notes added with `/pin <note>`
+# (kept in .rozu/pinned.md), are sent with every request.
+# Long chats compact themselves: at 60% of the context window old tool outputs are hidden, at 80% older
+# turns are summarized; the system prompt, project memory and the last 3 turns are never touched.
+# `/compact` does it now; `--memory off|mask|summarize|default` picks the policy.
+
+# Evals (dry runs script the model, so they need no keys; add --mode live --provider ... for a real one).
+./target/release/rozu eval tasks                # evals/tasks: each task in a temp repo, checked by its outcome
+./target/release/rozu eval replay evals/recorded/fix-failing-test.jsonl --workspace evals/recorded/fix-failing-test
+./target/release/rozu eval memory --seeds 3     # rows per memory condition in rozu-eval-memory.jsonl
+
 # Approval mode (default: auto). See "Approvals and sandbox" below.
 ./target/release/rozu chat --approval read-only "explain src/main.rs"
 ./target/release/rozu chat --approval full "run the tests and fix what fails"

@@ -1,0 +1,71 @@
+{
+  "name": "fix-failing-test",
+  "prompt": "test.sh fails; fix it",
+  "files": {
+    "math.sh": "add() {\n  echo $(($1 - $2))\n}\n",
+    "test.sh": ". ./math.sh\nresult=$(add 2 3)\nif [ \"$result\" = \"5\" ]; then\n  echo \"PASS\"\nelse\n  echo \"FAIL: add 2 3 = $result, want 5\"\n  exit 1\nfi\n"
+  },
+  "script": [
+    {
+      "calls": [
+        [
+          "shell",
+          {
+            "command": "sh test.sh"
+          }
+        ]
+      ]
+    },
+    {
+      "calls": [
+        [
+          "read_file",
+          {
+            "path": "math.sh"
+          }
+        ]
+      ]
+    },
+    {
+      "calls": [
+        [
+          "apply_patch",
+          {
+            "path": "math.sh",
+            "edits": [
+              {
+                "old": "$1 - $2",
+                "new": "$1 + $2"
+              }
+            ]
+          }
+        ]
+      ]
+    },
+    {
+      "calls": [
+        [
+          "shell",
+          {
+            "command": "sh test.sh"
+          }
+        ]
+      ]
+    },
+    {
+      "text": "Fixed: add() subtracted instead of adding. test.sh passes now."
+    }
+  ],
+  "expect": {
+    "files": {
+      "math.sh": "$1 + $2"
+    },
+    "unchanged": [
+      "test.sh"
+    ],
+    "command": "sh test.sh",
+    "answer": [
+      "passes"
+    ]
+  }
+}

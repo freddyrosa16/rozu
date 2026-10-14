@@ -8,7 +8,7 @@ use gpui::{
     Bounds, Context, Pixels, Rgba, Task, Window, canvas, fill, point, prelude::*, px, size,
 };
 use rozu_activity::tokens::{ORB_PX, Palette, Theme};
-use rozu_activity::{ActivityState, Orb, OrbSize, ProjectOptions, project_with};
+use rozu_activity::{ActivityState, GLOW_PX, Orb, OrbSize, ProjectOptions, project_with};
 
 const FRAME: Duration = Duration::from_millis(33);
 
@@ -75,6 +75,23 @@ impl Render for OrbView {
                         b: (c & 0xFF) as f32 / 255.0,
                         a: d.alpha,
                     };
+                    if d.glow {
+                        let g = d.radius + GLOW_PX;
+                        let b = Bounds::new(
+                            point(px(ox + d.x - g), px(oy + d.y - g)),
+                            size(px(2.0 * g), px(2.0 * g)),
+                        );
+                        window.paint_quad(
+                            fill(
+                                b,
+                                Rgba {
+                                    a: d.alpha * 0.15,
+                                    ..color
+                                },
+                            )
+                            .corner_radii(px(g)),
+                        );
+                    }
                     let (x, y, side, r) = if d.pixel_square {
                         let (x, y, side) = d.square(scale);
                         (x, y, side, 0.0)
