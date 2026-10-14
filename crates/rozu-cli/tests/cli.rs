@@ -450,3 +450,54 @@ fn doctor_lists_every_crate() {
         assert!(stdout.contains(name), "missing {name} in:\n{stdout}");
     }
 }
+
+#[test]
+fn a_chat_is_saved_and_resumed_with_project_memory() {
+    let api = Api::sse(TEXT_FIXTURE);
+    let workspace = tempfile::tempdir().unwrap();
+    let sessions = tempfile::tempdir().unwrap();
+    std::fs::write(workspace.path().join("ROZU.md"), "Always answer in haiku.").unwrap();
+    let run = |args: &[&str]| {
+        let mut cmd = chat(&api, workspace.path());
+        cmd.env("ROZU_SESSIONS_DIR", sessions.path()).args(args);
+        stdout_of(&mut cmd)
+    };
+    run(&["first question"]);
+    run(&["--resume", "--", "second question"]);
+
+    let bodies = api.bodies();
+    assert_eq!(bodies.len(), 2);
+    let second = bodies[1].to_string();
+    for expected in [
+        "first question",
+        "second question",
+        "Always answer in haiku.",
+    ] {
+        assert!(second.contains(expected), "{expected}: {second}");
+    }
+
+    let mut list = rozu();
+    list.env("ROZU_SESSIONS_DIR", sessions.path())
+        .arg("sessions")
+        .arg("--workspace")
+        .arg(workspace.path());
+    let listed = stdout_of(&mut list);
+    assert_eq!(listed.lines().count(), 1, "{listed}");
+    assert!(
+        listed.contains("openai/") && listed.contains("4 msgs  first question"),
+        "{listed}"
+    );
+}
+
+#[test]
+fn resume_without_a_saved_chat_fails() {
+    let api = Api::sse(TEXT_FIXTURE);
+    let workspace = tempfile::tempdir().unwrap();
+    let sessions = tempfile::tempdir().unwrap();
+    chat(&api, workspace.path())
+        .env("ROZU_SESSIONS_DIR", sessions.path())
+        .args(["--resume", "nope", "hi"])
+        .assert()
+        .failure()
+        .stderr(contains("no saved session matches `nope`"));
+}

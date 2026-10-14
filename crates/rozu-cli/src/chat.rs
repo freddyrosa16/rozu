@@ -5,7 +5,9 @@
 //! Assistant text streams to stdout; tool calls, approval prompts, status and errors go to stderr
 //! (dimmed on a terminal), so `rozu chat "…" > answer.md` captures just the answer. In the
 //! interactive session, `/model <provider/model>` switches the model for the next turn while
-//! keeping the conversation.
+//! keeping the conversation, and `/pin <note>` adds a note to the project memory.
+//!
+//! Every chat is saved (see `rozu sessions`) and `--resume [ID]` continues one.
 
 use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
@@ -33,6 +35,7 @@ use rozu_core::{
 use rozu_providers::registry::{CLAUDE_CLI_ID, CODEX_ID, GROK_ID};
 use rozu_providers::{ModelChoice, PROVIDERS, registry};
 use rozu_secrets::{KeyringStore, SecretStore, env_var_for, resolve_api_key};
+use rozu_store::{ProjectMemory, SessionMeta, SessionStore, SessionWriter, unix_now};
 use rozu_tools::{Risk, SessionTemp, ToolRegistry, Workspace, platform_sandbox};
 use tokio::sync::mpsc;
 
@@ -82,6 +85,13 @@ pub struct ChatArgs {
         value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..=MAX_STEPS_LIMIT),
     )]
     max_steps: usize,
+    /// Continue a saved chat: an id or id prefix from `rozu sessions`, or nothing for this
+    /// workspace's latest. Uses the chat's last model unless --provider or --model is given.
+    #[arg(long, num_args = 0..=1, default_missing_value = "last", value_name = "ID")]
+    resume: Option<String>,
+    /// Don't save this chat.
+    #[arg(long)]
+    no_save: bool,
     /// Prompt to run once. Without it, rozu starts an interactive session.
     #[arg(trailing_var_arg = true)]
     prompt: Vec<String>,
@@ -346,15 +356,45 @@ fn parse_model_switch(arg: &str) -> Result<ModelChoice, registry::RegistryError>
 
 async fn chat(args: ChatArgs) -> anyhow::Result<ExitCode> {
     let store = KeyringStore::default();
-    let provider = default_provider(
-        args.provider.clone(),
-        args.model.as_deref(),
-        || any_api_key(&store),
-        cli_installed,
-    );
-    let mut choice = registry::resolve(provider.as_deref(), args.model.as_deref())?;
     let workspace = Workspace::new(&args.workspace)
         .with_context(|| format!("cannot open workspace {}", args.workspace.display()))?;
+    let sessions = if args.no_save {
+        None
+    } else {
+        match SessionStore::open_default() {
+            Ok(sessions) => Some(sessions),
+            Err(err) if args.resume.is_some() => {
+                return Err(anyhow!(err).context("cannot open the saved sessions"));
+            }
+            Err(err) => {
+                eprintln!("warning: this chat won't be saved: {err}");
+                None
+            }
+        }
+    };
+    let resumed = match (&sessions, args.resume.as_deref()) {
+        (Some(sessions), Some(query)) => {
+            let id = sessions.resolve(Some(query), workspace.root())?;
+            Some(sessions.resume(&id)?)
+        }
+        (None, Some(_)) => return Err(anyhow!("--resume can't be used with --no-save")),
+        _ => None,
+    };
+    let mut choice = match &resumed {
+        Some((_, writer)) if args.provider.is_none() && args.model.is_none() => {
+            let meta = writer.meta();
+            registry::resolve(Some(&meta.provider), Some(&meta.model))?
+        }
+        _ => {
+            let provider = default_provider(
+                args.provider.clone(),
+                args.model.as_deref(),
+                || any_api_key(&store),
+                cli_installed,
+            );
+            registry::resolve(provider.as_deref(), args.model.as_deref())?
+        }
+    };
     let mode = ApprovalMode::from(args.approval);
     let policy = ApprovalPolicy::for_project(mode, workspace.root()).with_context(|| {
         format!(
@@ -364,7 +404,9 @@ async fn chat(args: ChatArgs) -> anyhow::Result<ExitCode> {
     })?;
     let interactive = approve::stdin_is_interactive();
     let (gate, mut asks) = CliGate::new(interactive);
-    let session_id = new_session_id();
+    let session_id = resumed
+        .as_ref()
+        .map_or_else(new_session_id, |(_, writer)| writer.id().to_owned());
     let temp = match SessionTemp::create(&session_id) {
         Ok(temp) => Some(Arc::new(temp)),
         Err(err) => {
@@ -389,7 +431,27 @@ async fn chat(args: ChatArgs) -> anyhow::Result<ExitCode> {
         temp,
     };
     let mut agent = factory.build(&choice)?;
-    let mut session = Session::with_system_prompt(system_prompt(&workspace, mode));
+    let mut memory = load_memory(&workspace);
+    let (mut session, mut writer) = match resumed {
+        Some((session, writer)) => (session, Some(writer)),
+        None => {
+            let writer = sessions.as_ref().and_then(|sessions| {
+                let meta = SessionMeta {
+                    id: factory.session_id.clone(),
+                    workspace: workspace.root().to_owned(),
+                    provider: choice.provider.id.to_owned(),
+                    model: choice.model.clone(),
+                    created: unix_now(),
+                };
+                sessions
+                    .create(meta)
+                    .inspect_err(|err| eprintln!("warning: this chat won't be saved: {err}"))
+                    .ok()
+            });
+            (Session::new(), writer)
+        }
+    };
+    set_system(&mut session, &workspace, mode, &memory);
     let printer = Printer::new();
     let interrupts = Interrupts::install();
     let input = {
@@ -407,7 +469,9 @@ async fn chat(args: ChatArgs) -> anyhow::Result<ExitCode> {
 
     let prompt = args.prompt.join(" ");
     if !prompt.trim().is_empty() {
-        let outcome = turn(&agent, &mut session, prompt, &mut asks, &io).await?;
+        let outcome = turn(&agent, &mut session, prompt, &mut asks, &io).await;
+        save(&mut writer, &session);
+        let outcome = outcome?;
         return Ok(match outcome {
             TurnOutcome::Cancelled => ExitCode::from(EXIT_INTERRUPTED as u8),
             _ => ExitCode::SUCCESS,
@@ -417,12 +481,13 @@ async fn chat(args: ChatArgs) -> anyhow::Result<ExitCode> {
     let interactive = io.interactive;
     if interactive {
         printer.status(&format!(
-            "rozu {} · {} · {}\napprovals: {} · sandbox: {}\nCtrl-C cancels a turn (twice exits) · /model <provider/model> switches · Ctrl-D or /exit quits",
+            "rozu {} · {} · {}\napprovals: {} · sandbox: {}\n{}\nCtrl-C cancels a turn (twice exits) · /model <provider/model> switches · /pin <note> remembers · Ctrl-D or /exit quits",
             env!("CARGO_PKG_VERSION"),
             choice.spec(),
             workspace.root().display(),
             mode,
             sandbox_label(),
+            session_label(writer.as_ref(), &session, &memory),
         ));
     }
     loop {
@@ -455,6 +520,11 @@ async fn chat(args: ChatArgs) -> anyhow::Result<ExitCode> {
                 Ok((next_agent, next)) => {
                     agent = next_agent;
                     choice = next;
+                    if let Some(writer) = writer.as_mut() {
+                        if let Err(err) = writer.set_model(choice.provider.id, &choice.model) {
+                            tracing::warn!(error = %err, "could not save the model switch");
+                        }
+                    }
                     printer.status(&format!("switched to {}", choice.spec()));
                     printer.unpriced_note(&choice);
                 }
@@ -462,11 +532,99 @@ async fn chat(args: ChatArgs) -> anyhow::Result<ExitCode> {
             }
             continue;
         }
-        if let Err(err) = turn(&agent, &mut session, input.to_owned(), &mut asks, &io).await {
+        if let Some(note) = command_arg(input, "/pin") {
+            if note.is_empty() {
+                printer.status("usage: /pin <note> (saved to .rozu/pinned.md and kept in context)");
+                continue;
+            }
+            match rozu_store::pin(workspace.root(), note) {
+                Ok(path) => {
+                    memory = load_memory(&workspace);
+                    set_system(&mut session, &workspace, mode, &memory);
+                    printer.status(&format!("pinned to {}", path.display()));
+                }
+                Err(err) => eprintln!("error: could not pin the note: {err}"),
+            }
+            continue;
+        }
+        let result = turn(&agent, &mut session, input.to_owned(), &mut asks, &io).await;
+        save(&mut writer, &session);
+        if let Err(err) = result {
             eprintln!("error: {err}");
         }
     }
+    if let Some(writer) = writer.as_ref().filter(|_| interactive) {
+        if session
+            .messages
+            .iter()
+            .any(|m| m.role == rozu_core::Role::User)
+        {
+            printer.status(&format!("resume with: rozu chat --resume {}", writer.id()));
+        }
+    }
     Ok(ExitCode::SUCCESS)
+}
+
+fn load_memory(workspace: &Workspace) -> ProjectMemory {
+    ProjectMemory::load(workspace.root()).unwrap_or_else(|err| {
+        eprintln!("warning: could not read the project memory: {err}");
+        ProjectMemory::default()
+    })
+}
+
+/// Replaces the leading system messages with the current system prompt and project memory, so
+/// a resumed chat follows today's ROZU.md.
+fn set_system(
+    session: &mut Session,
+    workspace: &Workspace,
+    mode: ApprovalMode,
+    memory: &ProjectMemory,
+) {
+    let old = session
+        .messages
+        .iter()
+        .take_while(|m| m.role == rozu_core::Role::System)
+        .count();
+    let mut system = vec![rozu_core::Message::system(system_prompt(workspace, mode))];
+    system.extend(memory.prompt().map(rozu_core::Message::system));
+    session.messages.splice(..old, system);
+}
+
+fn save(writer: &mut Option<SessionWriter>, session: &Session) {
+    if let Some(w) = writer.as_mut() {
+        if let Err(err) = w.sync(session) {
+            eprintln!("warning: could not save the chat, so it won't be resumable: {err}");
+            *writer = None;
+        }
+    }
+}
+
+fn session_label(
+    writer: Option<&SessionWriter>,
+    session: &Session,
+    memory: &ProjectMemory,
+) -> String {
+    let saved = match writer {
+        None => "not saved".to_owned(),
+        Some(w) => {
+            let turns = session
+                .messages
+                .iter()
+                .filter(|m| m.role == rozu_core::Role::User)
+                .count();
+            if turns == 0 {
+                format!("session {}", w.id())
+            } else {
+                format!("resumed {} ({turns} earlier turns)", w.id())
+            }
+        }
+    };
+    let names: Vec<_> = memory.sources.iter().map(|(l, _)| l.as_str()).collect();
+    if names.is_empty() {
+        saved
+    } else {
+        format!("{saved} · memory: {}", names.join(", "))
+    }
 }
 
 /// How shell commands are confined on this machine (the same in every approval mode).
