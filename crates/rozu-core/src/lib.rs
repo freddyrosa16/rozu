@@ -8,6 +8,7 @@
 pub mod agent;
 pub mod approval;
 pub mod audit;
+pub mod compact;
 pub mod exec;
 pub mod model;
 pub mod provider;
@@ -23,6 +24,7 @@ pub use approval::{
     PendingApproval, PrefixRule, ReadOnlyGate, SandboxMode, approvals_path,
 };
 pub use audit::{AUDIT_LOG_ENV, AuditLog, audit_path_from_env, default_audit_path, new_session_id};
+pub use compact::{Compaction, MemoryPolicy};
 pub use exec::{ToolExecutor, log_decision};
 pub use model::{
     Billing, ChatRequest, ContentPart, LongContextPrices, MemoryFeatures, Message, ModelInfo,

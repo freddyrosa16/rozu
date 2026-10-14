@@ -48,6 +48,9 @@ cargo build --release
 
 # Project memory: ROZU.md and AGENTS.md in the workspace root, plus notes added with `/pin <note>`
 # (kept in .rozu/pinned.md), are sent with every request.
+# Long chats compact themselves: at 60% of the context window old tool outputs are hidden, at 80% older
+# turns are summarized; the system prompt, project memory and the last 3 turns are never touched.
+# `/compact` does it now; `--memory off|mask|summarize|default` picks the policy.
 
 # Approval mode (default: auto). See "Approvals and sandbox" below.
 ./target/release/rozu chat --approval read-only "explain src/main.rs"
