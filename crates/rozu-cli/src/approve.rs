@@ -415,7 +415,6 @@ mod tests {
         );
         let card = render_card(&request(None), false);
         assert!(!card.contains("[a]"), "{card}");
-        // No sandbox here, so nothing to lift.
         let mut off = request(None);
         off.sandbox = SandboxMode::Off;
         assert!(!render_card(&off, false).contains("[u]"));

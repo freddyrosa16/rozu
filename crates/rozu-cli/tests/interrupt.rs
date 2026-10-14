@@ -2,44 +2,40 @@
 //! prompt, must exit promptly with status 130 (QA: a double Ctrl-C under 300 ms used to hang).
 #![cfg(unix)]
 
+mod common;
+
 use std::io::Write;
+use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use wiremock::matchers::method;
-use wiremock::{Mock, MockServer, ResponseTemplate};
+use common::{Api, OPENAI_KEY, base_env};
+use wiremock::ResponseTemplate;
 
-/// A mock OpenAI server whose responses take a minute, so a turn stays in flight.
-fn stalled_server(runtime: &tokio::runtime::Runtime) -> MockServer {
-    runtime.block_on(async {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(60)))
-            .mount(&server)
-            .await;
-        server
-    })
+/// Responses take a minute, so a turn stays in flight.
+fn stalled_api() -> Api {
+    Api::new(vec![
+        ResponseTemplate::new(200).set_delay(Duration::from_secs(60)),
+    ])
 }
 
-/// Interactive `rozu chat` (stdin piped and kept open) against `server`.
-fn spawn_chat(server: &MockServer, workspace: &std::path::Path) -> Child {
-    Command::new(assert_cmd::cargo::cargo_bin("rozu"))
-        .env("OPENAI_API_KEY", "sk-test-0123456789abcdef")
-        .env("OPENAI_BASE_URL", server.uri())
-        .env("NO_COLOR", "1")
-        .env(
-            "ROZU_LOG_FILE",
-            std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("rozu-cli-tests.log"),
-        )
-        .env(
-            "ROZU_AUDIT_LOG",
-            std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
-                .join("rozu-cli-tests-approvals.jsonl"),
-        )
-        .env_remove("ROZU_LOG_STDERR")
-        .env_remove("ROZU_PROVIDER")
-        .env_remove("ROZU_MODEL")
-        .arg("chat")
+fn chat_env(api: &Api) -> Vec<(&'static str, Option<std::ffi::OsString>)> {
+    let mut env = base_env();
+    env.push(("OPENAI_API_KEY", Some(OPENAI_KEY.into())));
+    env.push(("OPENAI_BASE_URL", Some(api.uri().into())));
+    env
+}
+
+/// Interactive `rozu chat` with stdin piped and kept open.
+fn spawn_chat(api: &Api, workspace: &Path) -> Child {
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin("rozu"));
+    for (key, value) in chat_env(api) {
+        match value {
+            Some(value) => cmd.env(key, value),
+            None => cmd.env_remove(key),
+        };
+    }
+    cmd.arg("chat")
         .arg("--workspace")
         .arg(workspace)
         .stdin(Stdio::piped())
@@ -55,7 +51,6 @@ fn sigint(child: &Child) {
     assert_eq!(unsafe { libc::kill(pid, libc::SIGINT) }, 0);
 }
 
-/// Waits up to `limit` for `child` to exit; kills it and panics if it doesn't.
 fn wait_exit(child: &mut Child, limit: Duration) -> std::process::ExitStatus {
     let start = Instant::now();
     loop {
@@ -71,14 +66,10 @@ fn wait_exit(child: &mut Child, limit: Duration) -> std::process::ExitStatus {
     }
 }
 
-/// Waits until `server` has received a request, i.e. a turn is in flight.
-fn wait_for_request(runtime: &tokio::runtime::Runtime, server: &MockServer) {
+/// Waits until a turn is in flight.
+fn wait_for_request(api: &Api) {
     let start = Instant::now();
-    while runtime
-        .block_on(server.received_requests())
-        .unwrap_or_default()
-        .is_empty()
-    {
+    while api.requests().is_empty() {
         assert!(
             start.elapsed() < Duration::from_secs(20),
             "the turn never started"
@@ -89,17 +80,16 @@ fn wait_for_request(runtime: &tokio::runtime::Runtime, server: &MockServer) {
 
 #[test]
 fn fast_double_ctrl_c_during_a_turn_exits() {
-    let runtime = tokio::runtime::Runtime::new().unwrap();
-    // Repeat: the bug hung about two times out of three. No 0 ms gap: two back-to-back kill(2)s
+    // Repeated: the bug hung about two times out of three. No 0 ms gap: two back-to-back kill(2)s
     // can reach the process as one pending SIGINT (the kernel doesn't queue standard signals),
     // which is a single press by definition; human double presses are tens of ms apart.
     for gap_ms in [1, 5, 20, 50, 100, 250, 1, 5] {
-        let server = stalled_server(&runtime);
+        let api = stalled_api();
         let dir = tempfile::tempdir().unwrap();
-        let mut child = spawn_chat(&server, dir.path());
+        let mut child = spawn_chat(&api, dir.path());
         let mut stdin = child.stdin.take().unwrap();
         writeln!(stdin, "hello").unwrap();
-        wait_for_request(&runtime, &server);
+        wait_for_request(&api);
 
         sigint(&child);
         std::thread::sleep(Duration::from_millis(gap_ms));
@@ -113,19 +103,16 @@ fn fast_double_ctrl_c_during_a_turn_exits() {
 
 #[test]
 fn single_ctrl_c_cancels_the_turn_and_keeps_the_session() {
-    let runtime = tokio::runtime::Runtime::new().unwrap();
-    let server = stalled_server(&runtime);
+    let api = stalled_api();
     let dir = tempfile::tempdir().unwrap();
-    let mut child = spawn_chat(&server, dir.path());
+    let mut child = spawn_chat(&api, dir.path());
     let mut stdin = child.stdin.take().unwrap();
     writeln!(stdin, "hello").unwrap();
-    wait_for_request(&runtime, &server);
+    wait_for_request(&api);
 
     sigint(&child);
-    // Still running at the prompt after the cancel...
     std::thread::sleep(Duration::from_millis(500));
     assert!(child.try_wait().unwrap().is_none(), "exited on one Ctrl-C");
-    // ...and Ctrl-C at the prompt exits.
     sigint(&child);
     let status = wait_exit(&mut child, Duration::from_secs(2));
     assert_eq!(status.code(), Some(130));
@@ -153,7 +140,7 @@ mod pty {
     }
 
     impl Session {
-        pub fn spawn(server: &MockServer, workspace: &std::path::Path) -> Self {
+        pub fn spawn(api: &Api, workspace: &Path) -> Self {
             let pair = native_pty_system()
                 .openpty(PtySize {
                     rows: 24,
@@ -166,14 +153,11 @@ mod pty {
             cmd.args(["chat", "--workspace"]);
             cmd.arg(workspace);
             cmd.cwd(workspace);
-            cmd.env("OPENAI_API_KEY", "sk-test-0123456789abcdef");
-            cmd.env("OPENAI_BASE_URL", server.uri());
-            cmd.env("NO_COLOR", "1");
-            let tmp = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"));
-            cmd.env("ROZU_LOG_FILE", tmp.join("rozu-cli-tests.log"));
-            cmd.env("ROZU_AUDIT_LOG", tmp.join("rozu-cli-tests-approvals.jsonl"));
-            for var in ["ROZU_LOG_STDERR", "ROZU_PROVIDER", "ROZU_MODEL", "RUST_LOG"] {
-                cmd.env_remove(var);
+            for (key, value) in chat_env(api) {
+                match value {
+                    Some(value) => cmd.env(key, value),
+                    None => cmd.env_remove(key),
+                }
             }
             let child = pair.slave.spawn_command(cmd).unwrap();
             drop(pair.slave);
@@ -199,8 +183,8 @@ mod pty {
             }
         }
 
+        /// One write call, so several bytes reach the terminal together.
         pub fn write(&mut self, bytes: &[u8]) {
-            // One write call: both bytes reach the terminal together.
             self.writer.write_all(bytes).unwrap();
             self.writer.flush().unwrap();
         }
@@ -209,7 +193,6 @@ mod pty {
             String::from_utf8_lossy(&self.output.lock().unwrap()).into_owned()
         }
 
-        /// Waits up to `limit` for the exit code.
         pub fn wait_exit(&mut self, limit: Duration) -> u32 {
             let start = Instant::now();
             loop {
@@ -231,20 +214,24 @@ mod pty {
             self.child.try_wait().unwrap().is_none()
         }
     }
-}
 
-/// BUG-1: two `^C` bytes in one write during a turn are two presses, so rozu exits. (They used
-/// to merge into one SIGINT 19 times out of 20.)
-#[test]
-fn double_ctrl_c_in_one_write_on_a_terminal_exits() {
-    let runtime = tokio::runtime::Runtime::new().unwrap();
-    for trial in 0..3 {
-        let server = stalled_server(&runtime);
-        let dir = tempfile::tempdir().unwrap();
-        let mut session = pty::Session::spawn(&server, dir.path());
+    pub fn start_turn(api: &Api, workspace: &Path) -> Session {
+        let mut session = Session::spawn(api, workspace);
         std::thread::sleep(Duration::from_millis(300));
         session.write(b"hello\r");
-        wait_for_request(&runtime, &server);
+        wait_for_request(api);
+        session
+    }
+}
+
+/// BUG-1: two `^C` bytes in one write during a turn are two presses (they used to merge into one
+/// SIGINT 19 times out of 20).
+#[test]
+fn double_ctrl_c_in_one_write_on_a_terminal_exits() {
+    for trial in 0..3 {
+        let api = stalled_api();
+        let dir = tempfile::tempdir().unwrap();
+        let mut session = pty::start_turn(&api, dir.path());
 
         session.write(b"\x03\x03");
 
@@ -257,17 +244,13 @@ fn double_ctrl_c_in_one_write_on_a_terminal_exits() {
     }
 }
 
-/// One `^C` byte cancels the turn and keeps the session; the terminal is back to normal at the
-/// prompt, where Ctrl-C is a signal again and exits.
+/// After one `^C` byte cancels the turn, the terminal is back to normal at the prompt, where
+/// Ctrl-C is a signal again.
 #[test]
 fn single_ctrl_c_on_a_terminal_cancels_then_exits_at_the_prompt() {
-    let runtime = tokio::runtime::Runtime::new().unwrap();
-    let server = stalled_server(&runtime);
+    let api = stalled_api();
     let dir = tempfile::tempdir().unwrap();
-    let mut session = pty::Session::spawn(&server, dir.path());
-    std::thread::sleep(Duration::from_millis(300));
-    session.write(b"hello\r");
-    wait_for_request(&runtime, &server);
+    let mut session = pty::start_turn(&api, dir.path());
 
     session.write(b"\x03");
     let start = Instant::now();
@@ -292,17 +275,16 @@ fn single_ctrl_c_on_a_terminal_cancels_then_exits_at_the_prompt() {
 
 #[test]
 fn ctrl_c_at_the_prompt_exits() {
-    let runtime = tokio::runtime::Runtime::new().unwrap();
-    let server = stalled_server(&runtime);
+    let api = stalled_api();
     let dir = tempfile::tempdir().unwrap();
-    let mut child = spawn_chat(&server, dir.path());
+    let mut child = spawn_chat(&api, dir.path());
     let stdin = child.stdin.take().unwrap();
-    // Give it time to install the handler and wait at the prompt.
+    // Time to install the handler and wait at the prompt.
     std::thread::sleep(Duration::from_secs(1));
 
     sigint(&child);
     let status = wait_exit(&mut child, Duration::from_secs(2));
-    // Killed by the default SIGINT action would be `None`: the handler must be what exits.
+    // The default SIGINT action would give `None`: the handler must be what exits.
     assert_eq!(status.code(), Some(130));
     drop(stdin);
 }

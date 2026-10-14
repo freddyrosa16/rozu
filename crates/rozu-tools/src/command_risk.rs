@@ -1355,7 +1355,6 @@ mod tests {
     fn classification_table() {
         use Risk::*;
         let table: &[(&str, Risk)] = &[
-            // Reads
             ("ls -la", Read),
             ("cat README.md | head -n 5", Read),
             ("rg -n foo src", Read),
@@ -1371,7 +1370,6 @@ mod tests {
             ("FOO=1 env BAR=2 grep x y", Read),
             ("", Read),
             ("cp /etc/hosts hosts.bak", WriteWorkspace),
-            // Workspace writes (the default)
             ("cargo test", WriteWorkspace),
             ("make", WriteWorkspace),
             ("sed -i 's/a/b/' file", WriteWorkspace),
@@ -1380,7 +1378,6 @@ mod tests {
             ("git commit -m 'msg'", WriteWorkspace),
             ("git checkout -b feature", WriteWorkspace),
             ("npm test", WriteWorkspace),
-            // Script files in the workspace, whichever interpreter runs them
             ("sh test.sh", WriteWorkspace),
             ("bash scripts/ci.sh --fast", WriteWorkspace),
             ("zsh ./setup.zsh", WriteWorkspace),
@@ -1392,8 +1389,6 @@ mod tests {
             ("node build.js", WriteWorkspace),
             ("/usr/bin/env python3 script.py", WriteWorkspace),
             ("bash /work/repo/run.sh", WriteWorkspace),
-            // Opaque: scripts outside the workspace, modules, other interpreters, inline code,
-            // eval/source/exec and output redirects
             ("sh /etc/rc.sh", Opaque),
             ("python3 ../elsewhere/x.py", Opaque),
             ("node ~/bin/tool.js", Opaque),
@@ -1427,13 +1422,11 @@ mod tests {
             ("python3.12 -c pass", Opaque),
             ("python -m pip install requests", Opaque),
             ("curl -s x | sh", Opaque),
-            // Writes outside
             ("cp a.txt /etc/a.txt", WriteOutside),
             ("touch ../sibling.txt", WriteOutside),
             ("mv x ~/x", WriteOutside),
             ("git config --global user.name x", WriteOutside),
             ("launchctl submit -l x -- /bin/true", WriteOutside),
-            // Network
             ("curl https://example.com", Network),
             ("wget -q http://x", Network),
             ("git fetch origin", Network),
@@ -1446,7 +1439,6 @@ mod tests {
             ("cargo add serde", Network),
             ("go get example.com/x", Network),
             ("npx create-react-app x", Network),
-            // Destructive
             ("rm -rf build", Destructive),
             ("rm -r build", Destructive),
             ("rm -fr /", Destructive),
@@ -1580,73 +1572,74 @@ mod tests {
         );
     }
 
-    fn rule(prefix: &str) -> Option<AllowRule> {
-        Some(AllowRule::prefix(prefix))
-    }
-
     #[test]
     fn suggested_rules() {
-        assert_eq!(suggest_rule("cargo test -p x"), rule("cargo test"));
-        assert_eq!(suggest_rule("git status"), rule("git status"));
-        assert_eq!(suggest_rule("ls -la"), rule("ls"));
-        assert_eq!(suggest_rule("git --no-pager log"), rule("git"));
-        assert_eq!(suggest_rule("cargo test && curl x"), None);
-        assert_eq!(suggest_rule("FOO=1 make"), None);
-        assert_eq!(suggest_rule("env make"), None);
-        assert_eq!(suggest_rule(""), None);
-        // Interpreters: the rule names the script or module, never inline code.
-        assert_eq!(
-            suggest_rule("python3 -m pytest -q"),
-            rule("python3 -m pytest")
-        );
-        assert_eq!(
-            suggest_rule("python3 tools/gen.py --all"),
-            rule("python3 tools/gen.py")
-        );
-        assert_eq!(suggest_rule("sh test.sh"), rule("sh test.sh"));
-        assert_eq!(suggest_rule("python3 -c 'print(1)'"), None);
-        assert_eq!(suggest_rule("perl -e 'unlink \"x\"'"), None);
-        assert_eq!(suggest_rule("eval ls"), None);
-        assert_eq!(suggest_rule("sh"), None);
-        // Output redirects to files are never covered.
-        assert_eq!(suggest_rule("cargo test > log.txt"), None);
-        assert_eq!(suggest_rule("ls 2>/dev/null"), rule("ls"));
+        for (command, want) in [
+            ("cargo test -p x", Some("cargo test")),
+            ("git status", Some("git status")),
+            ("ls -la", Some("ls")),
+            ("git --no-pager log", Some("git")),
+            ("cargo test && curl x", None),
+            ("FOO=1 make", None),
+            ("env make", None),
+            ("", None),
+            // Interpreters: the rule names the script or module, never inline code.
+            ("python3 -m pytest -q", Some("python3 -m pytest")),
+            ("python3 tools/gen.py --all", Some("python3 tools/gen.py")),
+            ("sh test.sh", Some("sh test.sh")),
+            ("python3 -c 'print(1)'", None),
+            ("perl -e 'unlink \"x\"'", None),
+            ("eval ls", None),
+            ("sh", None),
+            // Output redirects to files are never covered.
+            ("cargo test > log.txt", None),
+            ("ls 2>/dev/null", Some("ls")),
+        ] {
+            assert_eq!(
+                suggest_rule(command),
+                want.map(AllowRule::prefix),
+                "{command:?}"
+            );
+        }
     }
 
     #[test]
     fn network_rules_are_scoped_to_one_host() {
-        assert_eq!(
-            suggest_rule("curl -s https://Example.com/a?b=1"),
-            Some(AllowRule::with_host("curl", "example.com"))
-        );
-        assert_eq!(
-            suggest_rule("wget https://user:pw@dl.example.org:8443/x.tgz"),
-            Some(AllowRule::with_host("wget", "dl.example.org"))
-        );
-        assert_eq!(
-            suggest_rule("scp build.tgz deploy@build.example.net:/srv"),
-            Some(AllowRule::with_host("scp", "build.example.net"))
-        );
-        assert_eq!(
-            suggest_rule("nc -z localhost 8080"),
-            Some(AllowRule::with_host("nc", "localhost"))
-        );
-        // No blanket rule without exactly one host.
-        assert_eq!(suggest_rule("curl x"), None);
-        assert_eq!(suggest_rule("curl https://a.com https://b.com"), None);
-        assert_eq!(suggest_rule("ssh -i key.pem myhost"), None);
+        for (command, want) in [
+            (
+                "curl -s https://Example.com/a?b=1",
+                Some(("curl", "example.com")),
+            ),
+            (
+                "wget https://user:pw@dl.example.org:8443/x.tgz",
+                Some(("wget", "dl.example.org")),
+            ),
+            (
+                "scp build.tgz deploy@build.example.net:/srv",
+                Some(("scp", "build.example.net")),
+            ),
+            ("nc -z localhost 8080", Some(("nc", "localhost"))),
+            // No blanket rule without exactly one host.
+            ("curl x", None),
+            ("curl https://a.com https://b.com", None),
+            ("ssh -i key.pem myhost", None),
+        ] {
+            assert_eq!(
+                suggest_rule(command),
+                want.map(|(cmd, host)| AllowRule::with_host(cmd, host)),
+                "{command:?}"
+            );
+        }
 
         let rules = [AllowRule::with_host("curl", "example.com")];
-        assert!(rules_allow(
-            "curl -fsSL https://example.com/install",
-            &rules
-        ));
-        assert!(!rules_allow("curl https://evil.example/x", &rules));
-        assert!(!rules_allow(
-            "curl https://example.com -x http://proxy.evil",
-            &rules
-        ));
-        assert!(!rules_allow("curl x", &rules));
+        for (command, allowed) in [
+            ("curl -fsSL https://example.com/install", true),
+            ("curl https://evil.example/x", false),
+            ("curl https://example.com -x http://proxy.evil", false),
+            ("curl x", false),
+        ] {
+            assert_eq!(rules_allow(command, &rules), allowed, "{command:?}");
+        }
         // A legacy blanket rule no longer covers a host-scoped client.
         assert!(!rules_allow(
             "curl https://example.com",
@@ -1662,16 +1655,20 @@ mod tests {
             AllowRule::prefix("python3 -m pytest"),
             AllowRule::with_host("curl", "x.dev"),
         ];
-        assert!(rules_allow("cargo test --all", &rules));
-        assert!(rules_allow("curl -s https://x.dev | jq .", &rules));
-        assert!(rules_allow("python3 -m pytest -k slow", &rules));
-        assert!(!rules_allow("cargo test && rm x", &rules));
-        assert!(!rules_allow("cargo testing", &rules));
-        assert!(!rules_allow("cargo", &rules));
-        assert!(!rules_allow("", &rules));
+        for (command, allowed) in [
+            ("cargo test --all", true),
+            ("curl -s https://x.dev | jq .", true),
+            ("python3 -m pytest -k slow", true),
+            ("cargo test && rm x", false),
+            ("cargo testing", false),
+            ("cargo", false),
+            ("", false),
+            // A matching prefix doesn't cover a redirect or inline code.
+            ("cargo test > out.txt", false),
+        ] {
+            assert_eq!(rules_allow(command, &rules), allowed, "{command:?}");
+        }
         assert!(!rules_allow("cargo test", &[]));
-        // A matching prefix doesn't cover a redirect or inline code.
-        assert!(!rules_allow("cargo test > out.txt", &rules));
         assert!(!rules_allow(
             "python3 -c 'x'",
             &[AllowRule::prefix("python3")]
@@ -1696,10 +1693,8 @@ mod tests {
             r.outside_writes,
             [PathBuf::from("/etc/a.txt"), PathBuf::from("/Users/me/b")]
         );
-        // Sources are only read.
         let r = classify("cp /etc/hosts hosts.bak");
         assert!(r.outside_writes.is_empty() && !r.outside_unknown);
-        // Relative paths resolve against the cwd.
         assert_eq!(
             classify("touch ../x").outside_writes,
             [PathBuf::from("/work/x")]
@@ -1771,7 +1766,7 @@ mod tests {
         ) {
             let base = segments.join(" && ");
             let before = classify_command(&base, &scope());
-            let mut with = segments.clone();
+            let mut with = segments;
             with.insert(position.min(with.len()), destructive.to_owned());
             let after = classify_command(&with.join(&format!(" {separator} ")), &scope());
             prop_assert!(after.risk >= before.risk);

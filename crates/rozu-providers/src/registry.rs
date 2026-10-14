@@ -393,9 +393,22 @@ mod tests {
 
     use super::*;
 
-    fn choice(provider: Option<&str>, model: Option<&str>) -> (String, String, bool) {
-        let c = resolve(provider, model).unwrap();
-        (c.provider.id.to_owned(), c.model, c.info.is_some())
+    fn close(a: f64, b: f64) -> bool {
+        (a - b).abs() < 1e-9
+    }
+
+    /// `(provider, model)` input and the expected `(provider id, model, priced)`.
+    type ResolveCase<'a> = (Option<&'a str>, Option<&'a str>, (&'a str, &'a str, bool));
+
+    fn assert_resolves(cases: &[ResolveCase]) {
+        for &(provider, model, want) in cases {
+            let c = resolve(provider, model).unwrap();
+            assert_eq!(
+                (c.provider.id, c.model.as_str(), c.info.is_some()),
+                want,
+                "{provider:?} {model:?}"
+            );
+        }
     }
 
     #[test]
@@ -415,7 +428,6 @@ mod tests {
                 assert!(model.price_cached_in_per_mtok <= model.price_in_per_mtok);
                 assert!(model.price_cache_write_per_mtok >= model.price_in_per_mtok);
                 if let Some(long) = model.long_context {
-                    // The tier is reachable and never cheaper than the standard prices.
                     assert!(
                         long.threshold_tokens < u64::from(model.context_window),
                         "{}",
@@ -434,7 +446,6 @@ mod tests {
     fn retired_and_unlisted_models_are_gone() {
         for spec in [
             "anthropic/claude-opus-4-1",
-            // Deprecated on the pricing page and gone from the models overview.
             "anthropic/claude-sonnet-4-5",
             "xai/grok-4",
             "xai/grok-4-fast-reasoning",
@@ -446,11 +457,15 @@ mod tests {
     #[test]
     fn cache_write_prices() {
         let sonnet = lookup("anthropic/claude-sonnet-5-5").unwrap();
-        assert!((sonnet.price_cache_write_per_mtok - 2.50).abs() < 1e-9);
-        assert!((sonnet.price_cached_in_per_mtok - 0.10).abs() < 1e-9);
+        assert!(close(sonnet.price_cache_write_per_mtok, 2.50));
+        assert!(close(sonnet.price_cached_in_per_mtok, 0.10));
         // OpenAI bills cache writes on the gpt-6 family, not on older models; xAI never does.
-        let sol = lookup("openai/gpt-6.1-sol").unwrap();
-        assert!((sol.price_cache_write_per_mtok - 2.50).abs() < 1e-9);
+        assert!(close(
+            lookup("openai/gpt-6.1-sol")
+                .unwrap()
+                .price_cache_write_per_mtok,
+            2.50
+        ));
         for spec in ["openai/gpt-5.1", "xai/grok-4.7"] {
             let model = lookup(spec).unwrap();
             assert_eq!(model.price_cache_write_per_mtok, model.price_in_per_mtok);
@@ -465,38 +480,35 @@ mod tests {
             cache_read_tokens: 0,
             cache_write_tokens: 0,
         };
-        let cost = |spec: &str, input| lookup(spec).unwrap().cost_usd(&usage(input));
-        // gpt-6.1-sol: over 272K prompt tokens, 4.00 in / 15.00 out.
-        assert!((cost("openai/gpt-6.1-sol", 272_000) - (0.544 + 10.0)).abs() < 1e-9);
-        assert!((cost("openai/gpt-6.1-sol", 272_001) - (1.088_004 + 15.0)).abs() < 1e-9);
-        // gpt-6-astra: 10 / 50 up to 272K, then 20 in / 75 out.
-        assert!((cost("openai/gpt-6-astra", 272_000) - (2.72 + 50.0)).abs() < 1e-9);
-        assert!((cost("openai/gpt-6-astra", 272_001) - (5.440_02 + 75.0)).abs() < 1e-9);
-        // gpt-6-luna: 0.10 / 0.50 up to 272K, then 0.20 in / 0.75 out.
-        assert!((cost("openai/gpt-6-luna", 272_000) - (0.0272 + 0.5)).abs() < 1e-9);
-        assert!((cost("openai/gpt-6-luna", 272_001) - (0.054_400_2 + 0.75)).abs() < 1e-9);
-        // The cached and cache-write rows of those tiers.
+        for (spec, input, expected) in [
+            // gpt-6.1-sol: over 272K prompt tokens, 4.00 in / 15.00 out.
+            ("openai/gpt-6.1-sol", 272_000, 0.544 + 10.0),
+            ("openai/gpt-6.1-sol", 272_001, 1.088_004 + 15.0),
+            // gpt-6-astra: 10 / 50 up to 272K, then 20 in / 75 out.
+            ("openai/gpt-6-astra", 272_000, 2.72 + 50.0),
+            ("openai/gpt-6-astra", 272_001, 5.440_02 + 75.0),
+            // gpt-6-luna: 0.10 / 0.50 up to 272K, then 0.20 in / 0.75 out.
+            ("openai/gpt-6-luna", 272_000, 0.0272 + 0.5),
+            ("openai/gpt-6-luna", 272_001, 0.054_400_2 + 0.75),
+            // Haiku 5.5: over 100,000 prompt tokens, 0.50 in / 2.50 out.
+            ("anthropic/claude-haiku-5-5", 100_000, 0.01 + 0.5),
+            ("anthropic/claude-haiku-5-5", 100_001, 0.050_000_5 + 2.5),
+            // xAI: a prompt reaching 200K tokens doubles every price.
+            ("xai/grok-4.7", 199_999, 0.399_998 + 6.0),
+            ("xai/grok-4.7", 200_000, 0.8 + 12.0),
+        ] {
+            let cost = lookup(spec).unwrap().cost_usd(&usage(input));
+            assert!(close(cost, expected), "{spec} at {input}: {cost}");
+        }
         for (spec, cached, write) in [
             ("openai/gpt-6-astra", 2.0, 25.0),
             ("openai/gpt-6-luna", 0.02, 0.25),
         ] {
             let long = lookup(spec).unwrap().long_context.unwrap();
             assert_eq!(long.threshold_tokens, 272_001, "{spec}");
-            assert!(
-                (long.price_cached_in_per_mtok - cached).abs() < 1e-9,
-                "{spec}"
-            );
-            assert!(
-                (long.price_cache_write_per_mtok - write).abs() < 1e-9,
-                "{spec}"
-            );
+            assert!(close(long.price_cached_in_per_mtok, cached), "{spec}");
+            assert!(close(long.price_cache_write_per_mtok, write), "{spec}");
         }
-        // Haiku 5.5: over 100,000 prompt tokens, 0.50 in / 2.50 out.
-        assert!((cost("anthropic/claude-haiku-5-5", 100_000) - (0.01 + 0.5)).abs() < 1e-9);
-        assert!((cost("anthropic/claude-haiku-5-5", 100_001) - (0.050_000_5 + 2.5)).abs() < 1e-9);
-        // xAI: a prompt reaching 200K tokens doubles every price.
-        assert!((cost("xai/grok-4.7", 199_999) - (0.399_998 + 6.0)).abs() < 1e-9);
-        assert!((cost("xai/grok-4.7", 200_000) - (0.8 + 12.0)).abs() < 1e-9);
         // Sonnet 5.5 has 1M context at standard prices.
         assert!(
             lookup("anthropic/claude-sonnet-5-5")
@@ -549,57 +561,51 @@ mod tests {
 
     #[test]
     fn resolves_defaults() {
-        assert_eq!(
-            choice(None, None),
-            ("openai".into(), "gpt-6.1-sol".into(), true)
-        );
-        assert_eq!(
-            choice(Some("anthropic"), None),
-            ("anthropic".into(), "claude-sonnet-5-5".into(), true)
-        );
-        assert_eq!(
-            choice(Some("xai"), Some("  ")),
-            ("xai".into(), "grok-4.7".into(), true)
-        );
+        assert_resolves(&[
+            (None, None, ("openai", "gpt-6.1-sol", true)),
+            (
+                Some("anthropic"),
+                None,
+                ("anthropic", "claude-sonnet-5-5", true),
+            ),
+            (Some("xai"), Some("  "), ("xai", "grok-4.7", true)),
+        ]);
     }
 
     #[test]
     fn resolves_specs_and_bare_ids() {
-        assert_eq!(
-            choice(None, Some("xai/grok-4.7")),
-            ("xai".into(), "grok-4.7".into(), true)
-        );
-        // Retired ids still resolve (the provider decides), just without prices.
-        assert_eq!(
-            choice(None, Some("xai/grok-4")),
-            ("xai".into(), "grok-4".into(), false)
-        );
-        assert_eq!(
-            choice(None, Some("claude-haiku-4-5")),
-            ("anthropic".into(), "claude-haiku-4-5".into(), true)
-        );
-        // Unlisted models are allowed, placed by prefix or by --provider, without prices.
-        assert_eq!(
-            choice(None, Some("claude-next")),
-            ("anthropic".into(), "claude-next".into(), false)
-        );
-        assert_eq!(
-            choice(None, Some("o3")),
-            ("openai".into(), "o3".into(), false)
-        );
-        assert_eq!(
-            choice(Some("xai"), Some("my-finetune")),
-            ("xai".into(), "my-finetune".into(), false)
-        );
-        assert_eq!(
-            choice(Some("anthropic"), Some("anthropic/claude-sonnet-4-6")),
-            ("anthropic".into(), "claude-sonnet-4-6".into(), true)
-        );
-        // A removed model still resolves, unpriced.
-        assert_eq!(
-            choice(None, Some("anthropic/claude-sonnet-4-5")),
-            ("anthropic".into(), "claude-sonnet-4-5".into(), false)
-        );
+        // Retired and unlisted ids still resolve (the provider decides), placed by prefix or by
+        // --provider, just without prices.
+        assert_resolves(&[
+            (None, Some("xai/grok-4.7"), ("xai", "grok-4.7", true)),
+            (None, Some("xai/grok-4"), ("xai", "grok-4", false)),
+            (
+                None,
+                Some("claude-haiku-4-5"),
+                ("anthropic", "claude-haiku-4-5", true),
+            ),
+            (
+                None,
+                Some("claude-next"),
+                ("anthropic", "claude-next", false),
+            ),
+            (None, Some("o3"), ("openai", "o3", false)),
+            (
+                Some("xai"),
+                Some("my-finetune"),
+                ("xai", "my-finetune", false),
+            ),
+            (
+                Some("anthropic"),
+                Some("anthropic/claude-sonnet-4-6"),
+                ("anthropic", "claude-sonnet-4-6", true),
+            ),
+            (
+                None,
+                Some("anthropic/claude-sonnet-4-5"),
+                ("anthropic", "claude-sonnet-4-5", false),
+            ),
+        ]);
     }
 
     #[test]
@@ -642,14 +648,12 @@ mod tests {
         for model in models_for(CLAUDE_CLI_ID) {
             assert!(!model.is_metered(), "{}", model.id);
         }
-        // Aliases resolve to the CLI provider; any other id works there too, still unpriced.
         let choice = resolve(None, Some("opus")).unwrap();
         assert_eq!(choice.spec(), "claude-cli/opus");
         let choice = resolve(Some(CLAUDE_CLI_ID), None).unwrap();
         assert_eq!(choice.spec(), "claude-cli/sonnet");
         let choice = resolve(Some(CLAUDE_CLI_ID), Some("claude-opus-5-5")).unwrap();
         assert!(choice.info.is_some_and(|info| !info.is_metered()));
-        // ...while the HTTP provider keeps the same id priced.
         assert!(lookup("anthropic/claude-opus-4-5").is_none_or(|m| m.is_metered()));
     }
 

@@ -259,18 +259,35 @@ mod tests {
             map("mcp__rozu__shell", json!({})),
             PermissionRequest::RozuTool(name) if name == "shell"
         ));
-        assert_eq!(
-            risk_of(&map("Read", json!({"file_path": "src/main.rs"}))),
-            Some(Risk::Read)
-        );
-        assert!(matches!(
-            map("Read", json!({"file_path": "/etc/passwd"})),
-            PermissionRequest::AskAlways(_)
-        ));
-        assert!(matches!(
-            map("Glob", json!({"pattern": "../**/*.rs"})),
-            PermissionRequest::AskAlways(_)
-        ));
+        for (tool, input, risk) in [
+            ("Read", json!({"file_path": "src/main.rs"}), Risk::Read),
+            (
+                "Write",
+                json!({"file_path": "a.txt", "content": "x"}),
+                Risk::WriteWorkspace,
+            ),
+            (
+                "Edit",
+                json!({"file_path": "/etc/hosts", "old_string": "a", "new_string": "b"}),
+                Risk::WriteOutside,
+            ),
+            (
+                "WebFetch",
+                json!({"url": "https://example.com"}),
+                Risk::Network,
+            ),
+        ] {
+            assert_eq!(risk_of(&map(tool, input)), Some(risk), "{tool}");
+        }
+        for (tool, input) in [
+            ("Read", json!({"file_path": "/etc/passwd"})),
+            ("Glob", json!({"pattern": "../**/*.rs"})),
+        ] {
+            assert!(
+                matches!(map(tool, input), PermissionRequest::AskAlways(_)),
+                "{tool}"
+            );
+        }
         // Claude's own Bash would run unsandboxed: always denied, in favor of rozu's shell.
         for command in ["ls", "rm -rf build", "python3 -c 'import os'"] {
             assert!(matches!(
@@ -278,21 +295,6 @@ mod tests {
                 PermissionRequest::Deny { reason, .. } if reason.contains("mcp__rozu__shell")
             ));
         }
-        assert_eq!(
-            risk_of(&map("Write", json!({"file_path": "a.txt", "content": "x"}))),
-            Some(Risk::WriteWorkspace)
-        );
-        assert_eq!(
-            risk_of(&map(
-                "Edit",
-                json!({"file_path": "/etc/hosts", "old_string": "a", "new_string": "b"})
-            )),
-            Some(Risk::WriteOutside)
-        );
-        assert_eq!(
-            risk_of(&map("WebFetch", json!({"url": "https://example.com"}))),
-            Some(Risk::Network)
-        );
     }
 
     #[test]

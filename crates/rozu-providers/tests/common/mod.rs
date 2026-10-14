@@ -1,5 +1,3 @@
-//! Helpers shared by the provider integration tests.
-
 // Each test binary uses a different subset.
 #![allow(dead_code)]
 
@@ -54,11 +52,18 @@ pub async fn collect(
         .await
 }
 
+pub async fn stream_err(provider: &dyn Provider, req: ChatRequest) -> ProviderError {
+    provider
+        .stream(req, CancellationToken::new())
+        .await
+        .err()
+        .unwrap()
+}
+
 pub fn body(request: &Request) -> Value {
     serde_json::from_slice(&request.body).unwrap()
 }
 
-/// A fake tool that looks up a fixed value.
 pub struct Lookup;
 
 #[async_trait]
@@ -83,7 +88,6 @@ impl Tool for Lookup {
     }
 }
 
-/// An agent with only the [`Lookup`] tool, in a throwaway workspace.
 pub struct AgentHarness {
     _dir: tempfile::TempDir,
     pub agent: Agent,
@@ -109,10 +113,24 @@ impl AgentHarness {
     }
 
     pub async fn run(&mut self, input: &str) -> (Result<TurnOutcome, AgentError>, Vec<AgentEvent>) {
+        self.run_with(input, false).await
+    }
+
+    /// With `cancel_on_text`, cancels the turn as soon as the first text delta arrives.
+    pub async fn run_with(
+        &mut self,
+        input: &str,
+        cancel_on_text: bool,
+    ) -> (Result<TurnOutcome, AgentError>, Vec<AgentEvent>) {
         let (tx, mut rx) = mpsc::channel(64);
+        let cancel = CancellationToken::new();
+        let consumer_cancel = cancel.clone();
         let consumer = async move {
             let mut seen = Vec::new();
             while let Some(event) = rx.recv().await {
+                if cancel_on_text && matches!(event, AgentEvent::TextDelta(_)) {
+                    consumer_cancel.cancel();
+                }
                 seen.push(event);
             }
             seen
@@ -120,7 +138,7 @@ impl AgentHarness {
         let turn = async {
             let result = self
                 .agent
-                .run_turn(input, &mut self.session, &tx, CancellationToken::new())
+                .run_turn(input, &mut self.session, &tx, cancel)
                 .await;
             drop(tx);
             result

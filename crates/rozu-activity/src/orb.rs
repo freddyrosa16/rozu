@@ -283,6 +283,7 @@ mod tests {
     use super::*;
     use crate::generate::MAX_DOTS;
     use crate::state::ActivityState::*;
+    use std::fmt::Debug;
 
     fn close(a: &Sample, b: &Sample) -> bool {
         a.p.iter().zip(b.p).all(|(x, y)| (x - y).abs() < 1e-9)
@@ -291,6 +292,12 @@ mod tests {
             && (a.a - b.a).abs() < 1e-9
             && a.tone == b.tone
             && a.dim == b.dim
+    }
+
+    fn assert_close(got: &[Sample], want: &[Sample], ctx: impl Debug) {
+        for (a, b) in got.iter().zip(want) {
+            assert!(close(a, b), "{ctx:?}: {a:?} vs {b:?}");
+        }
     }
 
     fn target(state: ActivityState, tin: f64) -> Vec<Sample> {
@@ -306,46 +313,33 @@ mod tests {
         for (to, tone) in [(Done, Tone::Success), (Error, Tone::Danger)] {
             let mut orb = Orb::new(Waiting, 0.0);
             orb.set_state(to, 3.0);
-            // At the change: Waiting's own dots, already in the new tone.
             for (a, b) in orb.sample(3.0).iter().zip(target(Waiting, 3.0)) {
                 assert_eq!(a.p, b.p, "{to:?}");
                 assert_eq!(a.tone, tone);
             }
-            // Settled: the full bright globe.
             let full: Vec<Sample> = (0..MAX_DOTS)
                 .map(|i| Sample::from_dot(breath(OrbSize::Large, i, 1.0), to))
                 .collect();
             let t = 3.0 + SETTLE + 0.01;
             assert!(orb.is_settled(t));
-            for (a, b) in orb.sample(t).iter().zip(&full) {
-                assert!(close(a, b), "{to:?}: {a:?} vs {b:?}");
-            }
-            // The next morph starts from the full globe.
+            assert_close(&orb.sample(t), &full, to);
             orb.set_state(Thinking, 6.0);
-            for (a, b) in orb.sample(6.0).iter().zip(&full) {
-                assert!(close(a, b), "{to:?}: {a:?} vs {b:?}");
-            }
-            // Reduced motion: the still frame is that full globe too.
+            assert_close(&orb.sample(6.0), &full, to);
+
             let mut orb = Orb::new(Waiting, 0.0);
             orb.set_reduced_motion(true);
             orb.set_state(to, 3.0);
-            for (a, b) in orb.sample(4.0).iter().zip(&full) {
-                assert!(close(a, b), "{to:?}: {a:?} vs {b:?}");
-            }
+            assert_close(&orb.sample(4.0), &full, to);
         }
-        // From anything else, Done and Error morph in as usual.
         let mut orb = Orb::new(Running, 0.0);
         orb.set_state(Error, 3.0);
         let t = 3.0 + MORPH_END + 0.01;
-        for (a, b) in orb.sample(t).iter().zip(target(Error, t - 3.0)) {
-            assert!(close(a, &b));
-        }
+        assert_close(&orb.sample(t), &target(Error, t - 3.0), Error);
     }
 
     #[test]
     fn first_state_is_the_generator() {
-        let orb = Orb::new(Thinking, 0.0);
-        let s = orb.sample(0.4);
+        let s = Orb::new(Thinking, 0.0).sample(0.4);
         assert_eq!(s.len(), MAX_DOTS);
         assert_eq!(s, target(Thinking, 0.4));
     }
@@ -354,12 +348,8 @@ mod tests {
     fn morph_starts_at_the_previous_state() {
         let mut orb = Orb::new(Reading, 0.0);
         orb.set_state(Running, 2.0);
-        let s = orb.sample(2.0);
-        let from = target(Reading, 2.0);
-        for (a, b) in s.iter().zip(&from) {
-            // q = 0 at the change: same position, the pulse hasn't started (sin 0).
-            assert!(close(a, b), "{a:?} vs {b:?}");
-        }
+        // q = 0 at the change and the pulse is sin 0.
+        assert_close(&orb.sample(2.0), &target(Reading, 2.0), Running);
     }
 
     #[test]
@@ -373,10 +363,7 @@ mod tests {
             let mut orb = Orb::new(from, 0.0);
             orb.set_state(to, 3.0);
             let t = 3.0 + MORPH_END + 0.01;
-            let s = orb.sample(t);
-            for (a, b) in s.iter().zip(target(to, t - 3.0)) {
-                assert!(close(a, &b), "{from:?}→{to:?}: {a:?} vs {b:?}");
-            }
+            assert_close(&orb.sample(t), &target(to, t - 3.0), (from, to));
         }
     }
 
@@ -396,8 +383,7 @@ mod tests {
     fn pulse_peaks_then_decays_by_150ms() {
         let mut orb = Orb::new(Reading, 0.0);
         orb.set_state(Searching, 5.0);
-        // Dot 0 is about a fifth of the way through its morph at 75ms, and the pulse is at its
-        // .8 peak on top of that.
+        // Dot 0 is about a fifth of the way through its morph at 75ms, with the .8 pulse peak on top.
         let base = generate(OrbSize::Large, Reading, 0, 5.075).lit;
         let peak = orb.sample(5.075)[0].lit;
         assert!(
@@ -422,34 +408,26 @@ mod tests {
         orb.set_state(Running, 1.0);
         let before = orb.sample(1.3);
         orb.set_state(Done, 1.3);
-        let after = orb.sample(1.3);
-        for (a, b) in before.iter().zip(&after) {
-            assert!(close(a, b), "jump at interrupt: {a:?} vs {b:?}");
-        }
+        assert_close(&before, &orb.sample(1.3), "jump at interrupt");
     }
 
     #[test]
     fn segments_are_pruned() {
         let mut orb = Orb::new(Thinking, 0.0);
-        for (k, s) in ActivityState::ALL
-            .iter()
-            .cycle()
-            .skip(1)
-            .take(40)
-            .enumerate()
-        {
-            orb.set_state(*s, k as f64 * 2.0);
-        }
+        let cycle = |orb: &mut Orb, start: f64, step: f64| {
+            for (k, s) in ActivityState::ALL
+                .iter()
+                .cycle()
+                .skip(1)
+                .take(40)
+                .enumerate()
+            {
+                orb.set_state(*s, start + k as f64 * step);
+            }
+        };
+        cycle(&mut orb, 0.0, 2.0);
         assert!(orb.segments.len() <= 2);
-        for (k, s) in ActivityState::ALL
-            .iter()
-            .cycle()
-            .skip(1)
-            .take(40)
-            .enumerate()
-        {
-            orb.set_state(*s, 100.0 + k as f64 * 0.01);
-        }
+        cycle(&mut orb, 100.0, 0.01);
         assert!(orb.segments.len() <= MAX_SEGMENTS);
     }
 

@@ -1,200 +1,66 @@
-//! `GrokSession` (ACP) against a fake `grok` binary that follows scripted ACP exchanges. No
-//! real Grok Build CLI is run.
-
 #![cfg(unix)]
 
-use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+mod common;
+
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use futures::StreamExt;
+use common::{
+    Fake, HeldUser, approvals, assert_mcp_record_joins, cancel_after, collect, next, request,
+    run_agent_turn, socket_gate, start, start_err,
+};
 use rozu_cli_providers::grok::install::grok_version;
 use rozu_cli_providers::{EpochReason, GrokConfig, GrokSession};
 use rozu_core::{
-    Agent, AgentConfig, AgentEvent, ApprovalGate, ApprovalMode, ApprovalPolicy, ApprovalRecord,
-    ApprovalRequest, ApprovalResolution, AuditLog, ChatRequest, Decision, DecisionSource, Message,
-    ModelInfo, PendingApproval, Provider, ProviderError, ReadOnlyGate, SandboxMode, Session,
-    StopReason, StreamEvent, ToolExecutor, TurnOutcome, Usage,
+    AgentEvent, ApprovalGate, ApprovalMode, ApprovalRequest, ApprovalResolution, Decision,
+    DecisionSource, Message, ModelInfo, PendingApproval, ProviderError, ReadOnlyGate, SandboxMode,
+    StopReason, StreamEvent, TurnOutcome, Usage,
 };
-use rozu_mcp::SocketGate;
-use rozu_tools::{NoSandbox, Risk, ToolRegistry, Workspace};
-use serde_json::{Value, json};
-use tokio::sync::mpsc;
+use rozu_tools::Risk;
+use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
-const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/grok");
-
-/// The fake grok, its script, log directory and a workspace.
-struct Fake {
-    dir: tempfile::TempDir,
+fn fake(scripts: &[&str]) -> Fake {
+    Fake::scripted("grok", scripts)
 }
 
-impl Fake {
-    /// The fake agent follows `scripts` (fixture names), concatenated.
-    fn new(scripts: &[&str]) -> Self {
-        let dir = tempfile::tempdir().unwrap();
-        for sub in ["log", "workspace"] {
-            std::fs::create_dir(dir.path().join(sub)).unwrap();
-        }
-        std::fs::write(dir.path().join("workspace/README.md"), "# demo\n").unwrap();
-        let bin = dir.path().join("grok");
-        std::fs::copy(Path::new(FIXTURES).join("fake_grok.sh"), &bin).unwrap();
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let script: String = scripts
-            .iter()
-            .map(|name| std::fs::read_to_string(Path::new(FIXTURES).join(name)).unwrap())
-            .collect();
-        std::fs::write(dir.path().join("script.txt"), script).unwrap();
-        Self { dir }
-    }
-
-    fn path(&self, rel: &str) -> PathBuf {
-        self.dir.path().join(rel)
-    }
-
-    fn workspace(&self) -> Workspace {
-        Workspace::new(self.path("workspace")).unwrap()
-    }
-
-    fn exec(&self, gate: Arc<dyn ApprovalGate>) -> ToolExecutor {
-        let audit = AuditLog::open(self.path("approvals.jsonl"), "s-test").unwrap();
-        ToolExecutor::new(
-            Arc::new(ToolRegistry::standard()),
-            gate,
-            Arc::new(ApprovalPolicy::new(ApprovalMode::AutoWorkspace)),
-            Arc::new(NoSandbox),
-        )
-        .with_audit(Some(Arc::new(audit)))
-        .with_provider(Some("grok".into()))
-    }
-
-    fn config(&self) -> GrokConfig {
-        self.config_with_gate(Arc::new(ReadOnlyGate))
-    }
-
-    fn config_with_gate(&self, gate: Arc<dyn ApprovalGate>) -> GrokConfig {
-        let mut config = GrokConfig::new(
-            self.path("grok"),
-            self.workspace(),
-            "/opt/rozu/bin/rozu",
-            vec![
-                "mcp-serve".into(),
-                "--session-id".into(),
-                "s-test".into(),
-                "--provider".into(),
-                "grok".into(),
-            ],
-            self.exec(gate),
-        );
-        config.env = vec![
-            (
-                "FAKE_GROK_SCRIPT".into(),
-                self.path("script.txt").display().to_string(),
-            ),
-            (
-                "FAKE_GROK_LOG".into(),
-                self.path("log").display().to_string(),
-            ),
-            // Inherited from a user's shell: must never reach Grok.
-            ("XAI_API_KEY".into(), "xai-should-not-pass".into()),
-        ];
-        config.cancel_grace = Duration::from_secs(5);
-        config.handshake_timeout = Duration::from_secs(10);
-        config
-    }
-
-    fn provider(&self) -> GrokSession {
-        GrokSession::new(self.config()).unwrap()
-    }
-
-    /// argv of each agent start.
-    fn starts(&self) -> Vec<Vec<String>> {
-        std::fs::read_to_string(self.path("log/args.txt"))
-            .unwrap_or_default()
-            .split("--\n")
-            .filter(|s| !s.is_empty())
-            .map(|s| s.lines().map(str::to_owned).collect())
-            .collect()
-    }
-
-    /// Everything rozu wrote to the agent.
-    fn sent(&self) -> Vec<Value> {
-        std::fs::read_to_string(self.path("log/stdin.jsonl"))
-            .unwrap_or_default()
-            .lines()
-            .map(|l| serde_json::from_str(l).unwrap())
-            .collect()
-    }
-
-    fn sent_method(&self, method: &str) -> Vec<Value> {
-        self.sent()
-            .into_iter()
-            .filter(|m| m["method"] == method)
-            .collect()
-    }
-
-    /// rozu's answer to the agent request `id`.
-    fn reply(&self, id: &str) -> Value {
-        self.sent()
-            .into_iter()
-            .find(|m| m["id"] == id && m.get("method").is_none())
-            .unwrap_or_else(|| panic!("no reply to {id}: {:?}", self.sent()))
-    }
-
-    fn audit(&self) -> Vec<Value> {
-        std::fs::read_to_string(self.path("approvals.jsonl"))
-            .unwrap_or_default()
-            .lines()
-            .map(|l| serde_json::from_str(l).unwrap())
-            .collect()
-    }
+fn config(fake: &Fake) -> GrokConfig {
+    config_with_gate(fake, Arc::new(ReadOnlyGate))
 }
 
-fn request(model: &str, messages: Vec<Message>) -> ChatRequest {
-    ChatRequest {
-        model: model.into(),
-        messages,
-        tools: Vec::new(),
-        max_output_tokens: None,
-    }
+fn config_with_gate(fake: &Fake, gate: Arc<dyn ApprovalGate>) -> GrokConfig {
+    let mut config = GrokConfig::new(
+        fake.binary(),
+        fake.workspace(),
+        "/opt/rozu/bin/rozu",
+        vec![
+            "mcp-serve".into(),
+            "--session-id".into(),
+            "s-test".into(),
+            "--provider".into(),
+            "grok".into(),
+        ],
+        fake.exec(gate, ApprovalMode::AutoWorkspace),
+    );
+    config.env = fake.env("FAKE_GROK");
+    // Inherited from a user's shell: must never reach Grok.
+    config
+        .env
+        .push(("XAI_API_KEY".into(), "xai-should-not-pass".into()));
+    config.cancel_grace = Duration::from_secs(5);
+    config.handshake_timeout = Duration::from_secs(10);
+    config
 }
 
-async fn collect(
-    provider: &GrokSession,
-    req: ChatRequest,
-) -> (Vec<StreamEvent>, Option<ProviderError>) {
-    let mut stream = match provider.stream(req, CancellationToken::new()).await {
-        Ok(stream) => stream,
-        Err(err) => return (Vec::new(), Some(err)),
-    };
-    let mut events = Vec::new();
-    while let Some(item) = tokio::time::timeout(Duration::from_secs(10), stream.next())
-        .await
-        .unwrap()
-    {
-        match item {
-            Ok(event) => events.push(event),
-            Err(err) => return (events, Some(err)),
-        }
-    }
-    (events, None)
-}
-
-fn approvals(events: &[StreamEvent]) -> Vec<&ApprovalRecord> {
-    events
-        .iter()
-        .filter_map(|e| match e {
-            StreamEvent::Approval(record) => Some(record),
-            _ => None,
-        })
-        .collect()
+fn provider(fake: &Fake) -> GrokSession {
+    GrokSession::new(config(fake)).unwrap()
 }
 
 #[tokio::test]
 async fn handshake_and_text_turn() {
-    let fake = Fake::new(&["handshake.script", "text_turn.script"]);
-    let provider = fake.provider();
+    let fake = fake(&["handshake.script", "text_turn.script"]);
+    let provider = provider(&fake);
 
     let (events, err) = collect(
         &provider,
@@ -222,7 +88,7 @@ async fn handshake_and_text_turn() {
         ]
     );
 
-    // The native binary with the agent profile, no model flag for `default`.
+    // No model flag for `default`.
     let starts = fake.starts();
     assert_eq!(starts.len(), 1);
     let profile = provider.profile_path().display().to_string();
@@ -236,19 +102,17 @@ async fn handshake_and_text_turn() {
             "stdio"
         ]
     );
-    let written = std::fs::read_to_string(fake.path("log/profile.md")).unwrap();
+    let written = fake.read("log/profile.md");
     assert!(written.contains("\ntools: use_tool\n"), "{written}");
-    // No API key, no chat proxy; the workspace is the working directory.
-    let env = std::fs::read_to_string(fake.path("log/env.txt")).unwrap();
+    let env = fake.read("log/env.txt");
     assert!(env.contains("XAI_API_KEY=unset"), "{env}");
     assert!(env.contains("GROK_CLI_CHAT_PROXY_BASE_URL=unset"), "{env}");
-    let cwd = std::fs::read_to_string(fake.path("log/cwd.txt")).unwrap();
+    let cwd = fake.read("log/cwd.txt");
     assert_eq!(
         Path::new(cwd.trim()),
         std::fs::canonicalize(fake.path("workspace")).unwrap()
     );
 
-    // initialize: no fs, no terminal; only the cached login is used.
     let init = &fake.sent_method("initialize")[0];
     assert_eq!(init["jsonrpc"], "2.0");
     assert_eq!(
@@ -259,7 +123,6 @@ async fn handshake_and_text_turn() {
     assert_eq!(auth.len(), 1);
     assert_eq!(auth[0]["params"], json!({"methodId": "cached_token"}));
 
-    // session/new: rozu's MCP server is the only toolset, the profile is the override.
     let new = &fake.sent_method("session/new")[0]["params"];
     let servers = new["mcpServers"].as_array().unwrap();
     assert_eq!(servers.len(), 1);
@@ -287,8 +150,8 @@ async fn handshake_and_text_turn() {
 
 #[tokio::test]
 async fn follow_up_turns_reuse_the_session() {
-    let fake = Fake::new(&["handshake.script", "text_turn.script", "second_turn.script"]);
-    let provider = fake.provider();
+    let fake = fake(&["handshake.script", "text_turn.script", "second_turn.script"]);
+    let provider = provider(&fake);
     let (_, err) = collect(&provider, request("default", vec![Message::user("one")])).await;
     assert_eq!(err, None);
     let (events, err) = collect(
@@ -314,7 +177,6 @@ async fn follow_up_turns_reuse_the_session() {
             cache_write_tokens: 0,
         })
     );
-    // One process, one session; only the new message is sent (Grok has the rest).
     assert_eq!(fake.starts().len(), 1);
     assert_eq!(fake.sent_method("session/new").len(), 1);
     let prompts = fake.sent_method("session/prompt");
@@ -323,8 +185,8 @@ async fn follow_up_turns_reuse_the_session() {
 
 #[tokio::test]
 async fn epoch_rotation_keeps_the_process_and_opens_a_new_session() {
-    let fake = Fake::new(&["handshake.script", "text_turn.script", "new_epoch.script"]);
-    let provider = fake.provider();
+    let fake = fake(&["handshake.script", "text_turn.script", "new_epoch.script"]);
+    let provider = provider(&fake);
     let (_, err) = collect(&provider, request("default", vec![Message::user("one")])).await;
     assert_eq!(err, None);
     assert_eq!(provider.session_id().await.as_deref(), Some("sess-0001"));
@@ -357,7 +219,6 @@ async fn epoch_rotation_keeps_the_process_and_opens_a_new_session() {
         .as_str()
         .unwrap();
     assert!(system.starts_with("You are rozu (refreshed)."), "{system}");
-    // The new session gets rozu's (rewritten) history.
     let prompt = &fake.sent_method("session/prompt")[1]["params"];
     assert_eq!(prompt["sessionId"], "sess-0002");
     let text = prompt["prompt"][0]["text"].as_str().unwrap();
@@ -371,12 +232,11 @@ async fn epoch_rotation_keeps_the_process_and_opens_a_new_session() {
 
 #[tokio::test]
 async fn use_tool_calls_reach_rozus_mcp_and_only_they_are_approved() {
-    let fake = Fake::new(&["handshake.script", "tool_turn.script"]);
-    let provider = fake.provider();
+    let fake = fake(&["handshake.script", "tool_turn.script"]);
+    let provider = provider(&fake);
     let (events, err) = collect(&provider, request("default", vec![Message::user("read")])).await;
     assert_eq!(err, None);
 
-    // use_tool → rozu__read_file shows as rozu's read_file, with its result.
     assert_eq!(
         events[..3],
         [
@@ -405,17 +265,15 @@ async fn use_tool_calls_reach_rozus_mcp_and_only_they_are_approved() {
     }));
     assert!(events.contains(&StreamEvent::TextDelta("The README says demo.".into())));
 
-    // Permission for rozu's MCP tool: approved once (never "always"), delegated.
+    // rozu's MCP tool: approved once (never "always"), delegated.
     assert_eq!(
         fake.reply("perm-1")["result"],
         json!({"outcome": {"outcome": "selected", "optionId": "allow-once"}})
     );
-    // Grok's own shell: denied by default.
     assert_eq!(
         fake.reply("perm-2")["result"],
         json!({"outcome": {"outcome": "selected", "optionId": "reject-once"}})
     );
-    // A file-system request: refused.
     assert_eq!(fake.reply("fs-1")["error"]["code"], -32601);
 
     let records = approvals(&events);
@@ -436,7 +294,6 @@ async fn use_tool_calls_reach_rozus_mcp_and_only_they_are_approved() {
     assert_eq!(audit[1]["decision"], "deny");
     assert_eq!(audit[2]["tool"], "grok:fs/read_text_file");
 
-    // rozu answered all of Grok's requests itself: no prompt was ever open.
     assert!(
         !events.iter().any(|e| matches!(
             e,
@@ -446,36 +303,16 @@ async fn use_tool_calls_reach_rozus_mcp_and_only_they_are_approved() {
     );
 }
 
-/// Approves each question once released.
-#[derive(Default)]
-struct HeldUser {
-    release: tokio::sync::Notify,
-}
-
-#[async_trait::async_trait]
-impl ApprovalGate for HeldUser {
-    async fn decide(&self, _req: ApprovalRequest) -> Decision {
-        self.release.notified().await;
-        Decision::Approve
-    }
-}
-
 #[tokio::test]
 async fn prompts_from_rozu_mcp_serve_are_reported_while_open() {
-    let fake = Fake::new(&["handshake.script", "cancel.script"]);
-    let user = Arc::new(HeldUser::default());
-    let provider = GrokSession::new(fake.config_with_gate(user.clone())).unwrap();
+    let fake = fake(&["handshake.script", "cancel.script"]);
+    let user = HeldUser::new(Decision::Approve);
+    let provider = GrokSession::new(config_with_gate(&fake, user.clone())).unwrap();
     let cancel = CancellationToken::new();
-    let mut stream = provider
-        .stream(
-            request("default", vec![Message::user("one")]),
-            cancel.clone(),
-        )
-        .await
-        .unwrap();
-    let _text = stream.next().await;
+    let mut stream = start(&provider, "default", &cancel).await;
+    let _text = next(&mut stream).await;
 
-    let gate = SocketGate::new(Some(provider.runtime_dir().join("approval.sock")));
+    let gate = socket_gate(provider.runtime_dir());
     let asking = tokio::spawn(async move {
         gate.decide(ApprovalRequest {
             call_id: "mcp-3".into(),
@@ -492,11 +329,8 @@ async fn prompts_from_rozu_mcp_serve_are_reported_while_open() {
         })
         .await
     });
-    let next = tokio::time::timeout(Duration::from_secs(10), stream.next())
-        .await
-        .unwrap();
     assert_eq!(
-        next.unwrap(),
+        next(&mut stream).await.unwrap(),
         Ok(StreamEvent::ApprovalPending(PendingApproval {
             request_id: "mcp-3".into(),
             tool: "write_file".into(),
@@ -505,11 +339,8 @@ async fn prompts_from_rozu_mcp_serve_are_reported_while_open() {
         }))
     );
     user.release.notify_one();
-    let next = tokio::time::timeout(Duration::from_secs(10), stream.next())
-        .await
-        .unwrap();
     assert_eq!(
-        next.unwrap(),
+        next(&mut stream).await.unwrap(),
         Ok(StreamEvent::ApprovalResolved {
             request_id: "mcp-3".into(),
             resolution: ApprovalResolution::Approved,
@@ -517,72 +348,28 @@ async fn prompts_from_rozu_mcp_serve_are_reported_while_open() {
     );
     assert_eq!(asking.await.unwrap(), Decision::Approve);
     cancel.cancel();
-    let _ = stream.next().await;
+    let _ = next(&mut stream).await;
 }
 
 #[tokio::test]
 async fn approval_records_from_rozu_mcp_serve_join_the_stream() {
-    let fake = Fake::new(&["handshake.script", "cancel.script"]);
-    let provider = fake.provider();
+    let fake = fake(&["handshake.script", "cancel.script"]);
+    let provider = provider(&fake);
     let cancel = CancellationToken::new();
-    let mut stream = provider
-        .stream(
-            request("default", vec![Message::user("one")]),
-            cancel.clone(),
-        )
-        .await
-        .unwrap();
-    let _text = stream.next().await;
-    // What `rozu mcp-serve --provider grok` sends when it decides a tool call.
-    let record = ApprovalRecord {
-        call_id: "mcp-1".into(),
-        tool: "shell".into(),
-        risk: Risk::Destructive,
-        preview: "$ git push --force".into(),
-        sandbox: SandboxMode::Enforced("seatbelt"),
-        network: false,
-        extra_writes: Vec::new(),
-        blocked_retry: false,
-        decision: Decision::Deny {
-            reason: "no".into(),
-        },
-        source: DecisionSource::Gate,
-    };
-    SocketGate::new(Some(provider.runtime_dir().join("approval.sock")))
-        .send_record(record.clone())
-        .await;
-    let next = tokio::time::timeout(Duration::from_secs(10), stream.next())
-        .await
-        .unwrap();
-    assert_eq!(next.unwrap(), Ok(StreamEvent::Approval(record)));
+    let mut stream = start(&provider, "default", &cancel).await;
+    let _text = next(&mut stream).await;
+    assert_mcp_record_joins(&mut stream, provider.runtime_dir(), "$ git push --force").await;
     cancel.cancel();
-    let _ = stream.next().await;
+    let _ = next(&mut stream).await;
 }
 
 #[tokio::test]
 async fn cancel_sends_session_cancel_and_keeps_process_and_session() {
-    let fake = Fake::new(&["handshake.script", "cancel.script", "second_turn.script"]);
-    let provider = fake.provider();
+    let fake = fake(&["handshake.script", "cancel.script", "second_turn.script"]);
+    let provider = provider(&fake);
     let cancel = CancellationToken::new();
-    let mut stream = provider
-        .stream(
-            request("default", vec![Message::user("one")]),
-            cancel.clone(),
-        )
-        .await
-        .unwrap();
-    let first = tokio::time::timeout(Duration::from_secs(10), stream.next())
-        .await
-        .unwrap();
-    assert_eq!(
-        first.unwrap().unwrap(),
-        StreamEvent::TextDelta("Working on it".into())
-    );
-    cancel.cancel();
-    let next = tokio::time::timeout(Duration::from_secs(10), stream.next())
-        .await
-        .unwrap();
-    assert_eq!(next.unwrap(), Err(ProviderError::Cancelled));
+    let mut stream = start(&provider, "default", &cancel).await;
+    cancel_after(&mut stream, &cancel, "Working on it").await;
     drop(stream);
 
     let cancels = fake.sent_method("session/cancel");
@@ -603,10 +390,9 @@ async fn cancel_sends_session_cancel_and_keeps_process_and_session() {
 
 #[tokio::test]
 async fn failed_cached_login_says_run_grok_login() {
-    let fake = Fake::new(&["not_logged_in.script"]);
-    let provider = fake.provider();
-    let (_, err) = collect(&provider, request("default", vec![Message::user("hi")])).await;
-    let err = err.expect("an error");
+    let fake = fake(&["not_logged_in.script"]);
+    let provider = provider(&fake);
+    let err = start_err(&provider, "default").await;
     assert!(matches!(err, ProviderError::NotLoggedIn { .. }), "{err:?}");
     assert!(err.to_string().contains("grok login"), "{err}");
     assert!(fake.sent_method("session/new").is_empty());
@@ -614,19 +400,17 @@ async fn failed_cached_login_says_run_grok_login() {
 
 #[tokio::test]
 async fn other_auth_methods_are_never_used() {
-    let fake = Fake::new(&["no_cached_login.script"]);
-    let provider = fake.provider();
-    let (_, err) = collect(&provider, request("default", vec![Message::user("hi")])).await;
-    let err = err.expect("an error");
+    let fake = fake(&["no_cached_login.script"]);
+    let provider = provider(&fake);
+    let err = start_err(&provider, "default").await;
     assert!(matches!(err, ProviderError::NotLoggedIn { .. }), "{err:?}");
-    // Neither the browser login nor an API key was picked.
     assert!(fake.sent_method("authenticate").is_empty());
 }
 
 #[tokio::test]
 async fn model_flag_is_passed_and_a_switch_restarts_grok() {
-    let fake = Fake::new(&["handshake.script", "text_turn.script"]);
-    let provider = fake.provider();
+    let fake = fake(&["handshake.script", "text_turn.script"]);
+    let provider = provider(&fake);
     let (_, err) = collect(&provider, request("grok-4.7", vec![Message::user("hi")])).await;
     assert_eq!(err, None);
     let starts = fake.starts();
@@ -660,52 +444,41 @@ async fn model_flag_is_passed_and_a_switch_restarts_grok() {
 
 #[tokio::test]
 async fn missing_binary_is_cli_not_found() {
-    let fake = Fake::new(&[]);
-    let mut config = fake.config();
+    let fake = fake(&[]);
+    let mut config = config(&fake);
     config.binary = fake.path("no-such-grok");
     let provider = GrokSession::new(config).unwrap();
-    let (_, err) = collect(&provider, request("default", vec![Message::user("hi")])).await;
-    let err = err.expect("an error");
+    let err = start_err(&provider, "default").await;
     assert!(matches!(err, ProviderError::CliNotFound { .. }), "{err:?}");
     assert!(err.to_string().contains("ROZU_GROK_BIN"), "{err}");
 }
 
 #[tokio::test]
 async fn agent_runs_a_grok_turn_without_cost() {
-    let fake = Fake::new(&["handshake.script", "text_turn.script"]);
-    let provider = Arc::new(fake.provider());
-    let config = AgentConfig::new("default")
-        .with_model_info(Some(ModelInfo::subscription("grok", "default", 500_000)));
-    let agent = Agent::new(
-        provider,
-        Arc::new(ToolRegistry::standard()),
+    let fake = fake(&["handshake.script", "text_turn.script"]);
+    let turn = run_agent_turn(
+        provider(&fake),
         fake.workspace(),
-        config,
+        ModelInfo::subscription("grok", "default", 500_000),
+        "hi",
+    )
+    .await;
+    assert_eq!(turn.outcome, TurnOutcome::Completed);
+    assert!(
+        turn.events
+            .contains(&AgentEvent::TextDelta("Hello ".into()))
     );
-    let mut session = Session::with_system_prompt("You are rozu.");
-    let (tx, mut rx) = mpsc::channel(64);
-    let outcome = agent
-        .run_turn("hi", &mut session, &tx, CancellationToken::new())
-        .await
-        .unwrap();
-    drop(tx);
-    let mut events = Vec::new();
-    while let Some(event) = rx.recv().await {
-        events.push(event);
-    }
-    assert_eq!(outcome, TurnOutcome::Completed);
-    assert!(events.contains(&AgentEvent::TextDelta("Hello ".into())));
     assert_eq!(
-        session.messages.last().unwrap(),
+        turn.session.messages.last().unwrap(),
         &Message::assistant("Hello from Grok!")
     );
-    assert_eq!(session.usage.input_tokens, 4591);
-    assert_eq!(session.usage.cache_read_tokens, 1152);
-    assert_eq!(session.last_turn.cost_usd, None);
+    assert_eq!(turn.session.usage.input_tokens, 4591);
+    assert_eq!(turn.session.usage.cache_read_tokens, 1152);
+    assert_eq!(turn.session.last_turn.cost_usd, None);
 }
 
 #[tokio::test]
 async fn version_comes_from_the_binary() {
-    let fake = Fake::new(&[]);
-    assert_eq!(grok_version(&fake.path("grok")).await.unwrap(), "1.0.52");
+    let fake = fake(&[]);
+    assert_eq!(grok_version(&fake.binary()).await.unwrap(), "1.0.52");
 }

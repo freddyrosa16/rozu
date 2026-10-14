@@ -1,13 +1,10 @@
-//! xAI through the OpenAI Responses adapter with a custom base URL, against wiremock.
-
 mod common;
 
-use common::{body, collect, fast_retry, request, sse};
+use common::{body, collect, fast_retry, request, sse, stream_err};
 use rozu_core::{Provider, ProviderError, StopReason, StreamEvent};
 use rozu_providers::{OpenAiProvider, xai};
 use secrecy::SecretString;
 use serde_json::json;
-use tokio_util::sync::CancellationToken;
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -83,11 +80,7 @@ async fn retries_429_and_types_auth_errors() {
         )
         .mount(&server)
         .await;
-    let err = provider(&server.uri())
-        .stream(request("grok-4", "hi"), CancellationToken::new())
-        .await
-        .err()
-        .unwrap();
+    let err = stream_err(&provider(&server.uri()), request("grok-4", "hi")).await;
     assert_eq!(
         err,
         ProviderError::Auth {

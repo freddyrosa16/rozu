@@ -1,18 +1,17 @@
-//! Agent loop tests against a scripted mock provider and fake tools.
+mod common;
 
-use std::collections::VecDeque;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use futures::stream::{self, StreamExt};
+use common::*;
 use rozu_core::{
     Agent, AgentConfig, AgentError, AgentEvent, ApprovalGate, ApprovalMode, ApprovalPolicy,
-    ApprovalRecord, ApprovalRequest, ApprovalResolution, ApprovalRules, Billing, ChatRequest,
-    ContentPart, Decision, DecisionSource, EventStream, LongContextPrices, Message, ModelInfo,
-    PendingApproval, PrefixRule, Provider, ProviderError, ProviderKind, ProviderResult, Role,
-    SandboxMode, Session, StopReason, StreamEvent, TurnOutcome, Usage, approvals_path,
+    ApprovalRecord, ApprovalRequest, ApprovalResolution, ApprovalRules, Billing, Decision,
+    DecisionSource, LongContextPrices, Message, ModelInfo, PendingApproval, PrefixRule,
+    ProviderError, Role, SandboxMode, Session, StopReason, StreamEvent, TurnOutcome, Usage,
+    approvals_path,
 };
 use rozu_tools::{
     AllowRule, NoSandbox, Risk, Shell, Tool, ToolCtx, ToolOutput, ToolRegistry, Workspace,
@@ -21,206 +20,52 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-// ---------------------------------------------------------------------------------------------
-// Scripted provider
-
-enum Script {
-    /// Yields these items, then ends.
-    Events(Vec<ProviderResult<StreamEvent>>),
-    /// Yields these events, then never yields again (a stalled connection).
-    Hang(Vec<StreamEvent>),
-}
-
-#[derive(Default)]
-struct ScriptedProvider {
-    scripts: Mutex<VecDeque<Script>>,
-    requests: Mutex<Vec<ChatRequest>>,
-    /// Report [`ProviderKind::AgentBackend`] (the provider runs the tools itself).
-    backend: AtomicBool,
-}
-
-impl ScriptedProvider {
-    fn new(scripts: impl IntoIterator<Item = Script>) -> Arc<Self> {
-        Arc::new(Self {
-            scripts: Mutex::new(scripts.into_iter().collect()),
-            requests: Mutex::default(),
-            backend: AtomicBool::new(false),
-        })
-    }
-
-    fn requests(&self) -> Vec<ChatRequest> {
-        self.requests.lock().unwrap().clone()
-    }
+enum Fake {
+    /// Returns its arguments as JSON text.
+    Echo,
+    Slow,
+    Big,
+    /// Records whether it ran.
+    Write(Arc<AtomicBool>),
 }
 
 #[async_trait]
-impl Provider for ScriptedProvider {
-    fn id(&self) -> &str {
-        "scripted"
-    }
-
-    fn kind(&self) -> ProviderKind {
-        if self.backend.load(Ordering::SeqCst) {
-            ProviderKind::AgentBackend
-        } else {
-            ProviderKind::Model
+impl Tool for Fake {
+    fn name(&self) -> &'static str {
+        match self {
+            Fake::Echo => "echo",
+            Fake::Slow => "slow",
+            Fake::Big => "big",
+            Fake::Write(_) => "write",
         }
     }
-
-    async fn stream(
-        &self,
-        req: ChatRequest,
-        _cancel: CancellationToken,
-    ) -> ProviderResult<EventStream> {
-        self.requests.lock().unwrap().push(req);
-        let script = self
-            .scripts
-            .lock()
-            .unwrap()
-            .pop_front()
-            .expect("provider called more often than scripted");
-        Ok(match script {
-            Script::Events(items) => stream::iter(items).boxed(),
-            Script::Hang(events) => stream::iter(events.into_iter().map(Ok))
-                .chain(stream::pending())
-                .boxed(),
-        })
-    }
-}
-
-fn ok(events: Vec<StreamEvent>) -> Script {
-    Script::Events(events.into_iter().map(Ok).collect())
-}
-
-fn text(s: &str) -> StreamEvent {
-    StreamEvent::TextDelta(s.into())
-}
-
-/// A complete tool call: start, args split into two deltas, end.
-fn tool_call(id: &str, name: &str, args: &str) -> Vec<StreamEvent> {
-    let (a, b) = args.split_at(args.len() / 2);
-    vec![
-        StreamEvent::ToolCallStart {
-            id: id.into(),
-            name: name.into(),
-        },
-        StreamEvent::ToolCallArgsDelta {
-            id: id.into(),
-            json: a.into(),
-        },
-        StreamEvent::ToolCallArgsDelta {
-            id: id.into(),
-            json: b.into(),
-        },
-        StreamEvent::ToolCallEnd { id: id.into() },
-    ]
-}
-
-fn tool_step(calls: &[(&str, &str, &str)]) -> Script {
-    let mut events: Vec<_> = calls
-        .iter()
-        .flat_map(|(id, name, args)| tool_call(id, name, args))
-        .collect();
-    events.push(StreamEvent::Done(StopReason::ToolUse));
-    ok(events)
-}
-
-// ---------------------------------------------------------------------------------------------
-// Fake tools
-
-/// Returns its arguments as JSON text.
-struct Echo;
-
-#[async_trait]
-impl Tool for Echo {
-    fn name(&self) -> &'static str {
-        "echo"
-    }
     fn description(&self) -> &'static str {
-        "Echo the arguments"
+        "fake"
     }
     fn schema(&self) -> Value {
         json!({"type": "object"})
     }
     fn risk(&self, _: &Value, _: &ToolCtx) -> Risk {
-        Risk::Read
+        match self {
+            Fake::Write(_) => Risk::WriteWorkspace,
+            _ => Risk::Read,
+        }
     }
     async fn call(&self, args: Value, _: &ToolCtx) -> ToolOutput {
-        ToolOutput::ok(args.to_string())
+        match self {
+            Fake::Echo => ToolOutput::ok(args.to_string()),
+            Fake::Slow => {
+                tokio::time::sleep(Duration::from_secs(3600)).await;
+                ToolOutput::ok("woke up")
+            }
+            Fake::Big => ToolOutput::ok(format!("HEAD{}TAIL", "x".repeat(100_000))),
+            Fake::Write(ran) => {
+                ran.store(true, Ordering::SeqCst);
+                ToolOutput::ok("wrote")
+            }
+        }
     }
 }
-
-/// Never finishes on its own.
-struct Slow;
-
-#[async_trait]
-impl Tool for Slow {
-    fn name(&self) -> &'static str {
-        "slow"
-    }
-    fn description(&self) -> &'static str {
-        "Sleep for an hour"
-    }
-    fn schema(&self) -> Value {
-        json!({"type": "object"})
-    }
-    fn risk(&self, _: &Value, _: &ToolCtx) -> Risk {
-        Risk::Read
-    }
-    async fn call(&self, _: Value, _: &ToolCtx) -> ToolOutput {
-        tokio::time::sleep(Duration::from_secs(3600)).await;
-        ToolOutput::ok("woke up")
-    }
-}
-
-/// Returns 100 KB of output.
-struct Big;
-
-#[async_trait]
-impl Tool for Big {
-    fn name(&self) -> &'static str {
-        "big"
-    }
-    fn description(&self) -> &'static str {
-        "Produce a lot of output"
-    }
-    fn schema(&self) -> Value {
-        json!({"type": "object"})
-    }
-    fn risk(&self, _: &Value, _: &ToolCtx) -> Risk {
-        Risk::Read
-    }
-    async fn call(&self, _: Value, _: &ToolCtx) -> ToolOutput {
-        ToolOutput::ok(format!("HEAD{}TAIL", "x".repeat(100_000)))
-    }
-}
-
-/// A write tool that records whether it ran.
-#[derive(Default)]
-struct Write(Arc<AtomicBool>);
-
-#[async_trait]
-impl Tool for Write {
-    fn name(&self) -> &'static str {
-        "write"
-    }
-    fn description(&self) -> &'static str {
-        "Write something"
-    }
-    fn schema(&self) -> Value {
-        json!({"type": "object"})
-    }
-    fn risk(&self, _: &Value, _: &ToolCtx) -> Risk {
-        Risk::WriteWorkspace
-    }
-    async fn call(&self, _: Value, _: &ToolCtx) -> ToolOutput {
-        self.0.store(true, Ordering::SeqCst);
-        ToolOutput::ok("wrote")
-    }
-}
-
-// ---------------------------------------------------------------------------------------------
-// Harness
 
 struct Harness {
     dir: tempfile::TempDir,
@@ -251,9 +96,9 @@ impl Harness {
         let dir = tempfile::tempdir().unwrap();
         let provider = ScriptedProvider::new(scripts);
         let mut tools = ToolRegistry::new();
-        tools.register(Echo);
-        tools.register(Slow);
-        tools.register(Big);
+        tools.register(Fake::Echo);
+        tools.register(Fake::Slow);
+        tools.register(Fake::Big);
         register(&mut tools);
         let mut config = AgentConfig::new("test-model");
         configure(&mut config);
@@ -271,32 +116,12 @@ impl Harness {
         }
     }
 
-    /// Runs a turn, calling `on_event` for each event (with the turn's cancel token).
     async fn run_with(
         &mut self,
         input: &str,
-        mut on_event: impl FnMut(&AgentEvent, &CancellationToken),
+        on_event: impl FnMut(&AgentEvent, &CancellationToken),
     ) -> (Result<TurnOutcome, AgentError>, Vec<AgentEvent>) {
-        let (tx, mut rx) = mpsc::channel(16);
-        let cancel = CancellationToken::new();
-        let consumer_cancel = cancel.clone();
-        let consumer = async move {
-            let mut seen = Vec::new();
-            while let Some(event) = rx.recv().await {
-                on_event(&event, &consumer_cancel);
-                seen.push(event);
-            }
-            seen
-        };
-        let turn = async {
-            let result = self
-                .agent
-                .run_turn(input, &mut self.session, &tx, cancel)
-                .await;
-            drop(tx);
-            result
-        };
-        tokio::join!(turn, consumer)
+        run_turn(&self.agent, &mut self.session, input, on_event).await
     }
 
     async fn run(&mut self, input: &str) -> (Result<TurnOutcome, AgentError>, Vec<AgentEvent>) {
@@ -308,33 +133,76 @@ impl Harness {
     }
 
     fn tool_results(&self) -> Vec<(String, String, bool)> {
-        self.session
-            .messages
-            .iter()
-            .flat_map(|m| &m.content)
-            .filter_map(|part| match part {
-                ContentPart::ToolResult {
-                    call_id,
-                    output,
-                    is_error,
-                } => Some((call_id.clone(), output.clone(), *is_error)),
-                _ => None,
-            })
-            .collect()
+        tool_results(&self.session)
+    }
+
+    fn last_cost(&self) -> f64 {
+        self.session.last_turn.cost_usd.unwrap()
     }
 }
 
-// ---------------------------------------------------------------------------------------------
-// Tests
+fn shell_harness(steps: Vec<Script>, mode: ApprovalMode, gate: Arc<ScriptedGate>) -> Harness {
+    Harness::build(
+        steps,
+        |_| {},
+        |tools| tools.register(Shell),
+        |agent| {
+            let policy = ApprovalPolicy::for_project(mode, agent.workspace().root()).unwrap();
+            // No OS sandbox, so the test behaves the same on every platform.
+            agent
+                .with_approval_policy(Arc::new(policy))
+                .with_approval_gate(gate)
+                .with_sandbox(Arc::new(NoSandbox))
+        },
+    )
+}
+
+fn prompts(events: &[AgentEvent]) -> Vec<AgentEvent> {
+    events
+        .iter()
+        .filter(|e| {
+            matches!(
+                e,
+                AgentEvent::ApprovalPending(_) | AgentEvent::ApprovalResolved { .. }
+            )
+        })
+        .cloned()
+        .collect()
+}
+
+fn usage(input: u64, output: u64, read: u64, write: u64) -> Usage {
+    Usage {
+        input_tokens: input,
+        output_tokens: output,
+        cache_read_tokens: read,
+        cache_write_tokens: write,
+    }
+}
+
+fn metered(price_in: f64, price_out: f64, price_read: f64, price_write: f64) -> ModelInfo {
+    ModelInfo {
+        id: "test-model".into(),
+        provider: "test".into(),
+        context_window: 1_000_000,
+        supports_tools: true,
+        price_in_per_mtok: price_in,
+        price_out_per_mtok: price_out,
+        price_cached_in_per_mtok: price_read,
+        price_cache_write_per_mtok: price_write,
+        long_context: None,
+        billing: Billing::Metered,
+        caps: Default::default(),
+    }
+}
+
+#[track_caller]
+fn assert_close(actual: f64, expected: f64) {
+    assert!((actual - expected).abs() < 1e-9, "{actual} != {expected}");
+}
 
 #[tokio::test]
 async fn plain_text_turn_completes() {
-    let usage = Usage {
-        input_tokens: 10,
-        output_tokens: 2,
-        cache_read_tokens: 0,
-        cache_write_tokens: 0,
-    };
+    let usage = usage(10, 2, 0, 0);
     let mut h = Harness::new([ok(vec![
         text("Hel"),
         text("lo"),
@@ -368,134 +236,84 @@ async fn plain_text_turn_completes() {
 
 #[tokio::test]
 async fn usage_and_cost_aggregate_per_turn() {
-    let usage = |input, output, read, write| {
-        StreamEvent::Usage(Usage {
-            input_tokens: input,
-            output_tokens: output,
-            cache_read_tokens: read,
-            cache_write_tokens: write,
-        })
+    let step = |u| {
+        ok(vec![
+            StreamEvent::Usage(u),
+            StreamEvent::Done(StopReason::EndTurn),
+        ])
     };
-    let done = StreamEvent::Done(StopReason::EndTurn);
     let mut h = Harness::with_config(
         [
             tool_step(&[("call_1", "echo", r#"{"path":"a"}"#)]),
-            ok(vec![usage(1_000_000, 0, 0, 0), done.clone()]),
-            ok(vec![usage(1_000_000, 100_000, 1_000_000, 0), done.clone()]),
-            ok(vec![usage(1_000_000, 0, 0, 1_000_000), done.clone()]),
+            step(usage(1_000_000, 0, 0, 0)),
+            step(usage(1_000_000, 100_000, 1_000_000, 0)),
+            step(usage(1_000_000, 0, 0, 1_000_000)),
         ],
-        |config| {
-            config.model_info = Some(ModelInfo {
-                id: "test-model".into(),
-                provider: "test".into(),
-                context_window: 1_000_000,
-                supports_tools: true,
-                price_in_per_mtok: 2.0,
-                price_out_per_mtok: 10.0,
-                price_cached_in_per_mtok: 0.5,
-                price_cache_write_per_mtok: 2.5,
-                long_context: None,
-                billing: Billing::Metered,
-                caps: Default::default(),
-            });
-        },
+        |config| config.model_info = Some(metered(2.0, 10.0, 0.5, 2.5)),
         |_| {},
     );
 
-    // Turn 1: a tool step (no usage reported) then 1M uncached input tokens.
+    // A tool step without usage, then 1M uncached input.
     h.run("first").await.0.unwrap();
     assert_eq!(h.session.last_turn.usage.input_tokens, 1_000_000);
-    assert!((h.session.last_turn.cost_usd.unwrap() - 2.0).abs() < 1e-9);
+    assert_close(h.last_cost(), 2.0);
 
-    // Turn 2: 1M cached input + 100k output = 0.5 + 1.0.
+    // 1M cached input + 100k output = 0.5 + 1.0.
     h.run("second").await.0.unwrap();
-    let last = h.session.last_turn;
     assert_eq!(
-        last.usage,
-        Usage {
-            input_tokens: 1_000_000,
-            output_tokens: 100_000,
-            cache_read_tokens: 1_000_000,
-            cache_write_tokens: 0
-        }
+        h.session.last_turn.usage,
+        usage(1_000_000, 100_000, 1_000_000, 0)
     );
-    assert!((last.cost_usd.unwrap() - 1.5).abs() < 1e-9);
+    assert_close(h.last_cost(), 1.5);
     assert_eq!(h.session.usage.input_tokens, 2_000_000);
-    assert!((h.session.cost_usd - 3.5).abs() < 1e-9);
+    assert_close(h.session.cost_usd, 3.5);
 
-    // Turn 3: 1M input written to the cache, at the cache-write price.
     h.run("third").await.0.unwrap();
     assert_eq!(h.session.last_turn.usage.cache_write_tokens, 1_000_000);
-    assert!((h.session.last_turn.cost_usd.unwrap() - 2.5).abs() < 1e-9);
+    assert_close(h.last_cost(), 2.5);
     assert_eq!(h.session.usage.cache_read_tokens, 1_000_000);
-    assert!((h.session.cost_usd - 6.0).abs() < 1e-9);
+    assert_close(h.session.cost_usd, 6.0);
 }
 
 #[tokio::test]
 async fn long_context_tier_applies_per_response_not_per_turn() {
-    let usage = |input| {
-        StreamEvent::Usage(Usage {
-            input_tokens: input,
-            output_tokens: 0,
-            cache_read_tokens: 0,
-            cache_write_tokens: 0,
-        })
-    };
-    let mut tool = vec![usage(150_000)];
+    let input = |n| StreamEvent::Usage(usage(n, 0, 0, 0));
+    let mut tool = vec![input(150_000)];
     tool.extend(tool_call("call_1", "echo", r#"{"path":"a"}"#));
     tool.push(StreamEvent::Done(StopReason::ToolUse));
     let mut h = Harness::with_config(
         [
             ok(tool),
-            ok(vec![usage(150_000), StreamEvent::Done(StopReason::EndTurn)]),
-            ok(vec![usage(250_000), StreamEvent::Done(StopReason::EndTurn)]),
+            ok(vec![input(150_000), StreamEvent::Done(StopReason::EndTurn)]),
+            ok(vec![input(250_000), StreamEvent::Done(StopReason::EndTurn)]),
         ],
         |config| {
-            config.model_info = Some(
-                ModelInfo {
-                    id: "test-model".into(),
-                    provider: "test".into(),
-                    context_window: 1_000_000,
-                    supports_tools: true,
-                    price_in_per_mtok: 1.0,
-                    price_out_per_mtok: 1.0,
-                    price_cached_in_per_mtok: 1.0,
-                    price_cache_write_per_mtok: 1.0,
-                    long_context: None,
-                    billing: Billing::Metered,
-                    caps: Default::default(),
-                }
-                .with_long_context(LongContextPrices {
+            config.model_info = Some(metered(1.0, 1.0, 1.0, 1.0).with_long_context(
+                LongContextPrices {
                     threshold_tokens: 200_000,
                     price_in_per_mtok: 2.0,
                     price_out_per_mtok: 2.0,
                     price_cached_in_per_mtok: 2.0,
                     price_cache_write_per_mtok: 2.0,
-                }),
-            );
+                },
+            ));
         },
         |_| {},
     );
 
-    // Two 150k-token requests: 300k tokens in the turn, but neither request is long.
+    // 300k tokens in the turn, but neither 150k request is long.
     h.run("first").await.0.unwrap();
     assert_eq!(h.session.last_turn.usage.input_tokens, 300_000);
-    assert!((h.session.last_turn.cost_usd.unwrap() - 0.3).abs() < 1e-9);
+    assert_close(h.last_cost(), 0.3);
 
-    // One 250k-token request: every token at the long-context price.
     h.run("second").await.0.unwrap();
-    assert!((h.session.last_turn.cost_usd.unwrap() - 0.5).abs() < 1e-9);
+    assert_close(h.last_cost(), 0.5);
 }
 
 #[tokio::test]
 async fn unknown_prices_leave_cost_empty() {
     let mut h = Harness::new([ok(vec![
-        StreamEvent::Usage(Usage {
-            input_tokens: 5,
-            output_tokens: 1,
-            cache_read_tokens: 0,
-            cache_write_tokens: 0,
-        }),
+        StreamEvent::Usage(usage(5, 1, 0, 0)),
         StreamEvent::Done(StopReason::EndTurn),
     ])]);
     h.run("hi").await.0.unwrap();
@@ -506,10 +324,8 @@ async fn unknown_prices_leave_cost_empty() {
 
 #[tokio::test]
 async fn tool_call_round_trip() {
-    let mut h = Harness::new([
-        tool_step(&[("call_1", "echo", r#"{"path":"README.md"}"#)]),
-        ok(vec![text("done"), StreamEvent::Done(StopReason::EndTurn)]),
-    ]);
+    let args = r#"{"path":"README.md"}"#;
+    let mut h = Harness::new([tool_step(&[("call_1", "echo", args)]), reply("done")]);
 
     let (result, events) = h.run("read it").await;
 
@@ -517,29 +333,25 @@ async fn tool_call_round_trip() {
     assert!(events.contains(&AgentEvent::ToolCallStarted {
         id: "call_1".into(),
         name: "echo".into(),
-        args_json: r#"{"path":"README.md"}"#.into(),
+        args_json: args.into(),
     }));
     assert!(events.contains(&AgentEvent::ToolCallFinished {
         id: "call_1".into(),
         name: "echo".into(),
-        output: r#"{"path":"README.md"}"#.into(),
+        output: args.into(),
         is_error: false,
     }));
 
-    // user, assistant tool call, tool result, assistant answer (after the system prompt).
+    // user, assistant tool call, tool result, assistant answer.
     let msgs = &h.session.messages[1..];
     assert_eq!(msgs.len(), 4);
     assert_eq!(
         msgs[1].tool_calls().collect::<Vec<_>>(),
-        [("call_1", "echo", r#"{"path":"README.md"}"#)]
+        [("call_1", "echo", args)]
     );
-    assert_eq!(
-        msgs[2],
-        Message::tool_result("call_1", r#"{"path":"README.md"}"#, false)
-    );
+    assert_eq!(msgs[2], Message::tool_result("call_1", args, false));
     assert_eq!(msgs[3].text_content(), "done");
 
-    // The second request carries the tool result back to the model.
     let requests = h.provider.requests();
     assert_eq!(requests.len(), 2);
     assert_eq!(requests[1].messages.last(), Some(&msgs[2]));
@@ -553,7 +365,7 @@ async fn bad_tool_calls_become_error_results() {
             ("c2", "echo", "{not json"),
             ("c3", "echo", ""),
         ]),
-        ok(vec![text("ok"), StreamEvent::Done(StopReason::EndTurn)]),
+        reply("ok"),
     ]);
 
     let (result, _) = h.run("go").await;
@@ -563,7 +375,6 @@ async fn bad_tool_calls_become_error_results() {
     assert_eq!(results.len(), 3);
     assert!(results[0].2 && results[0].1.contains("unknown tool: nope"));
     assert!(results[1].2 && results[1].1.contains("invalid JSON"));
-    // Empty arguments are treated as `{}`.
     assert_eq!(results[2], ("c3".into(), "{}".into(), false));
 }
 
@@ -576,7 +387,6 @@ async fn stops_at_max_steps() {
 
     assert_eq!(result.unwrap(), TurnOutcome::MaxSteps);
     assert_eq!(h.provider.requests().len(), 3);
-    // Every call still got its result.
     assert_eq!(h.tool_results().len(), 3);
     assert_eq!(
         events.last(),
@@ -629,10 +439,7 @@ async fn cancel_during_tool_still_answers_every_call() {
 #[tokio::test]
 async fn tool_timeout_is_reported() {
     let mut h = Harness::with_config(
-        [
-            tool_step(&[("c1", "slow", "{}")]),
-            ok(vec![StreamEvent::Done(StopReason::EndTurn)]),
-        ],
+        [tool_step(&[("c1", "slow", "{}")]), done()],
         |c| c.tool_timeout = Duration::from_millis(20),
         |_| {},
     );
@@ -640,17 +447,14 @@ async fn tool_timeout_is_reported() {
     let (result, _) = h.run("go").await;
 
     assert_eq!(result.unwrap(), TurnOutcome::Completed);
-    let results = h.tool_results();
-    assert!(results[0].2);
-    assert!(results[0].1.contains("timed out"), "{}", results[0].1);
+    let (_, output, is_error) = &h.tool_results()[0];
+    assert!(is_error);
+    assert!(output.contains("timed out"), "{output}");
 }
 
 #[tokio::test]
 async fn large_tool_output_is_truncated() {
-    let mut h = Harness::new([
-        tool_step(&[("c1", "big", "{}")]),
-        ok(vec![StreamEvent::Done(StopReason::EndTurn)]),
-    ]);
+    let mut h = Harness::new([tool_step(&[("c1", "big", "{}")]), done()]);
 
     h.run("go").await.0.unwrap();
 
@@ -664,12 +468,9 @@ async fn large_tool_output_is_truncated() {
 #[tokio::test]
 async fn write_tools_are_denied_without_approval() {
     let ran = Arc::new(AtomicBool::new(false));
-    let tool = Write(ran.clone());
+    let tool = Fake::Write(ran.clone());
     let mut h = Harness::with_config(
-        [
-            tool_step(&[("c1", "write", "{}")]),
-            ok(vec![StreamEvent::Done(StopReason::EndTurn)]),
-        ],
+        [tool_step(&[("c1", "write", "{}")]), done()],
         |_| {},
         move |tools| tools.register(tool),
     );
@@ -684,32 +485,13 @@ async fn write_tools_are_denied_without_approval() {
     assert!(prompts(&events).is_empty(), "{events:?}");
 }
 
-/// The approval-prompt events of a turn, in order.
-fn prompts(events: &[AgentEvent]) -> Vec<AgentEvent> {
-    events
-        .iter()
-        .filter(|e| {
-            matches!(
-                e,
-                AgentEvent::ApprovalPending(_) | AgentEvent::ApprovalResolved { .. }
-            )
-        })
-        .cloned()
-        .collect()
-}
-
 #[tokio::test]
 async fn approval_prompts_are_reported_while_open() {
     for (decision, resolution) in [
         (Decision::Approve, ApprovalResolution::Approved),
-        (
-            Decision::Deny {
-                reason: "no".into(),
-            },
-            ApprovalResolution::Denied,
-        ),
+        (deny("no"), ApprovalResolution::Denied),
     ] {
-        let gate = ScriptedGate::new(decision);
+        let gate = ScriptedGate::always(decision);
         let mut h = shell_harness(
             vec![
                 tool_step(&[("c1", "shell", r#"{"command":"touch made"}"#)]),
@@ -737,7 +519,6 @@ async fn approval_prompts_are_reported_while_open() {
                 },
             ]
         );
-        // Started → pending → resolved → decision record → finished.
         let position = |pred: &dyn Fn(&AgentEvent) -> bool| events.iter().position(pred).unwrap();
         let order = [
             position(&|e| matches!(e, AgentEvent::ToolCallStarted { .. })),
@@ -752,9 +533,7 @@ async fn approval_prompts_are_reported_while_open() {
 
 #[tokio::test]
 async fn auto_decisions_open_no_prompt() {
-    let gate = ScriptedGate::new(Decision::Deny {
-        reason: "should not be asked".into(),
-    });
+    let gate = ScriptedGate::always(deny("should not be asked"));
     let mut h = shell_harness(
         vec![
             tool_step(&[
@@ -851,66 +630,9 @@ async fn agent_backend_prompts_are_forwarded() {
     );
 }
 
-/// Answers every prompt with a fixed decision and records what it was asked.
-struct ScriptedGate {
-    decision: Decision,
-    asked: Mutex<Vec<ApprovalRequest>>,
-}
-
-impl ScriptedGate {
-    fn new(decision: Decision) -> Arc<Self> {
-        Arc::new(Self {
-            decision,
-            asked: Mutex::default(),
-        })
-    }
-
-    fn asked(&self) -> Vec<ApprovalRequest> {
-        self.asked.lock().unwrap().clone()
-    }
-}
-
-#[async_trait]
-impl ApprovalGate for ScriptedGate {
-    async fn decide(&self, req: ApprovalRequest) -> Decision {
-        self.asked.lock().unwrap().push(req);
-        self.decision.clone()
-    }
-}
-
-fn approvals(events: &[AgentEvent]) -> Vec<ApprovalRecord> {
-    events
-        .iter()
-        .filter_map(|e| match e {
-            AgentEvent::Approval(record) => Some(record.clone()),
-            _ => None,
-        })
-        .collect()
-}
-
-fn shell_harness(steps: Vec<Script>, mode: ApprovalMode, gate: Arc<ScriptedGate>) -> Harness {
-    Harness::build(
-        steps,
-        |_| {},
-        |tools| tools.register(Shell),
-        |agent| {
-            let policy = ApprovalPolicy::for_project(mode, agent.workspace().root()).unwrap();
-            // No OS sandbox, so the test behaves the same on every platform.
-            agent
-                .with_approval_policy(Arc::new(policy))
-                .with_approval_gate(gate)
-                .with_sandbox(Arc::new(NoSandbox))
-        },
-    )
-}
-
-fn done() -> Script {
-    ok(vec![StreamEvent::Done(StopReason::EndTurn)])
-}
-
 #[tokio::test]
 async fn every_decision_is_logged_as_an_event() {
-    let gate = ScriptedGate::new(Decision::Approve);
+    let gate = ScriptedGate::always(Decision::Approve);
     let mut h = shell_harness(
         vec![
             tool_step(&[
@@ -941,9 +663,7 @@ async fn every_decision_is_logged_as_an_event() {
 
 #[tokio::test]
 async fn destructive_commands_prompt_even_in_full_access() {
-    let gate = ScriptedGate::new(Decision::Deny {
-        reason: "not on my machine".into(),
-    });
+    let gate = ScriptedGate::always(deny("not on my machine"));
     let mut h = shell_harness(
         vec![
             tool_step(&[("c1", "shell", r#"{"command":"touch keep && rm -rf keep"}"#)]),
@@ -960,20 +680,16 @@ async fn destructive_commands_prompt_even_in_full_access() {
     assert_eq!(asked[0].risk, Risk::Destructive);
     assert_eq!(asked[0].preview, "$ touch keep && rm -rf keep");
     assert_eq!(asked[0].allow_rule, None);
-    // The reason goes back to the model, and the command never ran.
     let (_, output, is_error) = &h.tool_results()[0];
     assert!(is_error);
     assert_eq!(output, "denied: not on my machine");
     assert!(!h.dir.path().join("keep").exists());
-    let records = approvals(&events);
-    assert_eq!(records[0].source, DecisionSource::Gate);
+    assert_eq!(approvals(&events)[0].source, DecisionSource::Gate);
 }
 
 #[tokio::test]
 async fn network_commands_prompt_in_auto_mode() {
-    let gate = ScriptedGate::new(Decision::Deny {
-        reason: "no".into(),
-    });
+    let gate = ScriptedGate::always(deny("no"));
     let mut h = shell_harness(
         vec![
             tool_step(&[
@@ -988,8 +704,7 @@ async fn network_commands_prompt_in_auto_mode() {
 
     h.run("go").await.0.unwrap();
 
-    // Without an OS sandbox even the workspace write asks (with one it would run on its own;
-    // see the policy's unit tests); the network call asks either way.
+    // Without an OS sandbox even the workspace write asks (with one it would run on its own).
     let asked = gate.asked();
     assert_eq!(asked.len(), 2);
     assert_eq!(
@@ -998,7 +713,6 @@ async fn network_commands_prompt_in_auto_mode() {
     );
     assert_eq!(asked[1].risk, Risk::Network);
     assert!(asked[1].network, "the prompt says the network would be on");
-    // "Always allow" for a network client names its host.
     assert_eq!(
         asked[1].allow_rule,
         Some(AllowRule::with_host("curl", "example.com"))
@@ -1007,10 +721,9 @@ async fn network_commands_prompt_in_auto_mode() {
 
 #[tokio::test]
 async fn always_allow_is_persisted_and_reused() {
-    let gate = ScriptedGate::new(Decision::AlwaysAllowPrefix);
+    let gate = ScriptedGate::always(Decision::AlwaysAllowPrefix);
     let mut h = shell_harness(
         vec![
-            // Unsandboxed (NoSandbox), so these workspace writes ask in auto mode.
             tool_step(&[("c1", "shell", r#"{"command":"touch one.txt"}"#)]),
             tool_step(&[("c2", "shell", r#"{"command":"touch two.txt"}"#)]),
             done(),
@@ -1021,7 +734,6 @@ async fn always_allow_is_persisted_and_reused() {
 
     let (_, events) = h.run("go").await;
 
-    // Only the first call prompted; the rule covered the second.
     assert_eq!(gate.asked().len(), 1);
     let records = approvals(&events);
     assert_eq!(records[0].decision, Decision::AlwaysAllowPrefix);
@@ -1046,7 +758,7 @@ async fn always_allow_is_persisted_and_reused() {
 
 #[tokio::test]
 async fn invalid_calls_are_rejected_before_approval() {
-    let gate = ScriptedGate::new(Decision::Approve);
+    let gate = ScriptedGate::always(Decision::Approve);
     let mut h = shell_harness(
         vec![
             tool_step(&[("c1", "shell", r#"{"command":"ls","cwd":"../.."}"#)]),
@@ -1105,12 +817,11 @@ async fn already_cancelled_turn_does_not_call_provider() {
         Workspace::new(dir.path()).unwrap(),
         AgentConfig::new("m"),
     );
-    let mut session = Session::new();
     let (tx, _rx) = mpsc::channel(4);
     let cancel = CancellationToken::new();
     cancel.cancel();
 
-    let outcome = agent.run_turn("hi", &mut session, &tx, cancel).await;
+    let outcome = agent.run_turn("hi", &mut Session::new(), &tx, cancel).await;
 
     assert_eq!(outcome.unwrap(), TurnOutcome::Cancelled);
     assert!(provider.requests().is_empty());
@@ -1118,12 +829,7 @@ async fn already_cancelled_turn_does_not_call_provider() {
 
 #[tokio::test]
 async fn agent_backend_turn_forwards_tool_events_without_executing() {
-    let usage = Usage {
-        input_tokens: 1_000,
-        output_tokens: 20,
-        cache_read_tokens: 600,
-        cache_write_tokens: 300,
-    };
+    let usage = usage(1_000, 20, 600, 300);
     let record = ApprovalRecord {
         call_id: "mcp-1".into(),
         tool: "write".into(),
@@ -1150,7 +856,7 @@ async fn agent_backend_turn_forwards_tool_events_without_executing() {
         StreamEvent::Done(StopReason::EndTurn),
     ]);
     let wrote = Arc::new(AtomicBool::new(false));
-    let tool = Write(wrote.clone());
+    let tool = Fake::Write(wrote.clone());
     let mut h = Harness::with_config(
         [ok(events)],
         |config| {
@@ -1188,7 +894,6 @@ async fn agent_backend_turn_forwards_tool_events_without_executing() {
             AgentEvent::TurnFinished(TurnOutcome::Completed),
         ]
     );
-    // One request for the whole turn, no tools offered, and only the text kept in the session.
     let requests = h.provider.requests();
     assert_eq!(requests.len(), 1);
     assert!(requests[0].tools.is_empty());

@@ -468,6 +468,14 @@ mod tests {
         .unwrap()
     }
 
+    fn drain(rx: &mpsc::Receiver<Vec<u8>>) -> String {
+        let mut seen = Vec::new();
+        while let Ok(chunk) = rx.recv_timeout(WAIT) {
+            seen.extend(chunk);
+        }
+        String::from_utf8_lossy(&seen).into_owned()
+    }
+
     #[test]
     fn version_is_semver() {
         assert_eq!(VERSION.split('.').count(), 3);
@@ -532,15 +540,8 @@ mod tests {
         session
             .write(b"echo stream-test; sleep 0.5; exit\n")
             .unwrap();
-        let mut seen = Vec::new();
-        while let Ok(chunk) = rx.recv_timeout(WAIT) {
-            seen.extend(chunk);
-        }
-        assert!(
-            String::from_utf8_lossy(&seen).contains("stream-test"),
-            "{}",
-            String::from_utf8_lossy(&seen)
-        );
+        let seen = drain(&rx);
+        assert!(seen.contains("stream-test"), "{seen}");
     }
 
     #[test]
@@ -550,11 +551,7 @@ mod tests {
             ["-c", "echo first-bytes; sleep 0.5"],
         ))
         .unwrap();
-        let mut seen = Vec::new();
-        while let Ok(chunk) = rx.recv_timeout(WAIT) {
-            seen.extend(chunk);
-        }
-        assert!(String::from_utf8_lossy(&seen).contains("first-bytes"));
+        assert!(drain(&rx).contains("first-bytes"));
     }
 
     #[test]

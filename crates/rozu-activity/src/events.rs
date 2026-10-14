@@ -527,6 +527,27 @@ mod tests {
         }
     }
 
+    fn pending(id: &str) -> ActivityEvent {
+        ActivityEvent::ApprovalPending {
+            call_id: id.into(),
+            tool: "shell".into(),
+        }
+    }
+
+    fn resolved(id: &str, outcome: ApprovalOutcome) -> ActivityEvent {
+        ActivityEvent::ApprovalResolved {
+            call_id: id.into(),
+            outcome,
+        }
+    }
+
+    fn decided(approved: bool) -> ActivityEvent {
+        ActivityEvent::ApprovalDecided {
+            call_id: "c1".into(),
+            approved,
+        }
+    }
+
     #[test]
     fn tool_names_map_to_states() {
         for (name, state) in [
@@ -554,34 +575,37 @@ mod tests {
 
     #[test]
     fn labels_use_args() {
-        assert_eq!(
-            tool_label(Reading, r#"{"path":"README.md"}"#),
-            "Reading README.md"
-        );
-        assert_eq!(
-            tool_label(Editing, r#"{"file_path":"src/term/view.rs"}"#),
-            "Editing src/term/view.rs"
-        );
-        assert_eq!(
-            tool_label(Searching, r#"{"pattern":"set_size"}"#),
-            "Searching \"set_size\""
-        );
-        assert_eq!(
-            tool_label(Running, r#"{"command":"cargo test\necho hi"}"#),
-            "Running cargo test"
-        );
-        assert_eq!(
-            tool_label(Running, r#"{"command":["cargo","test"]}"#),
-            "Running cargo test"
-        );
-        assert_eq!(tool_label(Running, "not json"), "Running…");
-        assert_eq!(
-            tool_label(
-                Reading,
-                r#"{"path":"crates/rozu-activity/src/very/deep/module.rs"}"#
+        for (state, args, label) in [
+            (Reading, r#"{"path":"README.md"}"#, "Reading README.md"),
+            (
+                Editing,
+                r#"{"file_path":"src/term/view.rs"}"#,
+                "Editing src/term/view.rs",
             ),
-            "Reading module.rs"
-        );
+            (
+                Searching,
+                r#"{"pattern":"set_size"}"#,
+                "Searching \"set_size\"",
+            ),
+            (
+                Running,
+                r#"{"command":"cargo test\necho hi"}"#,
+                "Running cargo test",
+            ),
+            (
+                Running,
+                r#"{"command":["cargo","test"]}"#,
+                "Running cargo test",
+            ),
+            (Running, "not json", "Running…"),
+            (
+                Reading,
+                r#"{"path":"crates/rozu-activity/src/very/deep/module.rs"}"#,
+                "Reading module.rs",
+            ),
+        ] {
+            assert_eq!(tool_label(state, args), label, "{args}");
+        }
         let long = tool_label(
             Running,
             r#"{"command":"cargo test --workspace --all-features -- --nocapture"}"#,
@@ -600,20 +624,9 @@ mod tests {
             .unwrap();
         assert_eq!((a.state, a.label.as_str()), (Running, "Running cargo test"));
 
-        let w = t
-            .apply(&ActivityEvent::ApprovalPending {
-                call_id: "c1".into(),
-                tool: "shell".into(),
-            })
-            .unwrap();
+        let w = t.apply(&pending("c1")).unwrap();
         assert_eq!((w.state, w.hint), (Waiting, Some("Y / N")));
-        let back = t
-            .apply(&ActivityEvent::ApprovalDecided {
-                call_id: "c1".into(),
-                approved: true,
-            })
-            .unwrap();
-        assert_eq!(back.state, Running);
+        assert_eq!(t.apply(&decided(true)).unwrap().state, Running);
 
         let e = t.apply(&finished("shell", true)).unwrap();
         assert_eq!(
@@ -636,34 +649,13 @@ mod tests {
     fn denied_calls_are_not_errors() {
         let mut t = ActivityTracker::new();
         t.apply(&started("shell", r#"{"command":"rm -rf target"}"#));
-        t.apply(&ActivityEvent::ApprovalPending {
-            call_id: "c1".into(),
-            tool: "shell".into(),
-        });
-        t.apply(&ActivityEvent::ApprovalDecided {
-            call_id: "c1".into(),
-            approved: false,
-        });
+        t.apply(&pending("c1"));
+        t.apply(&decided(false));
         assert_eq!(t.apply(&finished("shell", true)).unwrap().state, Thinking);
-    }
-
-    fn pending(id: &str) -> ActivityEvent {
-        ActivityEvent::ApprovalPending {
-            call_id: id.into(),
-            tool: "shell".into(),
-        }
-    }
-
-    fn resolved(id: &str, outcome: ApprovalOutcome) -> ActivityEvent {
-        ActivityEvent::ApprovalResolved {
-            call_id: id.into(),
-            outcome,
-        }
     }
 
     #[test]
     fn approval_pending_waits_and_resolved_goes_back() {
-        // During a tool: back to the tool.
         let mut t = ActivityTracker::new();
         t.apply(&started("shell", r#"{"command":"cargo test"}"#));
         let w = t.apply(&pending("c1")).unwrap();
@@ -676,16 +668,9 @@ mod tests {
             (back.state, back.label.as_str()),
             (Running, "Running cargo test")
         );
-        // The decision record that follows changes nothing.
-        assert!(
-            t.apply(&ActivityEvent::ApprovalDecided {
-                call_id: "c1".into(),
-                approved: true
-            })
-            .is_none()
-        );
+        assert!(t.apply(&decided(true)).is_none(), "decision record after");
 
-        // A backend's own request, with no tool started: back to what was shown before.
+        // A backend's own request, with no tool started.
         let mut t = ActivityTracker::new();
         t.apply(&ActivityEvent::TextDelta);
         let w = t.apply(&pending("x9")).unwrap();
@@ -696,7 +681,6 @@ mod tests {
                 .state,
             Thinking
         );
-        // A resolution for a prompt that isn't open is ignored.
         assert!(
             t.apply(&resolved("nope", ApprovalOutcome::Approved))
                 .is_none()
@@ -709,7 +693,6 @@ mod tests {
         t.apply(&started("shell", r#"{"command":"make"}"#));
         t.apply(&pending("a"));
         t.apply(&pending("b"));
-        // Progress while a prompt is open is remembered, not shown.
         assert!(t.apply(&ActivityEvent::TextDelta).is_none());
         assert!(t.apply(&resolved("a", ApprovalOutcome::Approved)).is_none());
         assert_eq!(t.current().unwrap().state, Waiting);
@@ -732,7 +715,6 @@ mod tests {
         t.apply(&pending("c2"));
         let d = t.apply(&ActivityEvent::TurnCompleted).unwrap();
         assert_eq!(d.state, Done);
-        // The next turn isn't stuck behind the old prompt.
         assert_eq!(t.apply(&ActivityEvent::TextDelta).unwrap().state, Thinking);
     }
 
@@ -781,16 +763,17 @@ mod tests {
         };
         let state = |e: &AgentEvent| from_agent_event(e).map(|a| a.state);
         assert_eq!(state(&AgentEvent::TextDelta("hi".into())), Some(Thinking));
-        assert_eq!(
-            state(&ev("read_file", r#"{"path":"README.md"}"#)),
-            Some(Reading)
-        );
-        assert_eq!(state(&ev("list_dir", "{}")), Some(Reading));
-        assert_eq!(state(&ev("grep", r#"{"pattern":"x"}"#)), Some(Searching));
-        assert_eq!(state(&ev("write_file", "{}")), Some(Editing));
-        assert_eq!(state(&ev("apply_patch", "{}")), Some(Editing));
-        assert_eq!(state(&ev("shell", r#"{"command":"ls"}"#)), Some(Running));
-        assert_eq!(state(&ev("TodoWrite", "{}")), Some(Editing));
+        for (name, args, want) in [
+            ("read_file", r#"{"path":"README.md"}"#, Reading),
+            ("list_dir", "{}", Reading),
+            ("grep", r#"{"pattern":"x"}"#, Searching),
+            ("write_file", "{}", Editing),
+            ("apply_patch", "{}", Editing),
+            ("shell", r#"{"command":"ls"}"#, Running),
+            ("TodoWrite", "{}", Editing),
+        ] {
+            assert_eq!(state(&ev(name, args)), Some(want), "{name}");
+        }
         assert_eq!(
             state(&AgentEvent::ToolCallFinished {
                 id: "c1".into(),

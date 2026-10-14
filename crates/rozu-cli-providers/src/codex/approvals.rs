@@ -841,16 +841,17 @@ mod tests {
 
     #[test]
     fn unwraps_codex_shell_wrappers() {
-        assert_eq!(unwrap_shell("/bin/zsh -lc 'cargo test'"), "cargo test");
-        assert_eq!(
-            unwrap_shell("bash -lc \"git push --force\""),
-            "git push --force"
-        );
-        assert_eq!(unwrap_shell("sh -c 'echo '\\''hi'\\'''"), "echo 'hi'");
-        assert_eq!(unwrap_shell("ls -la"), "ls -la");
-        // Not a single quoted word: left alone, so the classifier sees `sh -c`.
-        assert_eq!(unwrap_shell("bash -c foo bar"), "bash -c foo bar");
-        assert_eq!(unwrap_shell("python3 -c 'x'"), "python3 -c 'x'");
+        for (command, inner) in [
+            ("/bin/zsh -lc 'cargo test'", "cargo test"),
+            ("bash -lc \"git push --force\"", "git push --force"),
+            ("sh -c 'echo '\\''hi'\\'''", "echo 'hi'"),
+            ("ls -la", "ls -la"),
+            // Not a single quoted word: left alone, so the classifier sees `sh -c`.
+            ("bash -c foo bar", "bash -c foo bar"),
+            ("python3 -c 'x'", "python3 -c 'x'"),
+        ] {
+            assert_eq!(unwrap_shell(command), inner, "{command}");
+        }
     }
 
     #[test]
@@ -869,37 +870,37 @@ mod tests {
 
     #[test]
     fn decisions_are_one_time_answers() {
-        let approve = Decision::Approve;
-        let always = Decision::AlwaysAllowPrefix;
-        let unsandboxed = Decision::ApproveUnsandboxed;
-        for d in [&approve, &always, &unsandboxed] {
+        for d in [
+            Decision::Approve,
+            Decision::AlwaysAllowPrefix,
+            Decision::ApproveUnsandboxed,
+        ] {
             assert_eq!(
-                decision_reply(Protocol::V2, d, &DecisionSource::Gate),
+                decision_reply(Protocol::V2, &d, &DecisionSource::Gate),
                 json!({"decision": "accept"})
             );
             assert_eq!(
-                decision_reply(Protocol::Legacy, d, &DecisionSource::Gate),
+                decision_reply(Protocol::Legacy, &d, &DecisionSource::Gate),
                 json!({"decision": "approved"})
             );
         }
         let deny = Decision::Deny {
             reason: "no".into(),
         };
-        assert_eq!(
-            decision_reply(Protocol::V2, &deny, &DecisionSource::Gate),
-            json!({"decision": "decline"})
-        );
-        assert_eq!(
-            decision_reply(Protocol::V2, &deny, &DecisionSource::Cancelled),
-            json!({"decision": "cancel"})
-        );
-        assert_eq!(
-            decision_reply(Protocol::Legacy, &deny, &DecisionSource::Policy),
-            json!({"decision": {"denied": {"rejection": "denied by rozu: no"}}})
-        );
-        assert_eq!(
-            decision_reply(Protocol::Legacy, &deny, &DecisionSource::Cancelled),
-            json!({"decision": "abort"})
-        );
+        for (protocol, source, reply) in [
+            (Protocol::V2, DecisionSource::Gate, json!("decline")),
+            (Protocol::V2, DecisionSource::Cancelled, json!("cancel")),
+            (
+                Protocol::Legacy,
+                DecisionSource::Policy,
+                json!({"denied": {"rejection": "denied by rozu: no"}}),
+            ),
+            (Protocol::Legacy, DecisionSource::Cancelled, json!("abort")),
+        ] {
+            assert_eq!(
+                decision_reply(protocol, &deny, &source),
+                json!({ "decision": reply })
+            );
+        }
     }
 }

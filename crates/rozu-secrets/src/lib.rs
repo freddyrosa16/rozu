@@ -171,6 +171,12 @@ pub fn resolve_api_key(
 mod tests {
     use super::*;
 
+    fn store_with(key: &str) -> MemoryStore {
+        let store = MemoryStore::new();
+        store.set("openai", &SecretString::from(key)).unwrap();
+        store
+    }
+
     #[test]
     fn version_is_semver() {
         assert_eq!(VERSION.split('.').count(), 3);
@@ -203,10 +209,7 @@ mod tests {
 
     #[test]
     fn env_overrides_store() {
-        let store = MemoryStore::new();
-        store
-            .set("openai", &SecretString::from("sk-store"))
-            .unwrap();
+        let store = store_with("sk-store");
 
         let (key, source) = resolve_api_key(&store, "openai", |var| {
             (var == "OPENAI_API_KEY").then(|| "sk-env".to_owned())
@@ -231,10 +234,7 @@ mod tests {
 
     #[test]
     fn debug_never_shows_keys() {
-        let store = MemoryStore::new();
-        store
-            .set("openai", &SecretString::from("sk-verysecretvalue"))
-            .unwrap();
+        let store = store_with("sk-verysecretvalue");
         let debug = format!("{store:?} {:?}", store.get("openai").unwrap());
         assert!(!debug.contains("verysecret"), "{debug}");
     }
