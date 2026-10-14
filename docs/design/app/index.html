@@ -1,0 +1,207 @@
+<!doctype html>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>rozu App Mockup</title>
+<style>
+/* rozu desktop app mockup: near-black, flat, one sidebar, a centered chat and a quiet right rail. */
+:root{--bg:#181818;--side:#1B1B1B;--raise:#262626;--box:#1F1F1F;--line:#2E2E2E;--ink:#F2F2F2;--ink2:#BDBDBD;--ink3:#7E7E7E;
+  --ok:#4ADE80;--warn:#FBBF24;--bad:#F87171;--blue:#5B9BF0;--mono:ui-monospace,"SF Mono",Menlo,monospace;color-scheme:dark}
+*{box-sizing:border-box}[hidden]{display:none!important}
+body{margin:0;padding:16px;background:#0E0E0E;color:var(--ink);font:15px/1.6 -apple-system,BlinkMacSystemFont,"SF Pro Text",Inter,system-ui,sans-serif}
+button{font:inherit;color:inherit;background:none;border:0;cursor:pointer;text-align:left;padding:0}
+code{font:13.5px var(--mono);background:var(--raise);border-radius:5px;padding:1px 5px}
+svg.i{width:17px;height:17px;flex:none;fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}
+.win{max-width:1440px;margin:auto;height:840px;display:grid;grid:minmax(0,1fr)/270px minmax(0,1fr);border:1px solid var(--line);border-radius:12px;overflow:hidden;background:var(--bg)}
+aside{background:var(--side);border-right:1px solid var(--line);display:flex;flex-direction:column;min-height:0;padding:0 8px 8px}
+.top{display:flex;align-items:center;gap:14px;height:44px;padding:0 6px;color:var(--ink3)}
+.top i{width:12px;height:12px;border-radius:50%;background:#FF5F57;margin-right:-6px}.top i+i{background:#FEBC2E}.top i+i+i{background:#28C840;margin-right:10px}
+.sp{flex:1}
+.row{display:flex;align-items:center;gap:12px;width:100%;padding:6px 8px;border-radius:8px}
+.row:hover,.on{background:var(--raise)}
+.lbl{display:flex;align-items:center;gap:12px;color:var(--ink3);font-size:14px;padding:18px 8px 6px}.lbl span{flex:1}
+.list{overflow:auto;flex:1;min-height:0}
+.th{padding-left:6px;cursor:pointer}.th b{flex:1;font-weight:400;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.th small,.mute{color:var(--ink3);font-size:13.5px}
+canvas.orb{width:22px;height:22px;flex:none}
+.orb[data-tone=success]{filter:drop-shadow(0 0 2px var(--ok))}.orb[data-tone=warning]{filter:drop-shadow(0 0 2px var(--warn))}.orb[data-tone=danger]{filter:drop-shadow(0 0 2px var(--bad))}
+.gs{margin-top:8px;border:1px solid var(--line);border-radius:12px;padding:10px;display:grid;gap:8px;font-size:14px;color:var(--ink2);position:relative}
+.gs .pill{justify-content:center;background:var(--raise);color:var(--ink)}
+.acct{display:flex;align-items:center;gap:10px;padding:10px 4px 0}.av{width:30px;height:30px;border-radius:50%;background:var(--raise);display:grid!important;place-items:center;color:var(--ink2)}
+.acct b{flex:1;font-weight:400}.up{background:var(--blue);color:#fff;border-radius:999px;padding:3px 14px}
+.subs{position:absolute;inset:auto 0 calc(100% + 6px);background:var(--box);border:1px solid var(--line);border-radius:10px;padding:12px;display:grid;gap:6px;font-size:13px}
+.subs div{display:flex;justify-content:space-between}.subs u{text-decoration:none;color:var(--ink3);font-family:var(--mono)}
+main{display:grid;grid:44px minmax(0,1fr)/minmax(0,1fr) 220px;min-height:0}
+.tb{grid-column:1/-1;display:flex;align-items:center;gap:16px;padding:0 14px 0 10px;color:var(--ink3);font-size:14px}
+.tb .t{color:var(--ink);background:var(--raise);border-radius:8px;padding:3px 10px}
+.chat{display:flex;flex-direction:column;min-height:0;padding:0 24px 12px}
+.feed{flex:1;overflow:auto;display:flex;flex-direction:column;gap:14px;padding:10px 4px 20px}
+.me{border:1px solid var(--line);background:var(--box);border-radius:14px;padding:12px 18px}
+.feed p{margin:0}
+.step{display:flex;gap:8px;align-items:center;color:var(--ink2)}.step em{font-style:normal;color:var(--ink3)}
+.live .t{background:linear-gradient(90deg,var(--ink3),var(--ink),var(--ink3)) 0/200%;-webkit-background-clip:text;background-clip:text;color:transparent;animation:s 1.6s linear infinite}
+@keyframes s{to{background-position:-200%}}
+.add{color:var(--ok)}.del{color:var(--bad)}
+.card{border:1px solid var(--line);border-radius:12px;padding:12px 16px;display:grid;gap:10px;background:var(--box)}
+.card pre{margin:0;font:13px var(--mono);background:var(--bg);border-radius:8px;padding:8px 10px;overflow-x:auto}
+.btn{border:1px solid var(--line);border-radius:999px;padding:4px 14px;margin-right:6px;font-size:14px}.pri{background:var(--ink);color:var(--bg);border-color:var(--ink)}
+.fb{display:flex;gap:14px;align-items:center;color:var(--ink3);font-size:14px}
+.comp{border:1px solid var(--line);background:var(--box);border-radius:22px;display:flex;align-items:center;gap:12px;padding:8px 8px 8px 10px}
+.comp textarea{all:unset;flex:1;height:24px;color:var(--ink)}.comp textarea::placeholder{color:var(--ink3)}
+.plus{width:30px;height:30px;border-radius:50%;background:var(--raise);display:grid;place-items:center;color:var(--ink2)}
+.mic{width:34px;height:34px;border-radius:50%;background:var(--ink);color:var(--bg);display:grid;place-items:center}
+.pick{display:flex;align-items:center;gap:6px;color:var(--ink2);font-size:14px}.pick svg.i{width:15px}
+.under{display:flex;padding:8px 10px 0}
+.rail{padding:22px 12px;display:grid;gap:4px;align-content:start;color:var(--ink2)}.rail .row{padding:5px 8px}
+.home{grid-column:1/-1;display:grid;align-content:center;gap:14px;width:min(760px,100% - 48px);margin:auto}
+.home .comp{display:grid;grid:auto auto/auto 1fr auto;border-radius:18px;padding:14px}.home textarea{grid-column:1/-1;height:52px}
+.chips{display:flex;gap:8px}.chips .btn{color:var(--ink2)}
+.sug{display:grid;margin-top:8px}.sug .row{border-radius:0;border-bottom:1px solid var(--line);padding:12px 8px;gap:14px}.sug .row:last-child{border:0}
+.hint{text-align:center;color:var(--ink3);font-size:14px;margin-top:60px}
+:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
+@media (max-width:900px){main{grid-template-columns:1fr}.rail{display:none}}
+@media (max-width:720px){.win{height:auto;grid-template-columns:1fr}.list{max-height:300px}}
+</style>
+
+<svg width="0" height="0" style="position:absolute">
+  <symbol id="chat" viewBox="0 0 24 24"><path d="M4 4h16l-6.5 8v6l-3 2v-8z"/></symbol>
+  <symbol id="search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="m20 20-4.2-4.2"/></symbol>
+  <symbol id="bot" viewBox="0 0 24 24"><rect x="4" y="8" width="16" height="12" rx="2"/><path d="M12 8V4M9 14h.01M15 14h.01"/></symbol>
+  <symbol id="blocks" viewBox="0 0 24 24"><rect x="4" y="10" width="10" height="10" rx="1"/><rect x="15" y="4" width="5" height="5" rx="1"/><path d="M9 10V4h4"/></symbol>
+  <symbol id="plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="filter" viewBox="0 0 24 24"><path d="M4 7h16M7 12h10M10 17h4"/></symbol>
+  <symbol id="folder" viewBox="0 0 24 24"><path d="M3.5 7a2 2 0 0 1 2-2h4l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/></symbol>
+  <symbol id="fplus" viewBox="0 0 24 24"><path d="M20 12V9a2 2 0 0 0-2-2h-6.5l-2-2H5.5a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2H13M18 15v6M15 18h6"/></symbol>
+  <symbol id="home" viewBox="0 0 24 24"><path d="M4 11 12 4l8 7v8a1 1 0 0 1-1 1h-4v-6H9v6H5a1 1 0 0 1-1-1z"/></symbol>
+  <symbol id="mac" viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="10" rx="1.5"/><path d="M3 19h18"/></symbol>
+  <symbol id="side" viewBox="0 0 24 24"><rect x="3.5" y="5" width="17" height="14" rx="2.5"/><path d="M9 5v14"/></symbol>
+  <symbol id="rside" viewBox="0 0 24 24"><rect x="3.5" y="5" width="17" height="14" rx="2.5"/><path d="M15 5v14"/></symbol>
+  <symbol id="back" viewBox="0 0 24 24"><path d="M19 12H5M11 6l-6 6 6 6"/></symbol>
+  <symbol id="fwd" viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></symbol>
+  <symbol id="ext" viewBox="0 0 24 24"><path d="M7 17 17 7M8 7h9v9"/></symbol>
+  <symbol id="more" viewBox="0 0 24 24"><path d="M5 12h.01M12 12h.01M19 12h.01" stroke-width="3"/></symbol>
+  <symbol id="down" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+  <symbol id="diff" viewBox="0 0 24 24"><path d="M12 4v8M8 8h8M7 19h10"/></symbol>
+  <symbol id="globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M3.5 12h17M12 3.5c3 3.2 3 13.8 0 17M12 3.5c-3 3.2-3 13.8 0 17"/></symbol>
+  <symbol id="file" viewBox="0 0 24 24"><path d="M14 3.5H7a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8.5zM14 3.5v5h5"/></symbol>
+  <symbol id="eye" viewBox="0 0 24 24"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="2.5"/></symbol>
+  <symbol id="mic" viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21"/></symbol>
+  <symbol id="up" viewBox="0 0 24 24"><path d="M7 10v10H4V10zM7 10l4-7a2 2 0 0 1 2 2v4h5.5a2 2 0 0 1 2 2.3l-1.2 7A2 2 0 0 1 17.3 20H7"/></symbol>
+  <symbol id="copy" viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></symbol>
+  <symbol id="gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M5.3 18.7l2.1-2.1M16.6 7.4l2.1-2.1"/></symbol>
+  <symbol id="plan" viewBox="0 0 24 24"><circle cx="6" cy="7" r="2"/><circle cx="6" cy="17" r="2"/><path d="M11 7h9M11 17h9"/></symbol>
+  <symbol id="bug" viewBox="0 0 24 24"><rect x="8" y="7" width="8" height="13" rx="4"/><path d="M12 11v9M8 12H4M20 12h-4M8 17H5M19 17h-3M9 7 7 4M15 7l2-3"/></symbol>
+  <symbol id="test" viewBox="0 0 24 24"><path d="M9 3h6M10 3v6l-5 9a2 2 0 0 0 1.8 3h10.4a2 2 0 0 0 1.8-3l-5-9V3M7.5 15h9"/></symbol>
+</svg>
+
+<div class="win">
+  <aside>
+    <div class="top"><i></i><i></i><i></i><svg class="i"><use href="#side"/></svg><span class="sp"></span><svg class="i"><use href="#back"/></svg><svg class="i"><use href="#fwd"/></svg></div>
+    <nav id="nav"></nav>
+    <div class="lbl"><span>Projects</span></div>
+    <button class="row"><svg class="i"><use href="#plus"/></svg>New Project</button>
+    <div class="lbl"><span>Repositories</span><svg class="i"><use href="#filter"/></svg><svg class="i"><use href="#fplus"/></svg></div>
+    <div class="list" id="repos"></div>
+    <div class="gs"><div class="subs" id="subs" hidden></div>
+      <div style="display:flex;justify-content:space-between">Getting Started<span>2/3</span></div>
+      <button class="row pill">Connect a provider</button></div>
+    <div class="acct"><button class="av" id="me" aria-label="Subscriptions">F</button><b>Freddy Rosa</b><button class="up">Update</button><svg class="i" style="color:var(--ink3)"><use href="#gear"/></svg></div>
+  </aside>
+
+  <main id="thread">
+    <div class="tb"><span class="t" id="title">Save and resume sessions</span><span class="sp"></span>IDE <svg class="i" style="width:14px;margin-left:-12px"><use href="#ext"/></svg><svg class="i"><use href="#more"/></svg><svg class="i"><use href="#rside"/></svg></div>
+    <div class="chat">
+      <div class="feed" id="feed">
+        <div class="me">Start M4: save each session as JSONL with a SQLite index so I can close rozu and pick up where I left off.</div>
+        <div id="steps" style="display:grid;gap:6px"></div>
+        <p id="say1" hidden>Sessions now write one JSON line per event to <code>~/.rozu/sessions/</code>, and a SQLite index lists them by project and date. <code>rozu chat --resume</code> reopens the last one. I'd like to run the tests to check it.</p>
+        <div class="card" id="ask" hidden>
+          <div class="step" style="color:var(--ink)"><canvas class="orb" id="askOrb" data-state="waiting"></canvas>Run a command?</div>
+          <pre>cargo test -p rozu-store -p rozu-cli</pre>
+          <span class="mute">Runs inside the sandbox. Writes only to <code>target/</code>. No network.</span>
+          <div><button class="btn pri" id="allow">Allow once</button><button class="btn">Always allow</button><button class="btn">Deny</button></div>
+        </div>
+        <div id="run"></div>
+        <p id="say2" hidden>All 37 tests pass. Close rozu, open it again, and <code>rozu chat --resume</code> picks up this session.</p>
+        <div class="fb" id="fb" hidden><svg class="i"><use href="#up"/></svg><svg class="i" style="transform:rotate(180deg)"><use href="#up"/></svg><svg class="i"><use href="#copy"/></svg>Just now</div>
+      </div>
+      <div class="chips" style="padding-bottom:10px"><button class="btn" id="replay">Replay</button></div>
+      <div class="comp"><button class="plus" aria-label="Attach"><svg class="i"><use href="#plus"/></svg></button><textarea aria-label="Message" placeholder="Send follow-up"></textarea>
+        <span class="pick">Claude Sonnet High<svg class="i"><use href="#down"/></svg></span><button class="mic" aria-label="Voice"><svg class="i"><use href="#mic"/></svg></button></div>
+      <div class="under"><span class="pick"><svg class="i"><use href="#mac"/></svg>This Mac<svg class="i"><use href="#down"/></svg></span></div>
+    </div>
+    <div class="rail" id="rail"></div>
+  </main>
+
+  <main id="new" hidden>
+    <div class="tb"><span class="sp"></span>IDE <svg class="i" style="width:14px;margin-left:-12px"><use href="#ext"/></svg><svg class="i"><use href="#more"/></svg><svg class="i"><use href="#rside"/></svg></div>
+    <div class="home">
+      <div class="chips"><span class="pick"><svg class="i"><use href="#folder"/></svg>rozu<svg class="i"><use href="#down"/></svg></span><span class="pick" style="margin-left:14px"><svg class="i"><use href="#mac"/></svg>This Mac<svg class="i"><use href="#down"/></svg></span></div>
+      <div class="comp"><textarea aria-label="Message" placeholder="Plan, build, / for skills, @ for context"></textarea>
+        <button class="plus" aria-label="Attach"><svg class="i"><use href="#plus"/></svg></button><span class="pick">Claude Sonnet High<svg class="i"><use href="#down"/></svg></span><button class="mic" aria-label="Voice"><svg class="i"><use href="#mic"/></svg></button></div>
+      <div class="chips"><button class="btn">Plan New Idea <span class="mute">⇧Tab</span></button><button class="btn">Multitask</button></div>
+      <div class="sug" id="sug"></div>
+      <div class="hint">Voice mode lets you dictate better prompts for your agents</div>
+    </div>
+  </main>
+</div>
+
+<script src="../v7.5/reference/v7.5-orb.js"></script>
+<script>
+const $=id=>document.getElementById(id),ic=n=>`<svg class="i"><use href="#${n}"/></svg>`,orb=(s,id='')=>`<canvas class="orb" data-state="${s}"${id&&` id="${id}"`}></canvas>`;
+const rows=(a,f)=>a.map(f).join('');
+
+// Sidebar (example data). Each thread's status is its orb; queued and not-started threads use Offline (Freddy's call).
+$('nav').innerHTML=rows([['chat','New Chat'],['search','Search'],['bot','Automations'],['blocks','Customize']],([i,t])=>`<button class="row">${ic(i)}${t}</button>`);
+const REPOS=[['rozu',[['Save and resume sessions','thinking','now'],['ROZU.md memory loader','running','4m'],['Activity orbs v7.5','done','2h'],['Compaction strategy','offline','1d']]],
+  ['setupviz-web',[['Checkout page spacing','error','3d'],['Pricing table copy','done','4d']]],['setupviz-api',[['Rate limit on uploads','running','9m']]]];
+$("repos").innerHTML=rows(REPOS,([n,ts],r)=>`<button class="row">${ic('folder')}${n}</button>`+rows(ts,([t,s,m],k)=>
+  `<div class="row th${r+k?'':' on'}">${orb(s,r+k?'':'cur')}<b>${t}</b><small${r+k?'':' id="curMeta"'}>${m}</small></div>`))
+  +`<button class="row">${ic('home')}No Repo</button><div class="row mute" style="padding-left:41px">No agents yet</div>`;
+const show=th=>{$('thread').hidden=!th;$('new').hidden=!!th;document.querySelectorAll('.th,#nav .row').forEach(x=>x.classList.toggle('on',th?x==th:x==$('nav').firstChild));
+  if(th)$('title').textContent=th.querySelector('b').textContent};
+document.querySelectorAll('.th').forEach(t=>t.onclick=()=>show(t));$('nav').firstChild.onclick=()=>show();
+$('rail').innerHTML='<div class="mute" style="padding:0 8px 6px">On rozu</div>'+rows([['diff','Changes'],['eye','Preview'],['globe','Browser'],['file','Files']],([i,t])=>`<button class="row">${ic(i)}${t}</button>`);
+$('sug').innerHTML=rows([['plan','Start with a plan','Align on implementation before writing code'],['bug','Debug an issue','Find root causes and fix tricky bugs'],
+  ['test','Write tests','Cover the code you just changed'],['diff','Review my changes','Check the diff before you push']],([i,t,d])=>`<button class="row">${ic(i)}${t}<span class="mute">${d}</span></button>`);
+$('subs').innerHTML=rows([['Claude Max','34% of 5h'],['ChatGPT','12% of week'],['SuperGrok','connected']],([a,b])=>`<div>${a}<u>${b}</u></div>`);
+$('me').onclick=()=>$('subs').hidden^=1;
+
+// Orbs: the approved v7.5 motion (sample() from v7.5-orb.js), drawn with finer dots. The colored glow is a CSS
+// drop-shadow on the canvas, not a canvas shadow per dot. Colors are read once, canvases are sized once,
+// hidden ones are skipped, and Done/Error stop drawing once they have settled.
+const COL={none:'#F4F1EA'},root=getComputedStyle(document.documentElement),reduce=matchMedia('(prefers-reduced-motion:reduce)').matches;
+[['warning','--warn'],['success','--ok'],['danger','--bad']].forEach(([k,v])=>COL[k]=root.getPropertyValue(v).trim());
+function paint(c,T){
+  const o=c.dataset.state,tl=c.tl;
+  if(!tl||tl.at(-1).orb!=o){c.tl=[...(tl||[]).slice(-1),{orb:o,start:tl?T:T-3*Math.random()}];c.done=0}
+  if(c.done||!c.offsetParent)return;
+  const dpr=devicePixelRatio||1,S=22,W=S*dpr,g=c.getContext('2d'),t=reduce?STILL[o]:T,line=reduce?[{orb:o,start:0}]:c.tl;
+  if(c.width!=W)c.width=c.height=W;
+  g.setTransform(dpr,0,0,dpr,0,0);g.clearRect(0,0,S,S);
+  const pts=sample(line,t,SMALL).map(b=>({...b,z:b.p[2],k:F/(F-b.p[2])})).sort((a,b)=>a.z-b.z);
+  if(c.dataset.tone!=ORBS[o].tone)c.dataset.tone=ORBS[o].tone;
+  for(const b of pts){if(b.s<=.02)continue;
+    const dn=cl((b.z+1.2)/2.4),lam=(-.55*b.p[0]+.6*b.p[1]+.58*b.p[2])/(Math.hypot(...b.p)||1)*.5+.5,tint=b.tone!='none';
+    g.globalAlpha=cl(cl((.12+.88*dn)*(.62+.48*lam)+.5*b.lit)*b.a*(b.dim?.85:1));g.fillStyle=COL[b.tone];
+    g.beginPath();g.arc(S/2+b.p[0]*b.k*S*.4,S/2-b.p[1]*b.k*S*.4,Math.max(.4,S*.045*b.s*b.k*(.4+.6*dn)*(.9+.2*lam)*(1+.55*b.lit)*(tint?.48:.6)),0,TAU);g.fill()}
+  if(reduce||ORBS[o].plays_once&&T-c.tl.at(-1).start>SETTLE+.2)c.done=1;
+}
+(function frame(now){document.querySelectorAll('canvas.orb').forEach(c=>paint(c,now/1000));requestAnimationFrame(frame)})(0);
+
+// The thread plays out live: the running step shows its orb, then settles into a quiet grey line.
+const STEPS=[['thinking',2200,'Thinking','Thought <em>for 6s</em>'],['reading',2200,'Reading PLAN.md','Read <em>PLAN.md and 3 more files</em>'],
+  ['searching',2000,'Searching for SessionId','Searched <em>for SessionId in 14 files</em>'],
+  ['editing',2600,'Editing session.rs','Edited <em>rozu-store/src/session.rs</em> <span class="add">+142</span> <span class="del">−3</span>'],
+  ['editing',2000,'Editing chat.rs','Edited <em>rozu-cli/src/chat.rs</em> <span class="add">+38</span> <span class="del">−11</span>']];
+let timers=[];const at=(ms,f)=>timers.push(setTimeout(f,ms));
+const live=(s,txt)=>`<div class="step live">${orb(s)}<span class="t">${txt}</span></div>`;
+const now=(s,m='now')=>{$('cur').dataset.state=s;$('curMeta').textContent=m};
+const finish=(el,txt)=>el.outerHTML=`<div class="step">${txt}</div>`;
+function play(){timers.forEach(clearTimeout);timers=[];
+  ['say1','ask','say2','fb'].forEach(i=>$(i).hidden=true);$('steps').innerHTML=$('run').innerHTML='';$('allow').disabled=0;$('allow').textContent='Allow once';
+  let t=0;for(const [s,ms,l,txt] of STEPS){at(t,()=>{$('steps').insertAdjacentHTML('beforeend',live(s,l));now(s)});t+=ms;at(t,()=>finish($('steps').lastChild,txt))}
+  at(t+150,()=>{$('say1').hidden=$('ask').hidden=false;$('askOrb').dataset.state='waiting';now('waiting')})}
+$('allow').onclick=()=>{if($('allow').disabled)return;$('allow').disabled=1;$('allow').textContent='Allowed';$('askOrb').dataset.state='done';
+  $('run').innerHTML=live('running','Running cargo test');now('running');
+  at(3200,()=>{finish($('run').firstChild,'Ran <em>1 command</em>');$('say2').hidden=$('fb').hidden=false;now('done','1m')})};
+$('replay').onclick=play;play();
+</script>
