@@ -1,0 +1,29 @@
+{
+  "name": "create-file",
+  "prompt": "Create greeting.txt containing exactly: hello from rozu",
+  "script": [
+    {
+      "calls": [
+        [
+          "write_file",
+          {
+            "path": "greeting.txt",
+            "content": "hello from rozu\n"
+          }
+        ]
+      ]
+    },
+    {
+      "text": "Created greeting.txt."
+    }
+  ],
+  "expect": {
+    "files": {
+      "greeting.txt": "hello from rozu"
+    },
+    "command": "grep -qx 'hello from rozu' greeting.txt",
+    "answer": [
+      "greeting.txt"
+    ]
+  }
+}

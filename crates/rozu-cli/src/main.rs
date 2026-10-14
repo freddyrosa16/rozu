@@ -3,6 +3,7 @@
 mod approve;
 mod auth;
 mod chat;
+mod eval;
 mod grok_hook;
 mod interrupt;
 mod mcp_serve;
@@ -37,6 +38,8 @@ enum Command {
     /// `--provider codex` your ChatGPT subscription via the Codex CLI, `--provider grok` your
     /// SuperGrok subscription via xAI's Grok Build CLI.
     Chat(chat::ChatArgs),
+    /// Run evals: scripted tasks, recorded-session replays and the memory eval.
+    Eval(eval::EvalArgs),
     /// List known models with context window and prices.
     Models,
     /// List saved chats (resume one with `rozu chat --resume ID`).
@@ -93,6 +96,7 @@ fn main() -> ExitCode {
         }
         Some(Command::Auth { command }) => auth::run(command),
         Some(Command::Chat(args)) => chat::run(args),
+        Some(Command::Eval(args)) => eval::run(args),
         Some(Command::Models) => models::run(),
         Some(Command::Sessions(args)) => sessions::run(args),
         Some(Command::Term) => term::run(),

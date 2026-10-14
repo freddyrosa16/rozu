@@ -107,12 +107,12 @@ pub fn run(args: ChatArgs) -> anyhow::Result<ExitCode> {
 }
 
 /// Builds an [`Agent`] for a model choice; kept around so `/model` can rebuild mid-session.
-struct AgentFactory {
+pub(crate) struct AgentFactory {
     store: KeyringStore,
     tools: Arc<ToolRegistry>,
     workspace: Workspace,
     max_steps: usize,
-    memory: MemoryPolicy,
+    pub(crate) memory: MemoryPolicy,
     approval: ApprovalArg,
     policy: Arc<ApprovalPolicy>,
     gate: Arc<CliGate>,
@@ -131,9 +131,48 @@ struct AgentFactory {
 }
 
 impl AgentFactory {
+    pub(crate) fn new(
+        workspace: &Workspace,
+        approval: ApprovalArg,
+        gate: Arc<CliGate>,
+        session_id: String,
+    ) -> anyhow::Result<Self> {
+        let policy =
+            ApprovalPolicy::for_project(approval.into(), workspace.root()).with_context(|| {
+                format!(
+                    "cannot read the approval rules in {}; fix or delete the file",
+                    approvals_path(workspace.root()).display()
+                )
+            })?;
+        let temp = match SessionTemp::create(&session_id) {
+            Ok(temp) => Some(Arc::new(temp)),
+            Err(err) => {
+                tracing::warn!(error = %err, "could not create the session temp dir");
+                None
+            }
+        };
+        Ok(Self {
+            store: KeyringStore::default(),
+            tools: Arc::new(ToolRegistry::standard()),
+            workspace: workspace.clone(),
+            max_steps: DEFAULT_MAX_STEPS,
+            memory: MemoryPolicy::DEFAULT,
+            approval,
+            policy: Arc::new(policy),
+            gate,
+            claude: Mutex::default(),
+            codex: Mutex::default(),
+            grok: Mutex::default(),
+            grok_headless: false,
+            audit: AuditLog::from_env(&session_id).map(Arc::new),
+            session_id,
+            temp,
+        })
+    }
+
     /// Resolves the provider's key (env var first, then the keychain) — or, for claude-cli and
     /// codex, the vendor CLI — and builds the agent.
-    fn build(&self, choice: &ModelChoice) -> anyhow::Result<Agent> {
+    pub(crate) fn build(&self, choice: &ModelChoice) -> anyhow::Result<Agent> {
         let provider: Arc<dyn Provider> = if choice.provider.id == CODEX_ID {
             self.codex_provider()?
         } else if choice.provider.id == GROK_ID {
@@ -308,6 +347,16 @@ fn memory_preset(name: &str) -> Result<MemoryPolicy, String> {
     })
 }
 
+/// The model for `--provider` / `--model`, defaulting as `rozu chat` does.
+pub(crate) fn resolve_choice(
+    provider: Option<String>,
+    model: Option<&str>,
+) -> anyhow::Result<ModelChoice> {
+    let store = KeyringStore::default();
+    let provider = default_provider(provider, model, || any_api_key(&store), cli_installed);
+    Ok(registry::resolve(provider.as_deref(), model)?)
+}
+
 /// The provider to use when neither `--provider` nor `--model` is given: with no API key
 /// configured anywhere, the first installed of claude-cli, codex and grok (claude-cli when
 /// none is, so the error says how to install it); else the registry's default.
@@ -368,7 +417,6 @@ fn parse_model_switch(arg: &str) -> Result<ModelChoice, registry::RegistryError>
 }
 
 async fn chat(args: ChatArgs) -> anyhow::Result<ExitCode> {
-    let store = KeyringStore::default();
     let workspace = Workspace::new(&args.workspace)
         .with_context(|| format!("cannot open workspace {}", args.workspace.display()))?;
     let sessions = if args.no_save {
@@ -398,52 +446,18 @@ async fn chat(args: ChatArgs) -> anyhow::Result<ExitCode> {
             let meta = writer.meta();
             registry::resolve(Some(&meta.provider), Some(&meta.model))?
         }
-        _ => {
-            let provider = default_provider(
-                args.provider.clone(),
-                args.model.as_deref(),
-                || any_api_key(&store),
-                cli_installed,
-            );
-            registry::resolve(provider.as_deref(), args.model.as_deref())?
-        }
+        _ => resolve_choice(args.provider.clone(), args.model.as_deref())?,
     };
     let mode = ApprovalMode::from(args.approval);
-    let policy = ApprovalPolicy::for_project(mode, workspace.root()).with_context(|| {
-        format!(
-            "cannot read the approval rules in {}; fix or delete the file",
-            approvals_path(workspace.root()).display()
-        )
-    })?;
     let interactive = approve::stdin_is_interactive();
     let (gate, mut asks) = CliGate::new(interactive);
     let session_id = resumed
         .as_ref()
         .map_or_else(new_session_id, |(_, writer)| writer.id().to_owned());
-    let temp = match SessionTemp::create(&session_id) {
-        Ok(temp) => Some(Arc::new(temp)),
-        Err(err) => {
-            tracing::warn!(error = %err, "could not create the session temp dir");
-            None
-        }
-    };
-    let factory = AgentFactory {
-        store,
-        tools: Arc::new(ToolRegistry::standard()),
-        workspace: workspace.clone(),
-        max_steps: args.max_steps,
-        memory: args.memory,
-        approval: args.approval,
-        policy: Arc::new(policy),
-        gate,
-        claude: Mutex::default(),
-        codex: Mutex::default(),
-        grok: Mutex::default(),
-        grok_headless: args.grok_headless,
-        audit: AuditLog::from_env(&session_id).map(Arc::new),
-        session_id,
-        temp,
-    };
+    let mut factory = AgentFactory::new(&workspace, args.approval, gate, session_id)?;
+    factory.max_steps = args.max_steps;
+    factory.memory = args.memory;
+    factory.grok_headless = args.grok_headless;
     let mut agent = factory.build(&choice)?;
     let mut memory = load_memory(&workspace);
     let (mut session, mut writer) = match resumed {
@@ -668,7 +682,7 @@ fn sandbox_label() -> String {
     }
 }
 
-fn system_prompt(workspace: &Workspace, mode: ApprovalMode) -> String {
+pub(crate) fn system_prompt(workspace: &Workspace, mode: ApprovalMode) -> String {
     format!(
         "You are rozu, a coding agent running in the user's terminal.\n\
          The workspace root is {}; tool paths are relative to it.\n\

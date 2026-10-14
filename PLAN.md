@@ -568,9 +568,12 @@ guide; research: `grok-rozu-owned-loop.md` LIVE UPDATE, `grok-live-results.md`, 
   scripted turn; the GPUI demo in `spikes/` is untouched and can replay it later.
 
 ### M4: Sessions, memory, evals (≈2–3 weeks)
-- [ ] JSONL sessions + SQLite index, resume; ROZU.md memory; compaction
-- [ ] `rozu-cli eval` runner with ≥5 scripted tasks; replay tests from recorded sessions
-- [ ] `rozu eval memory --condition <ID|all> --seeds N --mode live|dry`: replays scripted sessions per memory condition and logs per run: input/output tokens, cache read/write tokens, cost, latency, recall; `--max-runs-per-hour`, `--resume`, clean stop on rate limit; `cost_usd: null` for subscription providers
+- [x] JSONL sessions + SQLite index, resume; ROZU.md memory; compaction
+- [x] `rozu eval tasks` runner with 6 scripted tasks (`evals/tasks`); `rozu eval replay` for recorded sessions (`evals/recorded`)
+- [x] `rozu eval memory --condition <ID|all> --seeds N --mode live|dry`: replays scripted sessions per memory condition and logs per run: input/output tokens, cache read/write tokens, cost, latency, recall; `--max-runs-per-hour`, `--resume`, clean stop on rate limit; `cost_usd: null` for subscription providers
+
+Memory conditions are the `MemoryPolicy` presets `off`, `mask`, `summarize` and `default`. Dry runs use a recall mock
+that estimates prefix-cache hits from the previous request; live runs use `--provider` / `--model` like `rozu chat`.
 
 **Done when:** a session survives restart and resumes, a long session compacts without losing pinned memory, and the eval suite runs in CI with mocked providers. (ChatGPT login moved to M3.5.)
 

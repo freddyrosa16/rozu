@@ -188,6 +188,11 @@ impl SessionStore {
         replay(&path, BufReader::new(file))
     }
 
+    /// Replays a session file from anywhere (e.g. a recorded eval fixture).
+    pub fn load_file(path: &Path) -> Result<(SessionMeta, Session), StoreError> {
+        replay(path, BufReader::new(File::open(path)?))
+    }
+
     /// The session id `query` names: `last` (or nothing) is the newest in `workspace`, anything
     /// else an id or a unique id prefix.
     pub fn resolve(&self, query: Option<&str>, workspace: &Path) -> Result<String, StoreError> {

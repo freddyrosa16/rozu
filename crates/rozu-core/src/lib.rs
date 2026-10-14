@@ -12,6 +12,7 @@ pub mod compact;
 pub mod exec;
 pub mod model;
 pub mod provider;
+pub mod replay;
 pub mod telemetry;
 
 pub use agent::{
@@ -31,6 +32,7 @@ pub use model::{
     ProviderCaps, Role, StopReason, StreamEvent, ToolSpec, Usage,
 };
 pub use provider::{EventStream, Provider, ProviderError, ProviderKind, ProviderResult};
+pub use replay::ReplayProvider;
 pub use telemetry::{LogTarget, default_log_path, init_tracing, redact};
 
 /// Version of this crate.
