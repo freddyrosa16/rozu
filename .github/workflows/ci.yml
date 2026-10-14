@@ -28,6 +28,11 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: cargo test
         run: cargo test --workspace
+      - name: evals (mocked providers)
+        run: |
+          cargo run -q -p rozu-cli -- eval tasks
+          cargo run -q -p rozu-cli -- eval replay evals/recorded/fix-failing-test.jsonl --workspace evals/recorded/fix-failing-test
+          cargo run -q -p rozu-cli -- eval memory --out "$RUNNER_TEMP/memory.jsonl"
 
   deny:
     name: cargo-deny

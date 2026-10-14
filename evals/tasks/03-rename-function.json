@@ -1,0 +1,71 @@
+{
+  "name": "rename-function",
+  "prompt": "Rename the shell function `greet` to `welcome` everywhere.",
+  "files": {
+    "lib.sh": "greet() {\n  echo \"hi $1\"\n}\n",
+    "main.sh": ". ./lib.sh\ngreet world\n"
+  },
+  "script": [
+    {
+      "calls": [
+        [
+          "grep",
+          {
+            "pattern": "greet"
+          }
+        ]
+      ]
+    },
+    {
+      "calls": [
+        [
+          "apply_patch",
+          {
+            "path": "lib.sh",
+            "edits": [
+              {
+                "old": "greet()",
+                "new": "welcome()"
+              }
+            ]
+          }
+        ],
+        [
+          "apply_patch",
+          {
+            "path": "main.sh",
+            "edits": [
+              {
+                "old": "greet world",
+                "new": "welcome world"
+              }
+            ]
+          }
+        ]
+      ]
+    },
+    {
+      "calls": [
+        [
+          "shell",
+          {
+            "command": "sh main.sh"
+          }
+        ]
+      ]
+    },
+    {
+      "text": "Renamed greet to welcome in lib.sh and main.sh; main.sh prints hi world."
+    }
+  ],
+  "expect": {
+    "files": {
+      "lib.sh": "welcome()",
+      "main.sh": "welcome world"
+    },
+    "command": "! grep -rq greet . && [ \"$(sh main.sh)\" = 'hi world' ]",
+    "answer": [
+      "welcome"
+    ]
+  }
+}

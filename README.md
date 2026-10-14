@@ -52,6 +52,11 @@ cargo build --release
 # turns are summarized; the system prompt, project memory and the last 3 turns are never touched.
 # `/compact` does it now; `--memory off|mask|summarize|default` picks the policy.
 
+# Evals (dry runs script the model, so they need no keys; add --mode live --provider ... for a real one).
+./target/release/rozu eval tasks                # evals/tasks: each task in a temp repo, checked by its outcome
+./target/release/rozu eval replay evals/recorded/fix-failing-test.jsonl --workspace evals/recorded/fix-failing-test
+./target/release/rozu eval memory --seeds 3     # rows per memory condition in rozu-eval-memory.jsonl
+
 # Approval mode (default: auto). See "Approvals and sandbox" below.
 ./target/release/rozu chat --approval read-only "explain src/main.rs"
 ./target/release/rozu chat --approval full "run the tests and fix what fails"
