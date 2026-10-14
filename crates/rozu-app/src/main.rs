@@ -6,14 +6,14 @@ mod backend;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod feed;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+mod markdown;
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod settings;
 
 #[cfg(target_os = "macos")]
 mod app;
 #[cfg(target_os = "macos")]
 mod composer;
-#[cfg(target_os = "macos")]
-mod orb;
 #[cfg(target_os = "macos")]
 mod theme;
 
