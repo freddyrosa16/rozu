@@ -12,8 +12,8 @@ that drive the official vendor CLIs, next to the existing HTTP adapters, which s
 de-prioritized API-key path.
 
 ## Open questions (resolve before the milestone that needs them)
-1. **UI design:** blocked until Designer's spec and tokens arrive through Chief (M5).
-2. **GUI stack:** spike done. The recommendation is **GPUI + gpui-component**, with Tauri 2 as the fallback; see [docs/gui-spike.md](docs/gui-spike.md). Needs Fred and Chief's sign-off before M5.
+1. **UI design:** resolved: Fred's mockup `docs/design/app/index.html` is the spec (M5).
+2. **GUI stack:** spike done. The recommendation is **GPUI + gpui-component**, with Tauri 2 as the fallback; see [docs/gui-spike.md](docs/gui-spike.md). Fred approved GPUI on 2026-10-14.
 3. **Sign in with ChatGPT:** resolved by using the official Codex CLI (`codex app-server`), which does the
    ChatGPT login itself; rozu implements no OAuth of its own (M3.5).
 4. Distribution: is personal-use unsigned enough, or do we need a Developer ID for notarized releases? (M6)
@@ -580,8 +580,8 @@ guide; research: `grok-rozu-owned-loop.md` LIVE UPDATE, `grok-live-results.md`, 
 - Provider usage already carries `cache_read_tokens` and `cache_write_tokens` (M2 follow-up), and `ModelInfo` prices both (plus long-context tiers), so per-run cost needs no new provider work for API-key runs. `dry` mode runs against recorded/mocked providers.
 - Subscription (CLI-backed) runs: tokens and cache hit rate are primary, `cost_usd` is `null`, unit cost is derived; see [Memory eval with subscription providers](#memory-eval-with-subscription-providers).
 
-### M5: GUI (BLOCKED until Designer's spec arrives through Chief)
-- [ ] Stack chosen per the spike (pending sign-off), with tokens imported into the theme (frontend-from-design-system)
+### M5: GUI (in progress: `crates/rozu-app`)
+- [x] Stack: GPUI, approved by Fred 2026-10-14, with the mockup `docs/design/app/index.html` as the spec (no terminal pane, no side panel)
 - [ ] Primitives + component gallery screen → chat view (virtualized, batched streaming), tool/approval cards, terminal pane, settings (keys, providers, sign-in)
 
 **Done when:** every screen matches the spec (visual review), streaming 2k lines stays smooth, approval cards work, and the terminal is usable.
