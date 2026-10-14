@@ -43,10 +43,16 @@ pub const CODEX_STATIC_MODELS: &[&str] = &["default", "gpt-6.1-sol", "gpt-6-astr
 const CODEX_CONTEXT: u32 = 272_000;
 /// Id of the CLI-backed Grok provider (`rozu_cli_providers::grok::PROVIDER_ID`).
 pub const GROK_ID: &str = "grok";
-/// Grok Build models rozu lists. **Unverified**: seen in Grok Build 1.0.52 output (`grok-4.7`
-/// over ACP, `grok-4.7-build` in usage, `grok-4.6` in the signed-out `initialize`), not checked
-/// against what the CLI accepts for `-m`. `default` passes no `-m`, so Grok uses its own default.
-pub const GROK_STATIC_MODELS: &[&str] = &["default", "grok-4.7", "grok-4.7-build", "grok-4.6"];
+/// Grok Build models rozu lists: xAI's current lineup (Grok Build 0.1 and Grok 4.7 to 4.3, as of
+/// October 2026). `default` passes no `-m`, so Grok uses its own default.
+pub const GROK_STATIC_MODELS: &[&str] = &[
+    "default",
+    "grok-build-0.1",
+    "grok-4.7",
+    "grok-4.6",
+    "grok-4.5",
+    "grok-4.3",
+];
 /// Context window assumed for Grok Build models (unverified; `initialize` reported 500k for the
 /// 4.5/4.6 models).
 const GROK_CONTEXT: u32 = 500_000;

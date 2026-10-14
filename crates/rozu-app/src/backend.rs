@@ -348,10 +348,18 @@ pub type Live = Vec<(String, String)>;
 
 /// Every model `provider` offers; Codex's own list when it gave one.
 pub fn models(provider: &ProviderInfo, live: &Live) -> Vec<ModelChoice> {
-    let ids: Vec<String> = if provider.id == CODEX_ID && !live.is_empty() {
-        std::iter::once("default".to_owned())
-            .chain(live.iter().map(|(id, _)| id.clone()))
-            .collect()
+    let ids: Vec<String> = if provider.id == CODEX_ID {
+        // The current lineup, plus whatever else this Codex build lists.
+        let mut ids: Vec<String> = registry::CODEX_STATIC_MODELS
+            .iter()
+            .map(|id| (*id).to_owned())
+            .collect();
+        for (id, _) in live {
+            if !ids.contains(id) {
+                ids.push(id.clone());
+            }
+        }
+        ids
     } else if provider.id == CLAUDE_CLI_ID {
         claude_ids()
     } else {
@@ -365,12 +373,16 @@ pub fn models(provider: &ProviderInfo, live: &Live) -> Vec<ModelChoice> {
         .collect()
 }
 
-/// Every Claude model by its full id, newest first, so the version shows.
+/// The newest Claude model of each family, by its full id so the version shows.
 fn claude_ids() -> Vec<String> {
-    registry::models_for("anthropic")
-        .into_iter()
-        .map(|m| m.id)
-        .collect()
+    let mut ids: Vec<String> = Vec::new();
+    for id in registry::models_for("anthropic").into_iter().map(|m| m.id) {
+        let family = id.split('-').nth(1).map(str::to_owned);
+        if !ids.iter().any(|i| i.split('-').nth(1) == family.as_deref()) {
+            ids.push(id);
+        }
+    }
+    ids
 }
 
 /// Swaps a Claude CLI alias (`opus`) saved by older builds for the model it stands for.
@@ -487,7 +499,7 @@ mod tests {
         for (id, name) in [
             ("claude-opus-5-5", "Opus 5.5"),
             ("gpt-6.1-sol", "GPT-6.1 Sol"),
-            ("grok-4.7-build", "Grok 4.7 Build"),
+            ("grok-build-0.1", "Grok Build 0.1"),
             ("default", "Default"),
         ] {
             assert_eq!(model_name(id, &none), name);
@@ -496,16 +508,21 @@ mod tests {
         assert_eq!(model_name("gpt-7", &live), "GPT-7 Max");
         let codex = registry::provider_info(CODEX_ID).unwrap();
         let ids: Vec<_> = models(codex, &live).into_iter().map(|m| m.model).collect();
-        assert_eq!(ids, ["default", "gpt-7"]);
+        assert_eq!(
+            ids,
+            [
+                "default",
+                "gpt-6.1-sol",
+                "gpt-6-astra",
+                "gpt-6-luna",
+                "gpt-7"
+            ]
+        );
         let names: Vec<_> = models(registry::provider_info(CLAUDE_CLI_ID).unwrap(), &none)
             .iter()
             .map(|m| model_name(&m.model, &none))
             .collect();
-        assert_eq!(
-            names[..4],
-            ["Fable 5.1", "Opus 5.5", "Sonnet 5.5", "Haiku 5.5"]
-        );
-        assert!(names.contains(&"Opus 4.6".to_owned()));
+        assert_eq!(names, ["Fable 5.1", "Opus 5.5", "Sonnet 5.5", "Haiku 5.5"]);
         assert!(efforts(GROK_ID).is_empty());
     }
 }
