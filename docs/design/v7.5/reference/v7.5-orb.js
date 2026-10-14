@@ -89,14 +89,16 @@ function sample(tl,T,P=LARGE){let k=0;while(k+1<tl.length&&tl[k+1].start<=T)k++;
     const pv=tl[k-1],Pv=ORBS[pv.orb],a=genAt(tl,k-1,i,T,P),q=crit((tin-hash(i)*STAG_TOTAL)/MORPH),lift=.55*Math.sin(Math.PI*q);
     out.push({p:[a.p[0]+(b.p[0]-a.p[0])*q,a.p[1]+(b.p[1]-a.p[1])*q,a.p[2]+(b.p[2]-a.p[2])*q+lift],lit:cl(a.lit+(b.lit-a.lit)*q+(tin<.15?.8*Math.sin(Math.PI*tin/.15):0)),s:a.s+(b.s-a.s)*q,
       a:a.a+(b.a-a.a)*q,tone:q>.5?S.tone:Pv.tone,dim:q>.5?S.dim:Pv.dim})}return out}
+const FINE=.6,TINT=.48,GLOW=2; // dots drawn at 60% (coloured ones 48%) so the globe reads through the glow
 function css(v){return getComputedStyle(document.body).getPropertyValue(v).trim()}
 function drawOrb(canvas,tl,T){const dpr=(window.devicePixelRatio||1),size=canvas.clientWidth;canvas.width=Math.round(size*dpr);canvas.height=Math.round(size*dpr);
   const ctx=canvas.getContext('2d');ctx.scale(dpr,dpr);ctx.clearRect(0,0,size,size);
   const small=size<=30,P=small?SMALL:LARGE,Rpx=size*.4,base=small?size*.045:size*.011,px=1/dpr;
   const col={none:css('--orb-dot'),warning:css('--warning'),success:css('--success'),danger:css('--danger')};
-  const pts=sample(tl,T,P);
+  const pts=sample(tl,T,P),tone=pts[0]?.tone||'none';
+  canvas.style.filter=tone==='none'?'':`drop-shadow(0 0 ${GLOW}px ${col[tone]})`; // coloured dots glow, and keep glowing once settled
   const pr=pts.map(b=>{const z=b.p[2],k=F/(F-z),dn=cl((z+1.2)/2.4);return {...b,x:size/2+b.p[0]*k*Rpx,y:size/2-b.p[1]*k*Rpx,z,k,dn}}).sort((a,b)=>a.z-b.z);
-  for(const b of pr){if(b.s<=.02||b.k<=.02)continue;const ln=Math.hypot(...b.p)||1,lam=(-.55*b.p[0]+.6*b.p[1]+.58*b.p[2])/ln*.5+.5;let r=base*b.s*b.k*(0.4+0.6*b.dn)*(.9+.2*lam)*(1+.55*b.lit);r=Math.max(px*.75,r);
+  for(const b of pr){if(b.s<=.02||b.k<=.02)continue;const ln=Math.hypot(...b.p)||1,lam=(-.55*b.p[0]+.6*b.p[1]+.58*b.p[2])/ln*.5+.5;let r=base*b.s*b.k*(0.4+0.6*b.dn)*(.9+.2*lam)*(1+.55*b.lit)*(b.tone&&b.tone!=='none'?TINT:FINE);r=Math.max(px*.75,r);
     let a=(.12+.88*b.dn)*(.62+.48*lam);a=cl(a+.5*b.lit)*b.a;if(b.dim)a*=.85;ctx.globalAlpha=cl(a);ctx.fillStyle=col[b.tone||'none'];
     if(small&&r*dpr<1.6){ctx.fillRect(Math.round((b.x-r)*dpr)/dpr,Math.round((b.y-r)*dpr)/dpr,Math.max(px,Math.round(2*r*dpr)/dpr),Math.max(px,Math.round(2*r*dpr)/dpr))}
     else{ctx.beginPath();ctx.arc(b.x,b.y,r,0,TAU);ctx.fill()}}
