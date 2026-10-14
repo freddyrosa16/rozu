@@ -8,6 +8,7 @@ use rozu_cli_providers::grok::install::find_grok_binary;
 use rozu_core::ApprovalMode;
 use rozu_providers::registry::{self, CLAUDE_CLI_ID, CODEX_ID, GROK_ID};
 use rozu_providers::{ModelChoice, PROVIDERS, ProviderInfo};
+#[cfg(any(target_os = "macos", test))]
 pub use rozu_runtime::{approval_arg, approval_mode};
 use rozu_secrets::{KeyringStore, resolve_api_key};
 
