@@ -1,147 +1,66 @@
-//! `ClaudeCliProvider` against a fake `claude` binary that replays recorded stream-json.
-
 #![cfg(unix)]
 
-use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::Duration;
+mod common;
 
-use futures::StreamExt;
+use std::path::Path;
+use std::sync::Arc;
+
+use common::{
+    HeldUser, assert_mcp_record_joins, cancel_after, collect, gate_record, next, request,
+    run_agent_turn, socket_gate, start, start_err,
+};
 use rozu_cli_providers::claude::install::{claude_auth_status, claude_version};
 use rozu_cli_providers::{ClaudeCliConfig, ClaudeCliProvider};
 use rozu_core::{
-    Agent, AgentConfig, AgentEvent, ApprovalGate, ApprovalMode, ApprovalRecord, ApprovalRequest,
-    ApprovalResolution, ChatRequest, Decision, DecisionSource, Message, ModelInfo, PendingApproval,
-    Provider, ProviderError, ReadOnlyGate, SandboxMode, Session, StopReason, StreamEvent,
+    AgentEvent, ApprovalGate, ApprovalRequest, ApprovalResolution, Decision, Message, ModelInfo,
+    PendingApproval, ProviderError, ReadOnlyGate, SandboxMode, StopReason, StreamEvent,
     TurnOutcome, Usage,
 };
-use rozu_mcp::SocketGate;
-use rozu_tools::{Risk, ToolRegistry, Workspace};
+use rozu_tools::Risk;
 use serde_json::Value;
-use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/claude");
-
-/// A scenario directory, a log directory and the fake binary.
-struct Fake {
-    dir: tempfile::TempDir,
+/// `turns[i]` is the fixture replayed for the (i+1)th user message.
+fn fake(turns: &[&str]) -> common::Fake {
+    let fake = common::Fake::new("claude", &["turns", "log", "workspace"]);
+    std::fs::copy(fake.fixture("auth.json"), fake.path("turns/auth.json")).unwrap();
+    for (i, fixture) in turns.iter().enumerate() {
+        let to = fake.path(&format!("turns/turn{}.jsonl", i + 1));
+        std::fs::copy(fake.fixture(fixture), to).unwrap();
+    }
+    fake
 }
 
-impl Fake {
-    /// `turns[i]` is the fixture replayed for the (i+1)th user message.
-    fn new(turns: &[&str]) -> Self {
-        let dir = tempfile::tempdir().unwrap();
-        for sub in ["turns", "log", "workspace"] {
-            std::fs::create_dir(dir.path().join(sub)).unwrap();
-        }
-        let bin = dir.path().join("claude");
-        std::fs::copy(Path::new(FIXTURES).join("fake_claude.sh"), &bin).unwrap();
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-        std::fs::copy(
-            Path::new(FIXTURES).join("auth.json"),
-            dir.path().join("turns/auth.json"),
-        )
-        .unwrap();
-        let fake = Self { dir };
-        for (i, fixture) in turns.iter().enumerate() {
-            fake.turn_file(i + 1, fixture);
-        }
-        fake
-    }
-
-    fn turn_file(&self, n: usize, fixture: &str) {
-        std::fs::copy(
-            Path::new(FIXTURES).join(fixture),
-            self.path(&format!("turns/turn{n}.jsonl")),
-        )
-        .unwrap();
-    }
-
-    fn path(&self, rel: &str) -> PathBuf {
-        self.dir.path().join(rel)
-    }
-
-    fn mark(&self, rel: &str, contents: &str) {
-        std::fs::write(self.path(rel), contents).unwrap();
-    }
-
-    fn binary(&self) -> PathBuf {
-        self.path("claude")
-    }
-
-    fn provider(&self) -> ClaudeCliProvider {
-        self.provider_with_gate(Arc::new(ReadOnlyGate))
-    }
-
-    fn provider_with_gate(&self, gate: Arc<dyn ApprovalGate>) -> ClaudeCliProvider {
-        let mut config = ClaudeCliConfig::new(
-            self.binary(),
-            self.path("workspace"),
-            "/nonexistent/rozu",
-            vec!["mcp-serve".into()],
-            gate,
-        );
-        config.env = vec![
-            (
-                "FAKE_CLAUDE_TURNS".into(),
-                self.path("turns").display().to_string(),
-            ),
-            (
-                "FAKE_CLAUDE_LOG".into(),
-                self.path("log").display().to_string(),
-            ),
-        ];
-        ClaudeCliProvider::new(config).unwrap()
-    }
-
-    /// argv of each start of the fake.
-    fn starts(&self) -> Vec<Vec<String>> {
-        let text = std::fs::read_to_string(self.path("log/args.txt")).unwrap_or_default();
-        text.split("--\n")
-            .filter(|s| !s.is_empty())
-            .map(|s| s.lines().map(str::to_owned).collect())
-            .collect()
-    }
-
-    fn stdin(&self) -> Vec<Value> {
-        std::fs::read_to_string(self.path("log/stdin.jsonl"))
-            .unwrap_or_default()
-            .lines()
-            .map(|l| serde_json::from_str(l).unwrap())
-            .collect()
-    }
+/// The first turn streams some text, then hangs until cancelled.
+fn hanging_fake() -> common::Fake {
+    let fake = fake(&["partial_then_hang.jsonl"]);
+    fake.write("turns/hang1", "");
+    fake
 }
 
-fn request(model: &str, messages: Vec<Message>) -> ChatRequest {
-    ChatRequest {
-        model: model.into(),
-        messages,
-        tools: Vec::new(),
-        max_output_tokens: None,
-    }
+fn provider(fake: &common::Fake) -> ClaudeCliProvider {
+    provider_with_gate(fake, Arc::new(ReadOnlyGate))
 }
 
-async fn collect(
-    provider: &ClaudeCliProvider,
-    req: ChatRequest,
-) -> (Vec<StreamEvent>, Option<ProviderError>) {
-    let mut stream = provider
-        .stream(req, CancellationToken::new())
-        .await
-        .unwrap();
-    let mut events = Vec::new();
-    while let Some(item) = tokio::time::timeout(Duration::from_secs(10), stream.next())
-        .await
-        .unwrap()
-    {
-        match item {
-            Ok(event) => events.push(event),
-            Err(err) => return (events, Some(err)),
-        }
-    }
-    (events, None)
+fn provider_with_gate(fake: &common::Fake, gate: Arc<dyn ApprovalGate>) -> ClaudeCliProvider {
+    let mut config = ClaudeCliConfig::new(
+        fake.binary(),
+        fake.path("workspace"),
+        "/nonexistent/rozu",
+        vec!["mcp-serve".into()],
+        gate,
+    );
+    config.env = vec![
+        (
+            "FAKE_CLAUDE_TURNS".into(),
+            fake.path("turns").display().to_string(),
+        ),
+        (
+            "FAKE_CLAUDE_LOG".into(),
+            fake.path("log").display().to_string(),
+        ),
+    ];
+    ClaudeCliProvider::new(config).unwrap()
 }
 
 fn arg_after<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
@@ -151,22 +70,32 @@ fn arg_after<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
         .map(String::as_str)
 }
 
+fn shell_request(call_id: &str) -> ApprovalRequest {
+    ApprovalRequest {
+        call_id: call_id.into(),
+        tool: "shell".into(),
+        args: serde_json::json!({"command": "cargo test"}),
+        risk: Risk::Network,
+        preview: "$ cargo test".into(),
+        sandbox: SandboxMode::Enforced("seatbelt"),
+        network: true,
+        extra_writes: Vec::new(),
+        outside_unknown: false,
+        blocked_retry: false,
+        allow_rule: None,
+    }
+}
+
 #[tokio::test]
 async fn tool_use_turn_maps_to_stream_events() {
-    let fake = Fake::new(&["tool_use.jsonl"]);
-    let provider = fake.provider();
-
-    let (events, err) = collect(
-        &provider,
-        request(
-            "sonnet",
-            vec![
-                Message::system("You are rozu."),
-                Message::user("summarize README"),
-            ],
-        ),
-    )
-    .await;
+    let fake = fake(&["tool_use.jsonl"]);
+    let messages = vec![
+        Message::system("You are rozu."),
+        Message::user("summarize README"),
+    ];
+    // Kept alive: dropping it removes the MCP config and socket checked below.
+    let provider = provider(&fake);
+    let (events, err) = collect(&provider, request("sonnet", messages)).await;
 
     assert_eq!(err, None);
     assert_eq!(
@@ -206,7 +135,6 @@ async fn tool_use_turn_maps_to_stream_events() {
         ]
     );
 
-    // The exact command line.
     let starts = fake.starts();
     assert_eq!(starts.len(), 1);
     let args = &starts[0];
@@ -247,13 +175,14 @@ async fn tool_use_turn_maps_to_stream_events() {
             "{tool} in {disallowed}"
         );
     }
-    // The prompt spans several lines of the argv log.
-    let prompt = arg_after(args, "--append-system-prompt").unwrap();
-    assert_eq!(prompt, "You are rozu.");
-    let argv_log = std::fs::read_to_string(fake.path("log/args.txt")).unwrap();
+    assert_eq!(
+        arg_after(args, "--append-system-prompt"),
+        Some("You are rozu.")
+    );
+    // The appended prompt spans several lines of the argv log.
+    let argv_log = fake.read("log/args.txt");
     assert!(argv_log.contains("mcp__rozu__apply_patch"), "{argv_log}");
 
-    // The MCP config names rozu's server and the approval socket.
     let config: Value =
         serde_json::from_slice(&std::fs::read(arg_after(args, "--mcp-config").unwrap()).unwrap())
             .unwrap();
@@ -264,8 +193,7 @@ async fn tool_use_turn_maps_to_stream_events() {
     let socket = server["env"]["ROZU_APPROVAL_SOCKET"].as_str().unwrap();
     assert!(Path::new(socket).exists(), "{socket}");
 
-    // The user turn as a stream-json input message.
-    let stdin = fake.stdin();
+    let stdin = fake.sent();
     assert_eq!(stdin.len(), 1);
     assert_eq!(stdin[0]["type"], "user");
     assert_eq!(stdin[0]["message"]["role"], "user");
@@ -274,14 +202,13 @@ async fn tool_use_turn_maps_to_stream_events() {
         "summarize README"
     );
     // The subscription login is used, not an API key from the environment.
-    let env = std::fs::read_to_string(fake.path("log/env.txt")).unwrap();
-    assert_eq!(env.trim(), "ANTHROPIC_API_KEY=unset");
+    assert_eq!(fake.read("log/env.txt").trim(), "ANTHROPIC_API_KEY=unset");
 }
 
 #[tokio::test]
 async fn follow_up_turns_reuse_the_process_and_send_only_the_new_message() {
-    let fake = Fake::new(&["tool_use.jsonl", "text.jsonl"]);
-    let provider = fake.provider();
+    let fake = fake(&["tool_use.jsonl", "text.jsonl"]);
+    let provider = provider(&fake);
     let first = vec![Message::system("s"), Message::user("one")];
     collect(&provider, request("sonnet", first.clone())).await;
     let mut second = first;
@@ -293,16 +220,16 @@ async fn follow_up_turns_reuse_the_process_and_send_only_the_new_message() {
     assert_eq!(err, None);
     assert_eq!(events[0], StreamEvent::TextDelta("Hello again!".into()));
     assert_eq!(fake.starts().len(), 1, "one long-lived process");
-    let stdin = fake.stdin();
+    let stdin = fake.sent();
     assert_eq!(stdin.len(), 2);
     assert_eq!(stdin[1]["message"]["content"][0]["text"], "two");
 }
 
 #[tokio::test]
 async fn not_logged_in_is_a_typed_error_with_the_login_hint() {
-    let fake = Fake::new(&["not_logged_in.jsonl"]);
+    let fake = fake(&["not_logged_in.jsonl"]);
     let (_, err) = collect(
-        &fake.provider(),
+        &provider(&fake),
         request("sonnet", vec![Message::user("hi")]),
     )
     .await;
@@ -317,13 +244,13 @@ async fn not_logged_in_is_a_typed_error_with_the_login_hint() {
 
 #[tokio::test]
 async fn cli_dying_with_a_login_message_is_not_logged_in() {
-    let fake = Fake::new(&[]);
-    fake.mark(
+    let fake = fake(&[]);
+    fake.write(
         "turns/stderr.txt",
         "Error: Not logged in. Please run /login\n",
     );
     let (_, err) = collect(
-        &fake.provider(),
+        &provider(&fake),
         request("sonnet", vec![Message::user("hi")]),
     )
     .await;
@@ -335,8 +262,8 @@ async fn cli_dying_with_a_login_message_is_not_logged_in() {
 
 #[tokio::test]
 async fn usage_limit_result_is_a_typed_error() {
-    let fake = Fake::new(&["rate_limit.jsonl"]);
-    let (_, err) = collect(&fake.provider(), request("opus", vec![Message::user("hi")])).await;
+    let fake = fake(&["rate_limit.jsonl"]);
+    let (_, err) = collect(&provider(&fake), request("opus", vec![Message::user("hi")])).await;
     match err {
         Some(ProviderError::UsageLimit { message }) => {
             assert!(message.contains("usage limit reached"), "{message}")
@@ -347,7 +274,7 @@ async fn usage_limit_result_is_a_typed_error() {
 
 #[tokio::test]
 async fn missing_binary_is_cli_not_found() {
-    let fake = Fake::new(&[]);
+    let fake = fake(&[]);
     let mut config = ClaudeCliConfig::new(
         fake.path("no-such-claude"),
         fake.path("workspace"),
@@ -356,44 +283,19 @@ async fn missing_binary_is_cli_not_found() {
         Arc::new(ReadOnlyGate),
     );
     config.env.clear();
-    let provider = ClaudeCliProvider::new(config).unwrap();
-    let err = provider
-        .stream(
-            request("sonnet", vec![Message::user("hi")]),
-            CancellationToken::new(),
-        )
-        .await
-        .err()
-        .expect("an error");
+    let err = start_err(&ClaudeCliProvider::new(config).unwrap(), "sonnet").await;
     assert!(matches!(err, ProviderError::CliNotFound { .. }), "{err:?}");
     assert!(err.to_string().contains("ROZU_CLAUDE_BIN"), "{err}");
 }
 
 #[tokio::test]
 async fn cancel_kills_the_cli_and_the_next_turn_resumes_the_session() {
-    let fake = Fake::new(&["partial_then_hang.jsonl", "text.jsonl"]);
-    fake.mark("turns/hang1", "");
-    let provider = fake.provider();
+    let fake = hanging_fake();
+    std::fs::copy(fake.fixture("text.jsonl"), fake.path("turns/turn2.jsonl")).unwrap();
+    let provider = provider(&fake);
     let cancel = CancellationToken::new();
-    let mut stream = provider
-        .stream(
-            request("sonnet", vec![Message::user("one")]),
-            cancel.clone(),
-        )
-        .await
-        .unwrap();
-    let first = tokio::time::timeout(Duration::from_secs(10), stream.next())
-        .await
-        .unwrap();
-    assert_eq!(
-        first.unwrap().unwrap(),
-        StreamEvent::TextDelta("Thinking about it".into())
-    );
-    cancel.cancel();
-    let next = tokio::time::timeout(Duration::from_secs(10), stream.next())
-        .await
-        .unwrap();
-    assert_eq!(next.unwrap(), Err(ProviderError::Cancelled));
+    let mut stream = start(&provider, "sonnet", &cancel).await;
+    cancel_after(&mut stream, &cancel, "Thinking about it").await;
     drop(stream);
 
     let (events, err) = collect(
@@ -411,98 +313,28 @@ async fn cancel_kills_the_cli_and_the_next_turn_resumes_the_session() {
 
 #[tokio::test]
 async fn approval_records_from_the_mcp_server_join_the_stream() {
-    let fake = Fake::new(&["partial_then_hang.jsonl"]);
-    fake.mark("turns/hang1", "");
-    let provider = fake.provider();
+    let fake = hanging_fake();
+    let provider = provider(&fake);
     let cancel = CancellationToken::new();
-    let mut stream = provider
-        .stream(
-            request("sonnet", vec![Message::user("one")]),
-            cancel.clone(),
-        )
-        .await
-        .unwrap();
-    let _text = stream.next().await;
-
-    let record = ApprovalRecord {
-        call_id: "mcp-1".into(),
-        tool: "shell".into(),
-        risk: Risk::Destructive,
-        preview: "$ rm -rf build".into(),
-        sandbox: SandboxMode::Enforced("seatbelt"),
-        network: false,
-        extra_writes: Vec::new(),
-        blocked_retry: false,
-        decision: Decision::Deny {
-            reason: "no".into(),
-        },
-        source: DecisionSource::Gate,
-    };
-    SocketGate::new(Some(provider.runtime_dir().join("approval.sock")))
-        .send_record(record.clone())
-        .await;
-
-    let next = tokio::time::timeout(Duration::from_secs(10), stream.next())
-        .await
-        .unwrap();
-    assert_eq!(next.unwrap(), Ok(StreamEvent::Approval(record)));
+    let mut stream = start(&provider, "sonnet", &cancel).await;
+    let _text = next(&mut stream).await;
+    assert_mcp_record_joins(&mut stream, provider.runtime_dir(), "$ rm -rf build").await;
     cancel.cancel();
-}
-
-/// The user, who answers once released.
-#[derive(Default)]
-struct HeldUser {
-    release: tokio::sync::Notify,
-}
-
-#[async_trait::async_trait]
-impl ApprovalGate for HeldUser {
-    async fn decide(&self, _req: ApprovalRequest) -> Decision {
-        self.release.notified().await;
-        Decision::Approve
-    }
-}
-
-fn shell_request(call_id: &str) -> ApprovalRequest {
-    ApprovalRequest {
-        call_id: call_id.into(),
-        tool: "shell".into(),
-        args: serde_json::json!({"command": "cargo test"}),
-        risk: Risk::Network,
-        preview: "$ cargo test".into(),
-        sandbox: SandboxMode::Enforced("seatbelt"),
-        network: true,
-        extra_writes: Vec::new(),
-        outside_unknown: false,
-        blocked_retry: false,
-        allow_rule: None,
-    }
 }
 
 #[tokio::test]
 async fn prompts_forwarded_by_the_mcp_server_are_reported_while_open() {
-    let fake = Fake::new(&["partial_then_hang.jsonl"]);
-    fake.mark("turns/hang1", "");
-    let user = Arc::new(HeldUser::default());
-    let provider = fake.provider_with_gate(user.clone());
+    let fake = hanging_fake();
+    let user = HeldUser::new(Decision::Approve);
+    let provider = provider_with_gate(&fake, user.clone());
     let cancel = CancellationToken::new();
-    let mut stream = provider
-        .stream(
-            request("sonnet", vec![Message::user("one")]),
-            cancel.clone(),
-        )
-        .await
-        .unwrap();
-    let _text = stream.next().await;
+    let mut stream = start(&provider, "sonnet", &cancel).await;
+    let _text = next(&mut stream).await;
 
-    // `rozu mcp-serve` asks; the user hasn't answered yet.
-    let gate = SocketGate::new(Some(provider.runtime_dir().join("approval.sock")));
+    let gate = socket_gate(provider.runtime_dir());
     let asking = tokio::spawn(async move { gate.decide(shell_request("mcp-7")).await });
-    let next = tokio::time::timeout(Duration::from_secs(10), stream.next())
-        .await
-        .unwrap();
     assert_eq!(
-        next.unwrap(),
+        next(&mut stream).await.unwrap(),
         Ok(StreamEvent::ApprovalPending(PendingApproval {
             request_id: "mcp-7".into(),
             tool: "shell".into(),
@@ -513,11 +345,8 @@ async fn prompts_forwarded_by_the_mcp_server_are_reported_while_open() {
     assert!(!asking.is_finished());
 
     user.release.notify_one();
-    let next = tokio::time::timeout(Duration::from_secs(10), stream.next())
-        .await
-        .unwrap();
     assert_eq!(
-        next.unwrap(),
+        next(&mut stream).await.unwrap(),
         Ok(StreamEvent::ApprovalResolved {
             request_id: "mcp-7".into(),
             resolution: ApprovalResolution::Approved,
@@ -529,113 +358,62 @@ async fn prompts_forwarded_by_the_mcp_server_are_reported_while_open() {
 
 #[tokio::test]
 async fn a_gate_that_answers_by_itself_opens_no_prompt() {
-    let fake = Fake::new(&["partial_then_hang.jsonl"]);
-    fake.mark("turns/hang1", "");
-    let provider = fake.provider(); // ReadOnlyGate: denies without asking anyone
+    let fake = hanging_fake();
+    let provider = provider(&fake);
     let cancel = CancellationToken::new();
-    let mut stream = provider
-        .stream(
-            request("sonnet", vec![Message::user("one")]),
-            cancel.clone(),
-        )
-        .await
-        .unwrap();
-    let _text = stream.next().await;
+    let mut stream = start(&provider, "sonnet", &cancel).await;
+    let _text = next(&mut stream).await;
 
-    let gate = SocketGate::new(Some(provider.runtime_dir().join("approval.sock")));
+    let gate = socket_gate(provider.runtime_dir());
     assert!(matches!(
         gate.decide(shell_request("mcp-8")).await,
         Decision::Deny { .. }
     ));
     // The next thing on the stream is the decision record, not a prompt.
-    let record = ApprovalRecord {
-        call_id: "mcp-8".into(),
-        tool: "shell".into(),
-        risk: Risk::Network,
-        preview: "$ cargo test".into(),
-        sandbox: SandboxMode::Enforced("seatbelt"),
-        network: true,
-        extra_writes: Vec::new(),
-        blocked_retry: false,
-        decision: Decision::Deny {
-            reason: "no one".into(),
-        },
-        source: DecisionSource::Gate,
-    };
+    let record = gate_record("mcp-8", Risk::Network, "$ cargo test", true, "no one");
     gate.send_record(record.clone()).await;
-    let next = tokio::time::timeout(Duration::from_secs(10), stream.next())
-        .await
-        .unwrap();
-    assert_eq!(next.unwrap(), Ok(StreamEvent::Approval(record)));
+    assert_eq!(
+        next(&mut stream).await.unwrap(),
+        Ok(StreamEvent::Approval(record))
+    );
     cancel.cancel();
 }
 
 #[tokio::test]
 async fn agent_runs_a_claude_turn_without_cost() {
-    let fake = Fake::new(&["tool_use.jsonl"]);
-    let provider = Arc::new(fake.provider());
-    let workspace = Workspace::new(fake.path("workspace")).unwrap();
-    let config = AgentConfig::new("sonnet").with_model_info(Some(ModelInfo::subscription(
-        "claude-cli",
-        "sonnet",
-        200_000,
-    )));
-    let agent = Agent::new(
-        provider,
-        Arc::new(ToolRegistry::standard()),
-        workspace,
-        config,
-    );
-    let mut session = Session::with_system_prompt("You are rozu.");
-    let (tx, mut rx) = mpsc::channel(64);
-    let outcome = agent
-        .run_turn(
-            "summarize README",
-            &mut session,
-            &tx,
-            CancellationToken::new(),
-        )
-        .await
-        .unwrap();
-    drop(tx);
-    let mut events = Vec::new();
-    while let Some(event) = rx.recv().await {
-        events.push(event);
-    }
+    let fake = fake(&["tool_use.jsonl"]);
+    let turn = run_agent_turn(
+        provider(&fake),
+        fake.workspace(),
+        ModelInfo::subscription("claude-cli", "sonnet", 200_000),
+        "summarize README",
+    )
+    .await;
 
-    assert_eq!(outcome, TurnOutcome::Completed);
-    assert!(events.contains(&AgentEvent::ToolCallStarted {
+    assert_eq!(turn.outcome, TurnOutcome::Completed);
+    assert!(turn.events.contains(&AgentEvent::ToolCallStarted {
         id: "toolu_01".into(),
         name: "read_file".into(),
         args_json: "{\"path\": \"README.md\"}".into(),
     }));
-    assert!(events.iter().any(|e| matches!(e,
+    assert!(turn.events.iter().any(|e| matches!(e,
         AgentEvent::ToolCallFinished { output, .. } if output == "# demo\nhello")));
     assert_eq!(
-        session.messages.last().unwrap(),
+        turn.session.messages.last().unwrap(),
         &Message::assistant("Let me look.The README says hello.")
     );
-    assert_eq!(session.usage.cache_read_tokens, 20_500);
-    assert_eq!(session.last_turn.cost_usd, None);
-    let _ = ApprovalMode::default();
+    assert_eq!(turn.session.usage.cache_read_tokens, 20_500);
+    assert_eq!(turn.session.last_turn.cost_usd, None);
 }
 
 #[tokio::test]
 async fn version_and_auth_status_read_only_what_they_need() {
-    let fake = Fake::new(&[]);
+    let fake = fake(&[]);
     // `auth status` reads auth.json from the scenario dir.
-    let bin = fake.binary();
-    let wrapper = fake.path("claude-wrapper");
-    std::fs::write(
-        &wrapper,
-        format!(
-            "#!/bin/sh\nFAKE_CLAUDE_TURNS='{}' exec '{}' \"$@\"\n",
-            fake.path("turns").display(),
-            bin.display()
-        ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let wrapper = fake.wrapper(&[(
+        "FAKE_CLAUDE_TURNS".into(),
+        fake.path("turns").display().to_string(),
+    )]);
 
     assert_eq!(claude_version(&wrapper).await.unwrap(), "9.9.9");
     let status = claude_auth_status(&wrapper).await.unwrap();

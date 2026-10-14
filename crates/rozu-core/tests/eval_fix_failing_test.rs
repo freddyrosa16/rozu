@@ -1,71 +1,20 @@
-//! Eval-style task: "fix a failing test in a temp repo".
-//!
-//! A scripted provider plays the model: it runs the test (fails), reads the code, patches the
-//! bug with `apply_patch`, reruns the test through `shell` (passes) and answers. Everything
-//! below the provider is real: the agent loop, the approval policy in auto mode, the tools and,
-//! on macOS when available, the Seatbelt sandbox.
+//! Eval-style "fix a failing test" task: only the model is scripted; the agent loop, auto-mode
+//! policy, tools and (on macOS, when usable) Seatbelt are real.
 
-use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
+mod common;
 
-use async_trait::async_trait;
-use futures::stream::{self, StreamExt};
+use std::sync::Arc;
+
+use common::*;
 use rozu_core::{
-    Agent, AgentConfig, AgentEvent, ApprovalGate, ApprovalMode, ApprovalPolicy, ApprovalRequest,
-    ChatRequest, ContentPart, Decision, DecisionSource, EventStream, Provider, ProviderResult,
-    Session, StopReason, StreamEvent, TurnOutcome,
+    Agent, AgentConfig, ApprovalMode, ApprovalPolicy, Decision, DecisionSource, Session,
+    TurnOutcome,
 };
 use rozu_tools::{NoSandbox, Sandbox, Seatbelt, ToolRegistry, Workspace, platform_sandbox};
-use serde_json::json;
-use tokio::sync::mpsc;
-use tokio_util::sync::CancellationToken;
+use serde_json::{Value, json};
 
-struct ScriptedProvider {
-    steps: Mutex<VecDeque<Vec<StreamEvent>>>,
-}
-
-#[async_trait]
-impl Provider for ScriptedProvider {
-    fn id(&self) -> &str {
-        "scripted"
-    }
-
-    async fn stream(&self, _: ChatRequest, _: CancellationToken) -> ProviderResult<EventStream> {
-        let events = self
-            .steps
-            .lock()
-            .unwrap()
-            .pop_front()
-            .expect("provider called more often than scripted");
-        Ok(stream::iter(events.into_iter().map(Ok)).boxed())
-    }
-}
-
-fn call(id: &str, name: &str, args: serde_json::Value) -> Vec<StreamEvent> {
-    vec![
-        StreamEvent::ToolCallStart {
-            id: id.into(),
-            name: name.into(),
-        },
-        StreamEvent::ToolCallArgsDelta {
-            id: id.into(),
-            json: args.to_string(),
-        },
-        StreamEvent::ToolCallEnd { id: id.into() },
-        StreamEvent::Done(StopReason::ToolUse),
-    ]
-}
-
-/// Approves everything it's asked and remembers what that was.
-#[derive(Default)]
-struct RecordingGate(Mutex<Vec<ApprovalRequest>>);
-
-#[async_trait]
-impl ApprovalGate for RecordingGate {
-    async fn decide(&self, req: ApprovalRequest) -> Decision {
-        self.0.lock().unwrap().push(req);
-        Decision::Approve
-    }
+fn call(id: &str, name: &str, args: Value) -> Script {
+    tool_step(&[(id, name, &args.to_string())])
 }
 
 const MATH_SH: &str = "add() {\n  echo $(($1 - $2))\n}\n";
@@ -79,19 +28,12 @@ else
 fi
 "#;
 
-/// Seatbelt if this machine can apply it (not when already sandboxed), else no sandbox.
 fn sandbox() -> Arc<dyn Sandbox> {
-    let sandbox = platform_sandbox();
-    if sandbox.enforced() {
-        let usable = std::process::Command::new(rozu_tools::SANDBOX_EXEC)
-            .args(["-p", "(version 1)(allow default)", "/usr/bin/true"])
-            .status()
-            .is_ok_and(|s| s.success());
-        if usable {
-            return Arc::new(Seatbelt);
-        }
+    if platform_sandbox().enforced() && seatbelt_usable() {
+        Arc::new(Seatbelt)
+    } else {
+        Arc::new(NoSandbox)
     }
-    Arc::new(NoSandbox)
 }
 
 #[tokio::test]
@@ -102,25 +44,20 @@ async fn agent_fixes_a_failing_test() {
     let workspace = Workspace::new(repo.path()).unwrap();
 
     let diff = "--- a/math.sh\n+++ b/math.sh\n@@ -1,3 +1,3 @@\n add() {\n-  echo $(($1 - $2))\n+  echo $(($1 + $2))\n }\n";
-    let provider = Arc::new(ScriptedProvider {
-        steps: Mutex::new(VecDeque::from([
-            call("c1", "shell", json!({"command": "sh test.sh"})),
-            call("c2", "read_file", json!({"path": "math.sh"})),
-            call(
-                "c3",
-                "apply_patch",
-                json!({"path": "math.sh", "diff": diff}),
-            ),
-            call("c4", "shell", json!({"command": "sh test.sh"})),
-            vec![
-                StreamEvent::TextDelta("Fixed: add() subtracted instead of adding.".into()),
-                StreamEvent::Done(StopReason::EndTurn),
-            ],
-        ])),
-    });
+    let provider = ScriptedProvider::new([
+        call("c1", "shell", json!({"command": "sh test.sh"})),
+        call("c2", "read_file", json!({"path": "math.sh"})),
+        call(
+            "c3",
+            "apply_patch",
+            json!({"path": "math.sh", "diff": diff}),
+        ),
+        call("c4", "shell", json!({"command": "sh test.sh"})),
+        reply("Fixed: add() subtracted instead of adding."),
+    ]);
     let sandbox = sandbox();
     let sandboxed = sandbox.enforced();
-    let gate = Arc::new(RecordingGate::default());
+    let gate = ScriptedGate::always(Decision::Approve);
     let policy =
         ApprovalPolicy::for_project(ApprovalMode::AutoWorkspace, workspace.root()).unwrap();
     let agent = Agent::new(
@@ -134,51 +71,23 @@ async fn agent_fixes_a_failing_test() {
     .with_sandbox(sandbox);
 
     let mut session = Session::new();
-    let (tx, mut rx) = mpsc::channel(64);
-    let collect = tokio::spawn(async move {
-        let mut events = Vec::new();
-        while let Some(event) = rx.recv().await {
-            events.push(event);
-        }
-        events
-    });
-    let outcome = agent
-        .run_turn(
-            "test.sh fails; fix it",
-            &mut session,
-            &tx,
-            CancellationToken::new(),
-        )
-        .await
-        .unwrap();
-    drop(tx);
-    let events = collect.await.unwrap();
+    let (outcome, events) =
+        run_turn(&agent, &mut session, "test.sh fails; fix it", |_, _| {}).await;
 
-    assert_eq!(outcome, TurnOutcome::Completed);
-    let results: Vec<(String, bool)> = session
-        .messages
-        .iter()
-        .flat_map(|m| &m.content)
-        .filter_map(|part| match part {
-            ContentPart::ToolResult {
-                output, is_error, ..
-            } => Some((output.clone(), *is_error)),
-            _ => None,
-        })
-        .collect();
+    assert_eq!(outcome.unwrap(), TurnOutcome::Completed);
+    let results = tool_results(&session);
     assert_eq!(results.len(), 4, "{results:#?}");
-    let (first_run, failed) = &results[0];
+    let (_, first_run, failed) = &results[0];
     assert!(
         *failed && first_run.contains("FAIL: add 2 3 = -1"),
         "{first_run}"
     );
-    let (patch, patch_failed) = &results[2];
+    let (_, patch, patch_failed) = &results[2];
     assert!(!patch_failed, "{patch}");
-    let (second_run, failed) = &results[3];
+    let (_, second_run, failed) = &results[3];
     assert!(!failed, "{second_run}");
     assert!(second_run.starts_with("exit code: 0") && second_run.contains("PASS"));
 
-    // The fix is on disk and the test passes outside the agent too.
     assert!(
         std::fs::read_to_string(repo.path().join("math.sh"))
             .unwrap()
@@ -192,19 +101,16 @@ async fn agent_fixes_a_failing_test() {
     assert!(status.status.success());
 
     // Auto mode: the patch never needed a prompt; with a sandbox, neither did the test runs.
-    let asked = gate.0.lock().unwrap().clone();
+    let asked = gate.asked();
     assert!(asked.iter().all(|r| r.tool == "shell"), "{asked:#?}");
     assert_eq!(asked.len(), if sandboxed { 0 } else { 2 });
-    let decisions: Vec<_> = events
-        .iter()
-        .filter_map(|e| match e {
-            AgentEvent::Approval(record) => Some((record.tool.as_str(), record.source.clone())),
-            _ => None,
-        })
+    let decisions: Vec<_> = approvals(&events)
+        .into_iter()
+        .map(|record| (record.tool, record.source))
         .collect();
     assert_eq!(decisions.len(), 4);
     assert!(decisions.contains(&(
-        "apply_patch",
+        "apply_patch".to_owned(),
         DecisionSource::Mode(ApprovalMode::AutoWorkspace)
     )));
 }

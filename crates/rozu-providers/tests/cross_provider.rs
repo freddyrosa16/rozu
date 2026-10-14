@@ -1,6 +1,5 @@
-//! The M2 acceptance check: one scripted agent task (call the `lookup` tool, then answer with its
-//! result) passes against mocked OpenAI, Anthropic and xAI servers, with each provider built
-//! through the registry exactly as the CLI builds it.
+//! M2 acceptance: one tool-using agent task passes on every provider, built via the registry as
+//! the CLI builds it.
 
 mod common;
 
@@ -48,7 +47,6 @@ const CASES: [Case; 3] = [
     },
 ];
 
-/// Where the tool result sits in the follow-up request body, per wire format.
 fn sent_tool_result(provider: &str, body: &serde_json::Value) -> (String, String) {
     if provider == "anthropic" {
         let last = body["messages"].as_array().unwrap().last().unwrap();
@@ -134,7 +132,6 @@ async fn same_task_passes_on_every_provider() {
             "{spec}"
         );
 
-        // Usage and cost were accounted for both model requests.
         assert!(h.session.last_turn.usage.input_tokens > 0, "{spec}");
         assert!(h.session.last_turn.usage.output_tokens > 0, "{spec}");
         assert!(h.session.last_turn.cost_usd.unwrap() > 0.0, "{spec}");

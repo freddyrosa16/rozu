@@ -393,50 +393,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn usage_adds_and_costs() {
-        let mut total = Usage::default();
-        total += Usage {
-            input_tokens: 1_000_000,
-            output_tokens: 100_000,
-            cache_read_tokens: 0,
-            cache_write_tokens: 0,
-        };
-        total += Usage {
-            input_tokens: 0,
-            output_tokens: 100_000,
-            cache_read_tokens: 0,
-            cache_write_tokens: 0,
-        };
-        let model = ModelInfo {
-            id: "m".into(),
-            provider: "p".into(),
-            context_window: 1000,
-            supports_tools: true,
-            price_in_per_mtok: 1.0,
-            price_out_per_mtok: 10.0,
-            price_cached_in_per_mtok: 0.1,
-            price_cache_write_per_mtok: 1.25,
-            long_context: None,
-            billing: Billing::Metered,
-            caps: ProviderCaps::default(),
-        };
-        assert!((model.cost_usd(&total) - 3.0).abs() < 1e-9);
-
-        // Half the input from the cache: 0.5 * 1.0 + 0.5 * 0.1 + 0.2 * 10.0.
-        total.cache_read_tokens = 500_000;
-        assert!((model.cost_usd(&total) - 2.55).abs() < 1e-9);
-
-        // Plus a fifth written to the cache: 0.3 * 1.0 + 0.5 * 0.1 + 0.2 * 1.25 + 0.2 * 10.0.
-        total.cache_write_tokens = 200_000;
-        assert!((model.cost_usd(&total) - 2.6).abs() < 1e-9);
-
-        // Over-reported cache counts never price more input than was billed.
-        total.cache_write_tokens = 900_000;
-        assert!((model.cost_usd(&total) - (0.5 * 0.1 + 0.5 * 1.25 + 2.0)).abs() < 1e-9);
-    }
-
-    fn tiered_model() -> ModelInfo {
+    fn flat_model() -> ModelInfo {
         ModelInfo {
             id: "m".into(),
             provider: "p".into(),
@@ -450,7 +407,10 @@ mod tests {
             billing: Billing::Metered,
             caps: ProviderCaps::default(),
         }
-        .with_long_context(LongContextPrices {
+    }
+
+    fn tiered_model() -> ModelInfo {
+        flat_model().with_long_context(LongContextPrices {
             threshold_tokens: 200_000,
             price_in_per_mtok: 2.0,
             price_out_per_mtok: 20.0,
@@ -468,30 +428,56 @@ mod tests {
         }
     }
 
+    #[track_caller]
+    fn assert_close(actual: f64, expected: f64) {
+        assert!((actual - expected).abs() < 1e-9, "{actual} != {expected}");
+    }
+
+    #[test]
+    fn usage_adds_and_costs() {
+        let mut total = Usage::default();
+        total += usage(1_000_000, 0, 0, 100_000);
+        total += usage(0, 0, 0, 100_000);
+        let model = flat_model();
+        assert_close(model.cost_usd(&total), 3.0);
+
+        // Half the input from the cache: 0.5 * 1.0 + 0.5 * 0.1 + 0.2 * 10.0.
+        total.cache_read_tokens = 500_000;
+        assert_close(model.cost_usd(&total), 2.55);
+
+        // Plus a fifth written to the cache: 0.3 * 1.0 + 0.5 * 0.1 + 0.2 * 1.25 + 0.2 * 10.0.
+        total.cache_write_tokens = 200_000;
+        assert_close(model.cost_usd(&total), 2.6);
+
+        // Over-reported cache counts never price more input than was billed.
+        total.cache_write_tokens = 900_000;
+        assert_close(model.cost_usd(&total), 0.5 * 0.1 + 0.5 * 1.25 + 2.0);
+    }
+
     #[test]
     fn long_context_tier_starts_at_the_threshold() {
         let model = tiered_model();
-        // Just under: standard prices. 199,999 * 1.0 + 1,000 * 10.0.
-        let under = model.cost_usd(&usage(199_999, 0, 0, 1_000));
-        assert!((under - (0.199_999 + 0.01)).abs() < 1e-9, "{under}");
+        assert_close(
+            model.cost_usd(&usage(199_999, 0, 0, 1_000)),
+            0.199_999 + 0.01,
+        );
         // At the threshold every token, output included, pays the long-context price.
-        let at = model.cost_usd(&usage(200_000, 0, 0, 1_000));
-        assert!((at - (0.4 + 0.02)).abs() < 1e-9, "{at}");
+        assert_close(model.cost_usd(&usage(200_000, 0, 0, 1_000)), 0.4 + 0.02);
     }
 
     #[test]
     fn long_context_threshold_counts_cached_input() {
         let model = tiered_model();
         // 150k cache reads + 40k writes + 10k uncached = 200k prompt tokens: long tier.
-        let cost = model.cost_usd(&usage(200_000, 150_000, 40_000, 0));
-        let expected = (10_000.0 * 2.0 + 150_000.0 * 0.2 + 40_000.0 * 2.5) / 1e6;
-        assert!((cost - expected).abs() < 1e-9, "{cost}");
+        assert_close(
+            model.cost_usd(&usage(200_000, 150_000, 40_000, 0)),
+            (10_000.0 * 2.0 + 150_000.0 * 0.2 + 40_000.0 * 2.5) / 1e6,
+        );
     }
 
     #[test]
     fn model_info_without_long_context_round_trips() {
-        let mut model = tiered_model();
-        model.long_context = None;
+        let model = flat_model();
         let json = serde_json::to_value(&model).unwrap();
         assert!(json.get("long_context").is_none());
         assert_eq!(serde_json::from_value::<ModelInfo>(json).unwrap(), model);

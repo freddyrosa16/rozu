@@ -322,7 +322,6 @@ mod tests {
         state.begin_turn();
         assert_eq!(state.press(), Press::CancelTurn);
         state.end_turn();
-        // Back at the prompt.
         assert_eq!(state.press(), Press::Exit);
     }
 
@@ -339,7 +338,6 @@ mod tests {
             .into_iter()
             .map(|handle| handle.join().unwrap())
             .collect();
-        // Exactly one press cancels; every other one exits.
         assert_eq!(
             results.iter().filter(|p| **p == Press::CancelTurn).count(),
             1

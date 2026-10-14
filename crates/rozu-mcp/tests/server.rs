@@ -1,10 +1,8 @@
-//! The MCP server over an in-memory stdio pair, with a fake parent rozu process on the approval
-//! socket.
-
 #![cfg(unix)]
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use rozu_core::{
@@ -18,7 +16,6 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, DuplexStream, Lines};
 use tokio::sync::mpsc;
 
-/// The user in the parent process: answers every prompt with `answer` and remembers them.
 struct ScriptedUser {
     answer: Decision,
     asked: Mutex<Vec<ApprovalRequest>>,
@@ -32,34 +29,52 @@ impl ApprovalGate for ScriptedUser {
     }
 }
 
-/// The parent rozu process: an approval bridge on a socket in a private temp dir.
+fn deny(reason: &str) -> Decision {
+    Decision::Deny {
+        reason: reason.into(),
+    }
+}
+
+async fn within<T>(secs: u64, fut: impl Future<Output = T>) -> T {
+    tokio::time::timeout(Duration::from_secs(secs), fut)
+        .await
+        .expect("timed out")
+}
+
+/// An approval bridge on a socket in a private dir under /tmp (socket paths have a short limit).
+fn bind_bridge(
+    gate: Arc<dyn ApprovalGate>,
+) -> (
+    tempfile::TempDir,
+    ApprovalBridge,
+    mpsc::UnboundedReceiver<StreamEvent>,
+) {
+    let dir = tempfile::Builder::new()
+        .prefix("rozu-test-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let (tx, events) = mpsc::unbounded_channel();
+    let bridge = ApprovalBridge::bind(dir.path().join("approval.sock"), "test-cli", gate, tx)
+        .expect("bind the approval socket");
+    (dir, bridge, events)
+}
+
+/// The parent rozu process.
 struct FakeParent {
     _dir: tempfile::TempDir,
     bridge: ApprovalBridge,
     user: Arc<ScriptedUser>,
     events: mpsc::UnboundedReceiver<StreamEvent>,
-    /// Approval prompts the bridge reported, in order.
     prompts: Vec<StreamEvent>,
 }
 
 impl FakeParent {
     fn start(answer: Decision) -> Self {
-        let dir = tempfile::Builder::new()
-            .prefix("rozu-test-")
-            .tempdir_in("/tmp")
-            .unwrap();
         let user = Arc::new(ScriptedUser {
             answer,
             asked: Mutex::default(),
         });
-        let (tx, events) = mpsc::unbounded_channel();
-        let bridge = ApprovalBridge::bind(
-            dir.path().join("approval.sock"),
-            "test-cli",
-            user.clone(),
-            tx,
-        )
-        .expect("bind the approval socket");
+        let (dir, bridge, events) = bind_bridge(user.clone());
         Self {
             _dir: dir,
             bridge,
@@ -80,10 +95,7 @@ impl FakeParent {
     /// The next decision-log entry the server forwarded; prompts before it go to `prompts`.
     async fn record(&mut self) -> ApprovalRecord {
         loop {
-            let event = tokio::time::timeout(std::time::Duration::from_secs(5), self.events.recv())
-                .await
-                .expect("a record within 5s")
-                .expect("bridge open");
+            let event = within(5, self.events.recv()).await.expect("bridge open");
             match event {
                 StreamEvent::Approval(record) => return record,
                 prompt => self.prompts.push(prompt),
@@ -92,7 +104,6 @@ impl FakeParent {
     }
 }
 
-/// An MCP client talking to a server task over an in-memory pipe.
 struct Client {
     _workspace: tempfile::TempDir,
     root: PathBuf,
@@ -104,18 +115,10 @@ struct Client {
 
 impl Client {
     fn start(mode: ApprovalMode, socket: Option<&Path>) -> Self {
-        Self::start_inner(mode, socket, None)
+        Self::start_with_audit(mode, socket, None)
     }
 
     fn start_with_audit(
-        mode: ApprovalMode,
-        socket: Option<&Path>,
-        audit: Arc<rozu_core::AuditLog>,
-    ) -> Self {
-        Self::start_inner(mode, socket, Some(audit))
-    }
-
-    fn start_inner(
         mode: ApprovalMode,
         socket: Option<&Path>,
         audit: Option<Arc<rozu_core::AuditLog>>,
@@ -154,9 +157,8 @@ impl Client {
     }
 
     async fn recv(&mut self) -> Value {
-        let line = tokio::time::timeout(std::time::Duration::from_secs(10), self.lines.next_line())
+        let line = within(10, self.lines.next_line())
             .await
-            .expect("a response within 10s")
             .unwrap()
             .expect("server still open");
         serde_json::from_str(&line).unwrap()
@@ -179,7 +181,6 @@ impl Client {
         response["result"].clone()
     }
 
-    /// The parsed answer of the `approve` tool.
     async fn approve(&mut self, tool_name: &str, input: Value) -> Value {
         let result = self
             .call(
@@ -191,19 +192,19 @@ impl Client {
         serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap()
     }
 
-    /// Ends the input (like the CLI closing stdin) and waits for the server to finish.
+    /// Closes stdin like the CLI does; the server must stop on its own.
     async fn close(mut self) {
         self.writer.shutdown().await.unwrap();
-        tokio::time::timeout(std::time::Duration::from_secs(10), self.server)
-            .await
-            .expect("server stops at end of input")
-            .unwrap()
-            .unwrap();
+        within(10, self.server).await.unwrap().unwrap();
     }
 }
 
 fn text(result: &Value) -> &str {
     result["content"][0]["text"].as_str().unwrap()
+}
+
+fn message(answer: &Value) -> &str {
+    answer["message"].as_str().unwrap()
 }
 
 #[tokio::test]
@@ -253,7 +254,6 @@ async fn initialize_list_and_call_round_trip() {
     assert_eq!(read["isError"], false, "{read}");
     assert!(text(&read).contains("# demo"), "{read}");
 
-    // Workspace confinement still applies.
     let outside = client
         .call("read_file", json!({"path": "/etc/hosts"}))
         .await;
@@ -285,9 +285,7 @@ async fn initialize_answers_with_a_supported_version() {
 
 #[tokio::test]
 async fn approve_allows_reads_and_rozu_tools_without_asking() {
-    let parent = FakeParent::start(Decision::Deny {
-        reason: "should not be asked".into(),
-    });
+    let parent = FakeParent::start(deny("should not be asked"));
     let mut client = Client::start(ApprovalMode::AutoWorkspace, Some(&parent.socket()));
 
     let read = client
@@ -312,10 +310,7 @@ async fn approve_denies_unmappable_requests_and_logs_them() {
 
     let answer = client.approve("TeleportFiles", json!({"to": "mars"})).await;
     assert_eq!(answer["behavior"], "deny");
-    assert!(
-        answer["message"].as_str().unwrap().contains("can't map"),
-        "{answer}"
-    );
+    assert!(message(&answer).contains("can't map"), "{answer}");
     assert!(parent.asked().is_empty(), "default-deny doesn't ask");
     let record = parent.record().await;
     assert_eq!(record.tool, "TeleportFiles");
@@ -332,13 +327,7 @@ async fn claude_bash_is_denied_in_favor_of_the_sandboxed_shell() {
 
     let result = client.approve("Bash", json!({"command": "ls"})).await;
     assert_eq!(result["behavior"], "deny", "{result}");
-    assert!(
-        result["message"]
-            .as_str()
-            .unwrap()
-            .contains("mcp__rozu__shell"),
-        "{result}"
-    );
+    assert!(message(&result).contains("mcp__rozu__shell"), "{result}");
     assert!(parent.asked().is_empty(), "denied without asking");
     let record = parent.record().await;
     assert_eq!(record.tool, "Bash");
@@ -349,15 +338,7 @@ async fn claude_bash_is_denied_in_favor_of_the_sandboxed_shell() {
 /// BUG-5 through MCP: rozu's shell with interpreter code asks even in full access.
 #[tokio::test]
 async fn interpreter_code_prompts_the_parent_even_in_full_access() {
-    for (answer, ran) in [
-        (Decision::Approve, true),
-        (
-            Decision::Deny {
-                reason: "not today".into(),
-            },
-            false,
-        ),
-    ] {
+    for (answer, ran) in [(Decision::Approve, true), (deny("not today"), false)] {
         let mut parent = FakeParent::start(answer);
         let mut client = Client::start(ApprovalMode::FullAccess, Some(&parent.socket()));
 
@@ -381,14 +362,15 @@ async fn interpreter_code_prompts_the_parent_even_in_full_access() {
 /// BUG-7: decisions made inside `rozu mcp-serve` are in the audit log too.
 #[tokio::test]
 async fn mcp_decisions_go_to_the_audit_log() {
-    let mut parent = FakeParent::start(Decision::Deny {
-        reason: "nope".into(),
-    });
+    let mut parent = FakeParent::start(deny("nope"));
     let logs = tempfile::tempdir().unwrap();
     let log_path = logs.path().join("approvals.jsonl");
     let audit = Arc::new(rozu_core::AuditLog::open(&log_path, "chat-7").unwrap());
-    let mut client =
-        Client::start_with_audit(ApprovalMode::AutoWorkspace, Some(&parent.socket()), audit);
+    let mut client = Client::start_with_audit(
+        ApprovalMode::AutoWorkspace,
+        Some(&parent.socket()),
+        Some(audit),
+    );
 
     // Auto-approved by the mode, denied by policy, and asked (then denied by the user).
     client
@@ -422,13 +404,7 @@ async fn mcp_decisions_go_to_the_audit_log() {
 async fn rozu_write_tool_goes_through_the_parent_in_read_only_mode() {
     for (answer, written, resolution) in [
         (Decision::Approve, true, ApprovalResolution::Approved),
-        (
-            Decision::Deny {
-                reason: "no".into(),
-            },
-            false,
-            ApprovalResolution::Denied,
-        ),
+        (deny("no"), false, ApprovalResolution::Denied),
     ] {
         let mut parent = FakeParent::start(answer);
         let mut client = Client::start(ApprovalMode::ReadOnly, Some(&parent.socket()));
@@ -445,7 +421,6 @@ async fn rozu_write_tool_goes_through_the_parent_in_read_only_mode() {
         let record = parent.record().await;
         assert_eq!(record.tool, "write_file");
         assert_eq!(record.source, DecisionSource::Gate);
-        // The parent reported the forwarded prompt while it was open, then how it ended.
         let id = asked[0].call_id.clone();
         assert_eq!(
             parent.prompts,
@@ -466,7 +441,6 @@ async fn rozu_write_tool_goes_through_the_parent_in_read_only_mode() {
     }
 }
 
-/// A prompt withdrawn because `rozu mcp-serve` hung up (the CLI was cancelled) expires.
 #[tokio::test]
 async fn withdrawn_prompts_expire() {
     struct NeverAnswers;
@@ -476,18 +450,7 @@ async fn withdrawn_prompts_expire() {
             std::future::pending().await
         }
     }
-    let dir = tempfile::Builder::new()
-        .prefix("rozu-test-")
-        .tempdir_in("/tmp")
-        .unwrap();
-    let (tx, mut events) = mpsc::unbounded_channel();
-    let bridge = ApprovalBridge::bind(
-        dir.path().join("approval.sock"),
-        "test-cli",
-        Arc::new(NeverAnswers),
-        tx,
-    )
-    .unwrap();
+    let (_dir, bridge, mut events) = bind_bridge(Arc::new(NeverAnswers));
     let gate = SocketGate::new(Some(bridge.path().to_path_buf()));
     let call = tokio::spawn(async move {
         gate.decide(ApprovalRequest {
@@ -505,24 +468,18 @@ async fn withdrawn_prompts_expire() {
         })
         .await
     });
-    async fn next(events: &mut mpsc::UnboundedReceiver<StreamEvent>) -> StreamEvent {
-        tokio::time::timeout(std::time::Duration::from_secs(5), events.recv())
-            .await
-            .unwrap()
-            .unwrap()
-    }
-    let StreamEvent::ApprovalPending(pending) = next(&mut events).await else {
+    let StreamEvent::ApprovalPending(pending) = within(5, events.recv()).await.unwrap() else {
         panic!("expected a pending prompt");
     };
     assert_eq!(
         (pending.tool.as_str(), pending.summary.as_str()),
         ("write_file", "x.txt")
     );
-    // `rozu mcp-serve` goes away with the question still open.
+    // `rozu mcp-serve` hanging up (the CLI was cancelled) withdraws the open prompt.
     call.abort();
     let _ = call.await;
     assert_eq!(
-        next(&mut events).await,
+        within(5, events.recv()).await.unwrap(),
         StreamEvent::ApprovalResolved {
             request_id: pending.request_id,
             resolution: ApprovalResolution::Expired,
@@ -532,9 +489,7 @@ async fn withdrawn_prompts_expire() {
 
 #[tokio::test]
 async fn auto_mode_writes_in_the_workspace_without_asking() {
-    let mut parent = FakeParent::start(Decision::Deny {
-        reason: "should not be asked".into(),
-    });
+    let mut parent = FakeParent::start(deny("should not be asked"));
     let mut client = Client::start(ApprovalMode::AutoWorkspace, Some(&parent.socket()));
     let result = client
         .call("write_file", json!({"path": "a.txt", "content": "a"}))
@@ -561,13 +516,7 @@ async fn unreachable_parent_means_deny() {
             .approve("WebFetch", json!({"url": "https://example.com"}))
             .await;
         assert_eq!(answer["behavior"], "deny", "{answer}");
-        assert!(
-            answer["message"]
-                .as_str()
-                .unwrap()
-                .contains("denied by default"),
-            "{answer}"
-        );
+        assert!(message(&answer).contains("denied by default"), "{answer}");
 
         let write = client
             .call("write_file", json!({"path": "x.txt", "content": "x"}))

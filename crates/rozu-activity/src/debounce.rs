@@ -127,7 +127,7 @@ mod tests {
         assert!(d.poll(0.3));
         assert_eq!(d.shown().unwrap().state, Editing);
         assert_eq!(d.deadline(), None);
-        // Back to what's shown before the dwell ends: nothing to do.
+        // Back to what's shown before the dwell ends.
         assert!(!d.offer(Some(&a(Running, "Running ls")), 0.35));
         assert!(!d.offer(Some(&a(Editing, "Editing a.rs")), 0.4));
         assert_eq!(d.deadline(), None);

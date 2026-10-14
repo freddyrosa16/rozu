@@ -366,6 +366,10 @@ mod tests {
         d.p[0].hypot(d.p[1])
     }
 
+    fn full_globe(size: OrbSize) -> Vec<Dot> {
+        (0..size.dots()).map(|i| breath(size, i, 1.0)).collect()
+    }
+
     #[test]
     fn grids_match_the_reference() {
         assert_eq!(Large.dots(), MAX_DOTS);
@@ -520,7 +524,7 @@ mod tests {
         }
     }
 
-    /// Every busy state keeps its dots on the globe (radius R, or Waiting's breath).
+    /// Radius R, or Waiting's breath.
     #[test]
     fn busy_states_stay_on_the_globe() {
         for size in OrbSize::ALL {
@@ -540,7 +544,6 @@ mod tests {
         }
     }
 
-    /// Each state's still frame differs from every other state's.
     #[test]
     fn states_differ() {
         for size in OrbSize::ALL {
@@ -598,7 +601,6 @@ mod tests {
                 "t={t}: the ripples are on the front"
             );
         }
-        // A ripple's radius grows with its age.
         let spread = |t: f64| {
             let f = frame(Large, Thinking, t);
             let lit: Vec<&Dot> = f.iter().filter(|d| d.lit > 0.35).collect();
@@ -659,12 +661,9 @@ mod tests {
         assert!(written(0.2) < written(1.0));
         assert!(written(1.0) < written(1.9));
         assert_eq!(written(2.1), Large.dots(), "every dot, then held");
-        // Then everything fades together.
         let f = frame(Large, Editing, 2.5);
         assert!(f.iter().all(|d| d.lit > 0.0 && d.lit < 0.5), "clearing");
         assert!(frame(Large, Editing, 2.59).iter().all(|d| d.lit < 0.05));
-        // Half-way through, every written dot sits on a ring at or below every unwritten one,
-        // and the lowest ring went first.
         let f = frame(Large, Editing, 1.0);
         let top_written = (0..Large.dots())
             .filter(|&i| f[i].lit > 0.0)
@@ -683,7 +682,6 @@ mod tests {
                 .enumerate()
                 .all(|(i, d)| d.lit == 0.0 || Large.grid(i).2 == 0)
         );
-        // Exactly one caret while writing, none while held or clearing.
         let carets = |t: f64| {
             frame(Large, Editing, t)
                 .iter()
@@ -727,7 +725,7 @@ mod tests {
     #[test]
     fn done_fills_up_pops_then_holds() {
         for size in OrbSize::ALL {
-            let full: Vec<Dot> = (0..size.dots()).map(|i| breath(size, i, 1.0)).collect();
+            let full = full_globe(size);
             for t in [0.8, 1.0, crate::SETTLE, 5.0] {
                 assert_eq!(frame(size, Done, t), full, "t={t}");
             }
@@ -745,7 +743,7 @@ mod tests {
 
     #[test]
     fn error_shakes_then_holds() {
-        let full: Vec<Dot> = (0..Large.dots()).map(|i| breath(Large, i, 1.0)).collect();
+        let full = full_globe(Large);
         for t in [crate::SETTLE, 5.0, 60.0] {
             assert_eq!(frame(Large, Error, t), full, "t={t}");
         }

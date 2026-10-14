@@ -477,17 +477,13 @@ mod tests {
     #[tokio::test]
     async fn validates_arguments() {
         let (_dir, ctx) = setup();
-        assert!(Shell.validate(&json!({"command": "  "}), &ctx).is_err());
-        assert!(
-            Shell
-                .validate(&json!({"command": "ls", "cwd": ".."}), &ctx)
-                .is_err()
-        );
-        assert!(
-            Shell
-                .validate(&json!({"command": "ls", "cwd": "nope"}), &ctx)
-                .is_err()
-        );
+        for bad in [
+            json!({"command": "  "}),
+            json!({"command": "ls", "cwd": ".."}),
+            json!({"command": "ls", "cwd": "nope"}),
+        ] {
+            assert!(Shell.validate(&bad, &ctx).is_err(), "{bad}");
+        }
         assert!(Shell.validate(&json!({"command": "ls"}), &ctx).is_ok());
     }
 
@@ -513,7 +509,7 @@ mod tests {
         let session = crate::SessionTemp::create("test").unwrap();
         let ctx = ctx.with_temp_dir(session.path());
         let risk = |command: &str| Shell.risk(&json!({ "command": command }), &ctx);
-        // Writing to the session temp dir is a (redirect, so opaque) write inside...
+        // A redirect is opaque even into the session temp dir.
         let inside = session.path().join("x.txt");
         assert_eq!(
             risk(&format!("touch {}", inside.display())),
@@ -521,7 +517,6 @@ mod tests {
         );
         assert_eq!(risk("touch $TMPDIR/x.txt"), Risk::WriteWorkspace);
         assert_eq!(risk("echo hi > \"$TMPDIR/x.txt\""), Risk::Opaque);
-        // ...while /tmp and the user's temp dir are outside, with the path known.
         let args = json!({"command": "touch /tmp/rozu-elsewhere.txt"});
         assert_eq!(Shell.risk(&args, &ctx), Risk::WriteOutside);
         assert_eq!(
