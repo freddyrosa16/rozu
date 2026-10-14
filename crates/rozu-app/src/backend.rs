@@ -8,7 +8,9 @@ use anyhow::{Context, anyhow};
 use async_trait::async_trait;
 use rozu_activity::ActivityEvent;
 use rozu_cli_providers::claude::install::{claude_auth_status, find_claude_binary};
-use rozu_cli_providers::codex::install::{LoginStatus, codex_login_status, find_codex_binary};
+use rozu_cli_providers::codex::install::{
+    LoginStatus, codex_login_status, find_codex_binary, list_models,
+};
 use rozu_cli_providers::grok::install::find_grok_binary;
 use rozu_cli_providers::{
     ClaudeCliConfig, ClaudeCliProvider, CodexAppServerProvider, CodexConfig, GrokConfig,
@@ -75,6 +77,19 @@ impl Backend {
             rt: tokio::runtime::Runtime::new()?,
             tools: Arc::new(ToolRegistry::standard()),
         })
+    }
+
+    /// The models the installed Codex CLI offers; empty when it can't say.
+    pub fn codex_models(&self) -> oneshot::Receiver<Live> {
+        let (tx, rx) = oneshot::channel();
+        self.rt.spawn(async move {
+            let models = match find_codex_binary().filter(|p| p.exists()) {
+                Some(bin) => list_models(&bin).await.unwrap_or_default(),
+                None => Vec::new(),
+            };
+            let _ = tx.send(models.into_iter().map(|m| (m.id, m.display_name)).collect());
+        });
+        rx
     }
 
     /// Whether a subscription CLI is installed and signed in.
@@ -328,11 +343,23 @@ pub fn providers() -> Vec<&'static ProviderInfo> {
     all
 }
 
-/// Every model `provider` offers.
-pub fn models(provider: &ProviderInfo) -> Vec<ModelChoice> {
-    registry::models_for(provider.id)
-        .into_iter()
-        .filter_map(|m| registry::resolve(Some(provider.id), Some(&m.id)).ok())
+/// Models a CLI reported itself (Codex's `model/list`): id and display name.
+pub type Live = Vec<(String, String)>;
+
+/// Every model `provider` offers; Codex's own list when it gave one.
+pub fn models(provider: &ProviderInfo, live: &Live) -> Vec<ModelChoice> {
+    let ids: Vec<String> = if provider.id == CODEX_ID && !live.is_empty() {
+        std::iter::once("default".to_owned())
+            .chain(live.iter().map(|(id, _)| id.clone()))
+            .collect()
+    } else {
+        registry::models_for(provider.id)
+            .into_iter()
+            .map(|m| m.id)
+            .collect()
+    };
+    ids.iter()
+        .filter_map(|id| registry::resolve(Some(provider.id), Some(id)).ok())
         .collect()
 }
 
@@ -353,21 +380,44 @@ pub fn provider_name(provider: &ProviderInfo) -> &'static str {
         .map_or(provider.label, |p| p.name)
 }
 
-/// How a model is named in the app: `opus` → `Opus`, `default` → `Default`.
-pub fn model_name(model: &str) -> String {
-    let mut chars = model.chars();
-    match chars.next() {
-        Some(c) if !model.contains('-') => c.to_uppercase().chain(chars).collect(),
-        _ => model.to_owned(),
+/// How a model is named in the app: the CLI's own name, else `opus` → `Opus`,
+/// `gpt-6.1-sol` → `GPT-6.1 Sol`, `claude-opus-5-5` → `Claude Opus 5.5`.
+pub fn model_name(model: &str, live: &Live) -> String {
+    if let Some((_, name)) = live.iter().find(|(id, _)| id == model) {
+        return name.clone();
     }
+    let mut words: Vec<String> = Vec::new();
+    for part in model.split('-') {
+        let short_num = |s: &str| s.len() <= 2 && s.chars().all(|c| c.is_ascii_digit());
+        match words.last_mut() {
+            Some(last) if short_num(part) && short_num(last.rsplit('.').next().unwrap_or("")) => {
+                last.push('.');
+                last.push_str(part);
+            }
+            Some(last) if last == "GPT" => {
+                last.push('-');
+                last.push_str(part);
+            }
+            _ => words.push(match part {
+                "gpt" => "GPT".to_owned(),
+                _ => {
+                    let mut c = part.chars();
+                    c.next()
+                        .map(|f| f.to_uppercase().chain(c).collect())
+                        .unwrap_or_default()
+                }
+            }),
+        }
+    }
+    words.join(" ")
 }
 
 /// How the composer names a model: `Claude Opus · high`.
-pub fn label(choice: &ModelChoice, effort: Option<&str>) -> String {
+pub fn label(choice: &ModelChoice, effort: Option<&str>, live: &Live) -> String {
     let name = provider_name(choice.provider);
     let model = match choice.model.as_str() {
         "default" => name.to_owned(),
-        model => format!("{name} {}", model_name(model)),
+        model => format!("{name} {}", model_name(model, live)),
     };
     match effort {
         Some(effort) => format!("{model} · {effort}"),
@@ -406,14 +456,27 @@ mod tests {
 
     #[test]
     fn names_models_like_the_app() {
+        let none = Live::new();
         let opus = registry::resolve(Some(CLAUDE_CLI_ID), Some("opus")).unwrap();
-        assert_eq!(label(&opus, Some("high")), "Claude Opus · high");
+        assert_eq!(label(&opus, Some("high"), &none), "Claude Opus · high");
         let codex = registry::resolve(Some(CODEX_ID), None).unwrap();
-        assert_eq!(label(&codex, None), "ChatGPT");
-        assert_eq!(model_name("claude-opus-5-5"), "claude-opus-5-5");
-        let names: Vec<_> = models(registry::provider_info(CLAUDE_CLI_ID).unwrap())
+        assert_eq!(label(&codex, None, &none), "ChatGPT");
+        for (id, name) in [
+            ("claude-opus-5-5", "Claude Opus 5.5"),
+            ("gpt-6.1-sol", "GPT-6.1 Sol"),
+            ("grok-4.7-build", "Grok 4.7 Build"),
+            ("default", "Default"),
+        ] {
+            assert_eq!(model_name(id, &none), name);
+        }
+        let live = vec![("gpt-7".to_owned(), "GPT-7 Max".to_owned())];
+        assert_eq!(model_name("gpt-7", &live), "GPT-7 Max");
+        let codex = registry::provider_info(CODEX_ID).unwrap();
+        let ids: Vec<_> = models(codex, &live).into_iter().map(|m| m.model).collect();
+        assert_eq!(ids, ["default", "gpt-7"]);
+        let names: Vec<_> = models(registry::provider_info(CLAUDE_CLI_ID).unwrap(), &none)
             .iter()
-            .map(|m| model_name(&m.model))
+            .map(|m| model_name(&m.model, &none))
             .collect();
         assert_eq!(names, ["Sonnet", "Opus", "Fable", "Haiku"]);
         assert!(efforts(GROK_ID).is_empty());
