@@ -32,7 +32,7 @@ use gpui::{
 use rozu_activity::replay::{demo_turn, replay};
 use rozu_activity::tokens::{ORB_LG_PX, ORB_PX, PILL_HEIGHT_DOCK_PX, Palette, Theme};
 use rozu_activity::{
-    Activity, ActivityEvent, ActivityState, ActivityTracker, DrawDot, FramePolicy, Orb, OrbSize,
+    Activity, ActivityEvent, ActivityState, ActivityTracker, DrawDot, FramePolicy, GLOW_PX, Orb, OrbSize,
     ProjectOptions, ReducedMotion, Sample, project_with,
 };
 
@@ -606,6 +606,11 @@ fn orb_canvas(dots: Vec<DrawDot>, size_px: f32, palette: Palette) -> impl IntoEl
             let (ox, oy) = (snap(bounds.origin.x), snap(bounds.origin.y));
             for d in &dots {
                 let c = color(palette.dot(d.tone), d.alpha);
+                if d.glow {
+                    let r = d.radius + GLOW_PX;
+                    let b = Bounds::new(point(px(ox + d.x - r), px(oy + d.y - r)), size(px(2.0 * r), px(2.0 * r)));
+                    window.paint_quad(fill(b, color(palette.dot(d.tone), d.alpha * 0.15)).corner_radii(px(r)));
+                }
                 if d.pixel_square {
                     let (x, y, side) = d.square(scale);
                     let b = Bounds::new(point(px(ox + x), px(oy + y)), size(px(side), px(side)));

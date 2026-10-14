@@ -13,6 +13,13 @@ pub const POINTS_22: usize = 86;
 const SQUARE_DEVICE_PX: f64 = 1.6;
 /// The light direction (top-left, toward the viewer); not normalised, as in the reference.
 const LIGHT: [f64; 3] = [-0.55, 0.6, 0.58];
+/// Every dot is drawn at this fraction of its v7.5 size, and coloured dots finer still, so the
+/// globe reads through their glow.
+pub const DOT_SCALE: f64 = 0.6;
+pub const TINT_SCALE: f64 = 0.48;
+/// Blur radius (logical px) of the soft glow around coloured dots. It stays on once Done or Error
+/// settles: the held globe keeps glowing, with no fade.
+pub const GLOW_PX: f32 = 2.0;
 
 /// One dot to draw, in logical px from the orb's top-left corner. Back to front.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -23,6 +30,8 @@ pub struct DrawDot {
     /// Final opacity, 0..1.
     pub alpha: f32,
     pub tone: Tone,
+    /// Draw a [`GLOW_PX`] glow in the dot's tone (every coloured dot).
+    pub glow: bool,
     /// Draw as a pixel-snapped square ([`DrawDot::square`]) instead of an AA disc.
     pub pixel_square: bool,
 }
@@ -102,7 +111,15 @@ pub fn project_with(
                 if l == 0.0 { 1.0 } else { l }
             };
             let lam = (LIGHT[0] * b.p[0] + LIGHT[1] * b.p[1] + LIGHT[2] * b.p[2]) / len * 0.5 + 0.5;
-            let r = (base * s * k * (0.4 + 0.6 * depth) * (0.9 + 0.2 * lam) * (1.0 + 0.55 * b.lit))
+            let tint = b.tone != Tone::Neutral;
+            let fine = if tint { TINT_SCALE } else { DOT_SCALE };
+            let r = (base
+                * s
+                * k
+                * (0.4 + 0.6 * depth)
+                * (0.9 + 0.2 * lam)
+                * (1.0 + 0.55 * b.lit)
+                * fine)
                 .max(px * 0.75);
             let mut a = (0.12 + 0.88 * depth) * (0.62 + 0.48 * lam);
             a = (a + 0.5 * b.lit).clamp(0.0, 1.0) * b.a;
@@ -116,6 +133,7 @@ pub fn project_with(
                     radius: r as f32,
                     alpha: a.clamp(0.0, 1.0) as f32,
                     tone: b.tone,
+                    glow: tint,
                     pixel_square: small && r * dpr < SQUARE_DEVICE_PX,
                 },
                 z,
@@ -137,6 +155,7 @@ mod tests {
         let mut dot = Orb::new(ActivityState::Done, 0.0).sample(5.0)[0];
         dot.lit = 0.0;
         dot.s = 1.0;
+        dot.p = [0.0, 0.0, 0.9];
         dot
     }
 
@@ -231,6 +250,21 @@ mod tests {
         };
         assert_eq!(project_with(&pts, 88.0, 2.0, legacy).len(), MAX_POINTS);
         assert!(shown < MAX_POINTS, "the gap's dots have s = 0");
+    }
+
+    #[test]
+    fn coloured_dots_are_finer_and_glow_at_rest() {
+        let orb = Orb::new(ActivityState::Done, 0.0);
+        let done = project(&orb.sample(5.0), 88.0, 4.0);
+        assert!(done.iter().all(|d| d.glow && d.tone == Tone::Success));
+        assert_eq!(done, project(&orb.sample(60.0), 88.0, 4.0));
+        let mut white = unlit_dot();
+        white.tone = Tone::Neutral;
+        let mut green = white;
+        green.tone = Tone::Success;
+        let d = project(&[white, green], 88.0, 4.0);
+        assert!(!d[0].glow);
+        assert!((d[1].radius / d[0].radius - (TINT_SCALE / DOT_SCALE) as f32).abs() < 1e-5);
     }
 
     #[test]
