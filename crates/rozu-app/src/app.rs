@@ -1,35 +1,38 @@
-//! The window: sidebar (nav, projects, repositories with their threads, account) and the
-//! centered chat, or the New Chat page.
+//! The window: sidebar (nav, project folders with their threads, account), the centered chat or
+//! the New Chat page, and the setup page that picks and signs in to an AI on first run.
 
-use std::collections::HashMap;
-use std::path::PathBuf;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use gpui::{
     AnyElement, App, Application, Bounds, Context, Div, Entity, FocusHandle, Focusable, KeyBinding,
-    Menu, MenuItem, MouseButton, ScrollHandle, SharedString, Stateful, Subscription, Svg, Task,
-    TitlebarOptions, Window, WindowBounds, WindowOptions, actions, div, point, prelude::*, px,
-    relative, rgb, size, svg,
+    Menu, MenuItem, MouseButton, PathPromptOptions, PromptLevel, ScrollHandle, SharedString,
+    Stateful, Subscription, Svg, Task, TitlebarOptions, Window, WindowBounds, WindowOptions,
+    actions, deferred, div, point, prelude::*, px, relative, rgb, size, svg,
 };
 use rozu_activity::ActivityState;
 use rozu_core::{ApprovalRequest, Decision};
-use rozu_providers::ModelChoice;
+use rozu_providers::{ModelChoice, ProviderInfo, registry};
 use tokio::sync::{mpsc, oneshot};
 
-use crate::backend::{self, Backend, Chat, Update};
+use crate::backend::{self, Access, Backend, Chat, PLANS, Update};
 use crate::composer::{self, Composer, Sent};
 use crate::feed::{Ask, Feed, Item, Step};
 use crate::orb::OrbView;
+use crate::settings::Settings;
 use crate::theme::*;
 
 actions!(rozu, [Quit]);
 
 pub fn run() {
-    let root = std::env::args_os().nth(1).map(PathBuf::from);
-    let root = root
+    let launch = std::env::args_os()
+        .nth(1)
+        .map(PathBuf::from)
         .or_else(|| std::env::current_dir().ok())
-        .unwrap_or_default();
-    let backend = Backend::new(&root).unwrap_or_else(|err| {
+        .filter(|p| p.parent().is_some())
+        .and_then(|p| p.canonicalize().ok());
+    let backend = Backend::new().unwrap_or_else(|err| {
         eprintln!("rozu-app: {err:#}");
         std::process::exit(1);
     });
@@ -54,7 +57,7 @@ pub fn run() {
                 ..Default::default()
             };
             cx.open_window(options, |window, cx| {
-                cx.new(|cx| Rozu::new(backend, window, cx))
+                cx.new(|cx| Rozu::new(backend, launch, window, cx))
             })
             .expect("open the window");
             cx.on_window_closed(|cx| cx.quit()).detach();
@@ -63,6 +66,8 @@ pub fn run() {
 }
 
 struct Thread {
+    id: usize,
+    root: PathBuf,
     title: SharedString,
     feed: Feed,
     chat: Option<Chat>,
@@ -71,15 +76,29 @@ struct Thread {
     _updates: Option<Task<()>>,
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum Page {
+    Home,
+    Thread(usize),
+    Setup,
+}
+
 struct Rozu {
     backend: Backend,
-    repo: SharedString,
-    repo_open: bool,
+    settings: Settings,
+    /// Where New Chat starts.
+    project: Option<PathBuf>,
+    collapsed: HashSet<PathBuf>,
     threads: Vec<Thread>,
-    /// The open thread; `None` shows New Chat.
-    current: Option<usize>,
-    choices: Vec<ModelChoice>,
-    choice: usize,
+    next_id: usize,
+    page: Page,
+    providers: Vec<&'static ProviderInfo>,
+    choice: Option<ModelChoice>,
+    effort: Option<String>,
+    menu: bool,
+    /// The plan picked on the setup page, and what each plan's CLI says.
+    plan: &'static str,
+    access: HashMap<&'static str, Access>,
     composer: Entity<Composer>,
     orbs: HashMap<String, Entity<OrbView>>,
     scroll: ScrollHandle,
@@ -87,39 +106,61 @@ struct Rozu {
 }
 
 impl Rozu {
-    fn new(backend: Backend, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(
+        backend: Backend,
+        launch: Option<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let composer = cx.new(Composer::new);
         let sent = cx.subscribe(&composer, |this, _, Sent(text), cx| {
             this.send(text.clone(), cx)
         });
         window.focus(&composer.focus_handle(cx));
-        let repo = backend
-            .root()
-            .file_name()
-            .map_or("workspace".into(), |n| n.to_string_lossy().into_owned());
+        let mut settings = Settings::load();
+        if let Some(root) = launch.clone()
+            && settings.add_project(root)
+        {
+            settings.save();
+        }
+        let choice = settings
+            .provider
+            .as_deref()
+            .and_then(|p| registry::resolve(Some(p), settings.model.as_deref()).ok());
+        let first_run = choice.is_none();
         let mut app = Self {
             backend,
-            repo: repo.into(),
-            repo_open: true,
+            project: launch.or_else(|| settings.projects.last().cloned()),
+            effort: settings.effort.clone(),
+            settings,
+            collapsed: HashSet::new(),
             threads: Vec::new(),
-            current: None,
-            choices: backend::choices(),
-            choice: 0,
+            next_id: 0,
+            page: Page::Home,
+            providers: backend::providers(),
+            choice,
+            menu: false,
+            plan: PLANS[0].id,
+            access: HashMap::new(),
             composer,
             orbs: HashMap::new(),
             scroll: ScrollHandle::new(),
             _sent: sent,
         };
-        app.open(None, cx);
+        if first_run {
+            app.setup(cx);
+        } else {
+            app.open(Page::Home, cx);
+        }
         app
     }
 
-    fn open(&mut self, thread: Option<usize>, cx: &mut Context<Self>) {
-        self.current = thread;
-        let placeholder = if thread.is_some() {
-            "Send follow-up"
-        } else {
-            "Plan, build, / for skills, @ for context"
+    fn open(&mut self, page: Page, cx: &mut Context<Self>) {
+        self.page = page;
+        self.menu = false;
+        let placeholder = match page {
+            Page::Thread(_) => "Send follow-up",
+            _ => "Plan, build, / for skills, @ for context",
         };
         self.composer.update(cx, |c, cx| {
             c.placeholder = placeholder.into();
@@ -129,15 +170,32 @@ impl Rozu {
         cx.notify();
     }
 
+    fn thread(&mut self, id: usize) -> Option<&mut Thread> {
+        self.threads.iter_mut().find(|t| t.id == id)
+    }
+
+    fn running(&self) -> bool {
+        matches!(self.page, Page::Thread(id) if self.threads.iter().any(|t| t.id == id && t.feed.running))
+    }
+
     fn send(&mut self, text: String, cx: &mut Context<Self>) {
-        let ix = match self.current {
-            Some(ix) if self.threads[ix].feed.running => {
+        let id = match self.page {
+            Page::Thread(_) if self.running() => {
                 return self.composer.update(cx, |c, cx| c.set_text(&text, cx));
             }
-            Some(ix) => ix,
-            None => {
+            Page::Thread(id) => id,
+            _ => {
+                let Some(root) = self.project.clone() else {
+                    self.composer.update(cx, |c, cx| c.set_text(&text, cx));
+                    return self.add_project(cx);
+                };
                 let title: String = text.lines().next().unwrap_or("").chars().take(60).collect();
+                let id = self.next_id;
+                self.next_id += 1;
+                self.collapsed.remove(&root);
                 self.threads.push(Thread {
+                    id,
+                    root,
                     title: title.into(),
                     feed: Feed::default(),
                     chat: None,
@@ -145,46 +203,57 @@ impl Rozu {
                     touched: Instant::now(),
                     _updates: None,
                 });
-                self.threads.len() - 1
+                id
             }
         };
-        if self.threads[ix].chat.is_none() {
-            self.start(ix, cx);
+        if self.thread(id).is_some_and(|t| t.chat.is_none()) {
+            self.start(id, cx);
         }
-        let thread = &mut self.threads[ix];
+        let Some(thread) = self.thread(id) else {
+            return;
+        };
         thread.feed.send(text.clone());
         thread.touched = Instant::now();
         match &thread.chat {
             Some(chat) if chat.send(text) => {}
             _ => thread.feed.fail(
-                "No model is set up: install the claude, codex or grok CLI, or add an API key with `rozu auth set`.".into(),
+                "No AI is set up yet: click the gear at the bottom left to pick one.".into(),
                 false,
             ),
         }
-        self.open(Some(ix), cx);
+        self.open(Page::Thread(id), cx);
     }
 
-    fn start(&mut self, ix: usize, cx: &mut Context<Self>) {
-        let Some(choice) = self.choices.get(self.choice) else {
+    fn start(&mut self, id: usize, cx: &mut Context<Self>) {
+        let Some(choice) = self.choice.clone() else {
             return;
         };
+        let effort = self.effort.clone();
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let thread = &mut self.threads[ix];
-        thread.chat = Some(self.backend.start(choice, tx));
-        thread._updates = Some(cx.spawn(async move |this, cx| {
+        let Some(root) = self.thread(id).map(|t| t.root.clone()) else {
+            return;
+        };
+        let chat = self.backend.start(&root, &choice, effort, tx);
+        let updates = cx.spawn(async move |this, cx| {
             while let Some(update) = rx.recv().await {
                 if this
-                    .update(cx, |app, cx| app.update(ix, update, cx))
+                    .update(cx, |app, cx| app.update(id, update, cx))
                     .is_err()
                 {
                     break;
                 }
             }
-        }));
+        });
+        if let Some(thread) = self.thread(id) {
+            thread.chat = Some(chat);
+            thread._updates = Some(updates);
+        }
     }
 
-    fn update(&mut self, ix: usize, update: Update, cx: &mut Context<Self>) {
-        let thread = &mut self.threads[ix];
+    fn update(&mut self, id: usize, update: Update, cx: &mut Context<Self>) {
+        let Some(thread) = self.thread(id) else {
+            return;
+        };
         match update {
             Update::Event(event) => thread.feed.apply(event),
             Update::Ask(request, answer) => {
@@ -194,14 +263,16 @@ impl Rozu {
             Update::Failed { message, offline } => thread.feed.fail(message, offline),
         }
         thread.touched = Instant::now();
-        if self.current == Some(ix) {
+        if self.page == Page::Thread(id) {
             self.scroll.scroll_to_bottom();
         }
         cx.notify();
     }
 
-    fn answer(&mut self, ix: usize, item: usize, decision: Decision, cx: &mut Context<Self>) {
-        let thread = &mut self.threads[ix];
+    fn answer(&mut self, id: usize, item: usize, decision: Decision, cx: &mut Context<Self>) {
+        let Some(thread) = self.thread(id) else {
+            return;
+        };
         let Some(Item::Ask(ask)) = thread.feed.items.get_mut(item) else {
             return;
         };
@@ -218,10 +289,163 @@ impl Rozu {
     }
 
     fn stop(&mut self, cx: &mut Context<Self>) {
-        if let Some(chat) = self.current.and_then(|ix| self.threads[ix].chat.as_ref()) {
+        if let Page::Thread(id) = self.page
+            && let Some(chat) = self.thread(id).and_then(|t| t.chat.as_ref())
+        {
             chat.cancel();
         }
         cx.notify();
+    }
+
+    /// Closes a chat: stops its turn, denies its open prompts and forgets it.
+    fn delete(&mut self, id: usize, cx: &mut Context<Self>) {
+        if let Some(chat) = self.thread(id).and_then(|t| t.chat.as_ref()) {
+            chat.cancel();
+        }
+        self.threads.retain(|t| t.id != id);
+        self.orbs
+            .retain(|k, _| k != &format!("t{id}") && !k.starts_with(&format!("{id}-")));
+        if self.page == Page::Thread(id) {
+            self.open(Page::Home, cx);
+        }
+        cx.notify();
+    }
+
+    fn add_project(&mut self, cx: &mut Context<Self>) {
+        let picked = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Open".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(paths))) = picked.await else {
+                return;
+            };
+            let Some(root) = paths.into_iter().next() else {
+                return;
+            };
+            let _ = this.update(cx, |app, cx| {
+                app.settings.add_project(root.clone());
+                app.settings.save();
+                app.collapsed.remove(&root);
+                app.project = Some(root);
+                if app.page != Page::Setup {
+                    app.open(Page::Home, cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn remove_project(&mut self, root: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            &format!("Remove {} from rozu?", name(&root)),
+            Some("Its chats close. The folder and its files stay on your Mac."),
+            &["Remove", "Cancel"],
+            cx,
+        );
+        cx.spawn(async move |this, cx| {
+            if answer.await != Ok(0) {
+                return;
+            }
+            let _ = this.update(cx, |app, cx| {
+                let ids: Vec<usize> = app
+                    .threads
+                    .iter()
+                    .filter(|t| t.root == root)
+                    .map(|t| t.id)
+                    .collect();
+                for id in ids {
+                    app.delete(id, cx);
+                }
+                app.settings.remove_project(&root);
+                app.settings.save();
+                if app.project.as_ref() == Some(&root) {
+                    app.project = app.settings.projects.last().cloned();
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn choose(&mut self, choice: ModelChoice, cx: &mut Context<Self>) {
+        let efforts = backend::efforts(choice.provider.id);
+        if self
+            .effort
+            .as_deref()
+            .is_some_and(|e| !efforts.contains(&e))
+        {
+            self.effort = None;
+        }
+        self.choice = Some(choice);
+        self.save_choice();
+        cx.notify();
+    }
+
+    fn set_effort(&mut self, effort: Option<String>, cx: &mut Context<Self>) {
+        self.effort = effort;
+        self.save_choice();
+        cx.notify();
+    }
+
+    fn save_choice(&mut self) {
+        if self.page == Page::Setup && self.settings.provider.is_none() {
+            return;
+        }
+        self.settings.provider = self.choice.as_ref().map(|c| c.provider.id.to_owned());
+        self.settings.model = self.choice.as_ref().map(|c| c.model.clone());
+        self.settings.effort = self.effort.clone();
+        self.settings.save();
+    }
+
+    /// Opens the setup page on the current plan and checks every plan's CLI.
+    fn setup(&mut self, cx: &mut Context<Self>) {
+        if let Some(choice) = &self.choice
+            && let Some(plan) = PLANS.iter().find(|p| p.id == choice.provider.id)
+        {
+            self.plan = plan.id;
+        } else {
+            self.pick_plan(PLANS[0].id, cx);
+        }
+        self.check(cx);
+        self.open(Page::Setup, cx);
+    }
+
+    fn pick_plan(&mut self, id: &'static str, cx: &mut Context<Self>) {
+        self.plan = id;
+        if self.choice.as_ref().is_none_or(|c| c.provider.id != id)
+            && let Ok(choice) = registry::resolve(Some(id), None)
+        {
+            self.choose(choice, cx);
+        }
+        cx.notify();
+    }
+
+    fn check(&mut self, cx: &mut Context<Self>) {
+        for plan in PLANS {
+            self.access.insert(plan.id, Access::Checking);
+            let rx = self.backend.check(plan.id);
+            cx.spawn(async move |this, cx| {
+                let access = rx.await.unwrap_or(Access::Missing);
+                let _ = this.update(cx, |app, cx| {
+                    app.access.insert(plan.id, access);
+                    cx.notify();
+                });
+            })
+            .detach();
+        }
+        cx.notify();
+    }
+
+    fn finish_setup(&mut self, cx: &mut Context<Self>) {
+        self.settings.provider = Some(self.plan.to_owned());
+        self.save_choice();
+        self.providers = backend::providers();
+        self.open(Page::Home, cx);
     }
 
     fn orb(
@@ -246,16 +470,21 @@ impl Rozu {
             ("bot", "Automations"),
             ("blocks", "Customize"),
         ];
-        let mut threads: Vec<usize> = (0..self.threads.len()).collect();
-        threads.sort_by_key(|&ix| std::cmp::Reverse(self.threads[ix].touched));
-        let rows: Vec<AnyElement> = if self.repo_open {
-            threads
-                .into_iter()
-                .map(|ix| self.thread_row(ix, cx).into_any_element())
-                .collect()
-        } else {
-            Vec::new()
-        };
+        let (repos, folders): (Vec<PathBuf>, Vec<PathBuf>) = self
+            .settings
+            .projects
+            .iter()
+            .cloned()
+            .partition(|p| p.join(".git").exists());
+        let folders: Vec<AnyElement> = folders
+            .into_iter()
+            .map(|p| self.project_group(p, cx))
+            .collect();
+        let repos: Vec<AnyElement> = repos
+            .into_iter()
+            .map(|p| self.project_group(p, cx))
+            .collect();
+        let setup = self.page == Page::Setup;
         div()
             .w(px(270.))
             .flex_none()
@@ -268,41 +497,111 @@ impl Rozu {
             .pb_2()
             .child(drag_bar())
             .children(nav.into_iter().map(|(i, label)| {
-                let on = label == "New Chat" && self.current.is_none();
+                let on = label == "New Chat" && self.page == Page::Home;
                 row(label, i, label)
                     .when(on, |r| r.bg(rgb(RAISE)))
                     .when(label == "New Chat", |r| {
-                        r.on_click(cx.listener(|this, _, _, cx| this.open(None, cx)))
+                        r.on_click(cx.listener(|this, _, _, cx| this.open(Page::Home, cx)))
                     })
             }))
-            .child(heading("Projects"))
-            .child(row("new-project", "plus", "New Project"))
-            .child(heading("Repositories"))
-            .child(
-                row("repo", "folder", self.repo.clone())
-                    .child(div().flex_1())
-                    .child(icon(if self.repo_open { "down" } else { "right" }, INK3))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.repo_open = !this.repo_open;
-                        cx.notify();
-                    })),
-            )
             .child(
                 div()
-                    .id("threads")
+                    .id("projects")
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
-                    .children(rows),
+                    .child(heading("Projects"))
+                    .child(
+                        row("new-project", "plus", "New Project")
+                            .on_click(cx.listener(|this, _, _, cx| this.add_project(cx))),
+                    )
+                    .children(folders)
+                    .when(!repos.is_empty(), |d| {
+                        d.child(heading("Repositories")).children(repos)
+                    }),
             )
-            .child(account())
+            .child(
+                account()
+                    .id("account")
+                    .cursor_pointer()
+                    .when(setup, |r| r.bg(rgb(RAISE)))
+                    .on_click(cx.listener(|this, _, _, cx| this.setup(cx))),
+            )
     }
 
-    fn thread_row(&mut self, ix: usize, cx: &mut Context<Self>) -> Stateful<Div> {
-        let orb = self.orb(format!("t{ix}"), self.threads[ix].feed.state(), cx);
-        let thread = &self.threads[ix];
+    fn project_group(&mut self, root: PathBuf, cx: &mut Context<Self>) -> AnyElement {
+        let open = !self.collapsed.contains(&root);
+        let mut ids: Vec<usize> = self
+            .threads
+            .iter()
+            .filter(|t| t.root == root)
+            .map(|t| t.id)
+            .collect();
+        ids.sort_by_key(|&id| {
+            std::cmp::Reverse(self.threads.iter().find(|t| t.id == id).map(|t| t.touched))
+        });
+        let rows: Vec<AnyElement> = if open {
+            ids.into_iter()
+                .map(|id| self.thread_row(id, cx).into_any_element())
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let key = root.display().to_string();
+        let (new_root, del_root, toggle_root) = (root.clone(), root.clone(), root.clone());
+        let here = self.page == Page::Home && self.project.as_ref() == Some(&root);
         div()
-            .id(("thread", ix))
+            .child(
+                row(
+                    SharedString::from(format!("p:{key}")),
+                    "folder",
+                    name(&root),
+                )
+                .group("project")
+                .when(here, |r| r.bg(rgb(RAISE)))
+                .child(div().flex_1())
+                .child(
+                    hover_icon(SharedString::from(format!("pnew:{key}")), "project", "plus")
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.project = Some(new_root.clone());
+                            this.open(Page::Home, cx);
+                        })),
+                )
+                .child(
+                    hover_icon(
+                        SharedString::from(format!("pdel:{key}")),
+                        "project",
+                        "trash",
+                    )
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.remove_project(del_root.clone(), window, cx);
+                    })),
+                )
+                .child(icon(if open { "down" } else { "right" }, INK3))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if !this.collapsed.remove(&toggle_root) {
+                        this.collapsed.insert(toggle_root.clone());
+                    }
+                    cx.notify();
+                })),
+            )
+            .children(rows)
+            .into_any_element()
+    }
+
+    fn thread_row(&mut self, id: usize, cx: &mut Context<Self>) -> Stateful<Div> {
+        let state = self
+            .thread(id)
+            .map_or(ActivityState::Offline, |t| t.feed.state());
+        let orb = self.orb(format!("t{id}"), state, cx);
+        let Some(thread) = self.threads.iter().find(|t| t.id == id) else {
+            return div().id(("thread", id));
+        };
+        div()
+            .id(("thread", id))
+            .group("thread")
             .flex()
             .items_center()
             .gap_3()
@@ -312,22 +611,36 @@ impl Rozu {
             .rounded(px(8.))
             .cursor_pointer()
             .hover(|s| s.bg(rgb(RAISE)))
-            .when(self.current == Some(ix), |r| r.bg(rgb(RAISE)))
+            .when(self.page == Page::Thread(id), |r| r.bg(rgb(RAISE)))
             .child(orb)
             .child(div().flex_1().truncate().child(thread.title.clone()))
             .child(
                 div()
                     .text_size(px(13.5))
                     .text_color(rgb(INK3))
+                    .group_hover("thread", |s| s.invisible())
                     .child(age(thread.touched)),
             )
-            .on_click(cx.listener(move |this, _, _, cx| this.open(Some(ix), cx)))
+            .child(
+                hover_icon(("del", id), "thread", "trash")
+                    .absolute()
+                    .right(px(8.))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.delete(id, cx);
+                    })),
+            )
+            .relative()
+            .on_click(cx.listener(move |this, _, _, cx| this.open(Page::Thread(id), cx)))
     }
 
-    fn thread_page(&mut self, ix: usize, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut items = Vec::new();
-        for (i, item) in self.threads[ix].feed.items.iter().enumerate() {
-            let live = match item {
+    fn thread_page(&mut self, id: usize, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(thread) = self.threads.iter().find(|t| t.id == id) else {
+            return div().flex_1();
+        };
+        let mut live = Vec::new();
+        for (i, item) in thread.feed.items.iter().enumerate() {
+            let state = match item {
                 Item::Step(s) if s.done.is_none() => Some(s.state),
                 Item::Ask(a) => Some(match a.answer {
                     None => ActivityState::Waiting,
@@ -336,16 +649,21 @@ impl Rozu {
                 }),
                 _ => None,
             };
-            items.push((i, live.map(|s| (s, format!("{ix}-{i}")))));
+            live.push((i, state));
         }
-        let items: Vec<AnyElement> = items
+        let items: Vec<AnyElement> = live
             .into_iter()
-            .map(|(i, live)| {
-                let orb = live.map(|(state, key)| self.orb(key, state, cx));
-                self.item(ix, i, orb, cx)
+            .map(|(i, state)| {
+                let orb = state.map(|s| self.orb(format!("{id}-{i}"), s, cx));
+                self.item(id, i, orb, cx)
             })
             .collect();
-        let thread = &self.threads[ix];
+        let title = self
+            .threads
+            .iter()
+            .find(|t| t.id == id)
+            .map(|t| t.title.clone())
+            .unwrap_or_default();
         div()
             .flex_1()
             .min_w_0()
@@ -358,7 +676,7 @@ impl Rozu {
                         .rounded(px(8.))
                         .px(px(10.))
                         .py(px(3.))
-                        .child(thread.title.clone()),
+                        .child(title),
                 ),
             )
             .child(
@@ -381,12 +699,15 @@ impl Rozu {
 
     fn item(
         &self,
-        ix: usize,
+        id: usize,
         i: usize,
         orb: Option<Entity<OrbView>>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        match &self.threads[ix].feed.items[i] {
+        let Some(thread) = self.threads.iter().find(|t| t.id == id) else {
+            return div().into_any_element();
+        };
+        match &thread.feed.items[i] {
             Item::User(text) => div()
                 .border_1()
                 .border_color(rgb(LINE))
@@ -406,13 +727,13 @@ impl Rozu {
                 .child(text.clone())
                 .into_any_element(),
             Item::Step(step) => step_row(step, orb).into_any_element(),
-            Item::Ask(ask) => self.ask_card(ix, i, ask, orb, cx).into_any_element(),
+            Item::Ask(ask) => self.ask_card(id, i, ask, orb, cx).into_any_element(),
         }
     }
 
     fn ask_card(
         &self,
-        ix: usize,
+        id: usize,
         i: usize,
         ask: &Ask,
         orb: Option<Entity<OrbView>>,
@@ -485,7 +806,7 @@ impl Rozu {
                     .children(choices.into_iter().enumerate().map(
                         |(n, (label, decision, primary))| {
                             button(("ask", n), label, primary).on_click(cx.listener(
-                                move |this, _, _, cx| this.answer(ix, i, decision.clone(), cx),
+                                move |this, _, _, cx| this.answer(id, i, decision.clone(), cx),
                             ))
                         },
                     )),
@@ -493,25 +814,32 @@ impl Rozu {
     }
 
     fn composer_box(&self, home: bool, cx: &mut Context<Self>) -> impl IntoElement {
-        let running = self.current.is_some_and(|ix| self.threads[ix].feed.running);
-        let model = self
-            .choices
-            .get(self.choice)
-            .map_or("No model".into(), backend::label);
+        let running = self.running();
+        let model = self.choice.as_ref().map_or("No model".into(), |c| {
+            backend::label(c, self.effort.as_deref())
+        });
         let picker = div()
-            .id("model")
-            .flex()
-            .items_center()
-            .gap_1()
-            .text_size(px(14.))
-            .text_color(rgb(INK2))
-            .cursor_pointer()
-            .child(model)
-            .child(icon("down", INK2))
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.choice = (this.choice + 1) % this.choices.len().max(1);
-                cx.notify();
-            }));
+            .relative()
+            .child(
+                div()
+                    .id("model")
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .text_size(px(14.))
+                    .text_color(rgb(INK2))
+                    .cursor_pointer()
+                    .child(model)
+                    .child(icon("down", INK2))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.providers = backend::providers();
+                        this.menu = true;
+                        cx.notify();
+                    })),
+            )
+            .when(self.menu, |d| {
+                d.child(deferred(self.model_menu(cx)).with_priority(2))
+            });
         let go = div()
             .id("go")
             .size(px(34.))
@@ -565,6 +893,89 @@ impl Rozu {
         }
     }
 
+    /// The model and effort menu above the composer's picker.
+    fn model_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut list = div()
+            .id("model-menu")
+            .absolute()
+            .bottom(px(28.))
+            .right_0()
+            .w(px(280.))
+            .max_h(px(460.))
+            .overflow_y_scroll()
+            .occlude()
+            .bg(rgb(RAISE))
+            .border_1()
+            .border_color(rgb(LINE))
+            .rounded(px(12.))
+            .p_1()
+            .flex()
+            .flex_col();
+        if self.providers.is_empty() {
+            list = list.child(
+                div()
+                    .p_2()
+                    .text_color(rgb(INK3))
+                    .text_size(px(14.))
+                    .child("No AI is set up. Click the gear to pick one."),
+            );
+        }
+        for provider in &self.providers {
+            list = list.child(menu_heading(backend::provider_name(provider)));
+            for m in backend::models(provider) {
+                let on = self.choice.as_ref() == Some(&m);
+                let key = SharedString::from(format!("m:{}", m.spec()));
+                let label = backend::model_name(&m.model);
+                list = list.child(
+                    div()
+                        .id(key)
+                        .flex()
+                        .items_center()
+                        .px_2()
+                        .py(px(5.))
+                        .rounded(px(8.))
+                        .text_size(px(14.))
+                        .cursor_pointer()
+                        .hover(|s| s.bg(rgb(LINE)))
+                        .child(div().flex_1().child(label))
+                        .when(on, |r| r.child(icon("check", INK)))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.menu = false;
+                            this.choose(m.clone(), cx);
+                        })),
+                );
+            }
+        }
+        if let Some(choice) = &self.choice {
+            let efforts = backend::efforts(choice.provider.id);
+            if !efforts.is_empty() {
+                list = list
+                    .child(menu_heading("Effort"))
+                    .child(self.effort_chips(efforts, cx).px_2().pb_2());
+            }
+        }
+        list
+    }
+
+    fn effort_chips(&self, efforts: &'static [&'static str], cx: &mut Context<Self>) -> Div {
+        div()
+            .flex()
+            .flex_wrap()
+            .gap_1()
+            .child(
+                chip("effort-default", "Default", self.effort.is_none())
+                    .on_click(cx.listener(|this, _, _, cx| this.set_effort(None, cx))),
+            )
+            .children(efforts.iter().map(|&e| {
+                chip(
+                    SharedString::from(format!("effort-{e}")),
+                    e,
+                    self.effort.as_deref() == Some(e),
+                )
+                .on_click(cx.listener(move |this, _, _, cx| this.set_effort(Some(e.into()), cx)))
+            }))
+    }
+
     fn home_page(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let ideas = [
             (
@@ -584,6 +995,10 @@ impl Rozu {
                 "Check the diff before you push",
             ),
         ];
+        let folder = self
+            .project
+            .as_deref()
+            .map_or("Choose a folder".into(), name);
         div()
             .flex_1()
             .min_w_0()
@@ -598,13 +1013,17 @@ impl Rozu {
                     .pb(px(44.))
                     .child(
                         div()
+                            .id("folder")
                             .flex()
                             .items_center()
                             .gap_2()
                             .text_size(px(14.))
                             .text_color(rgb(INK2))
+                            .cursor_pointer()
                             .child(icon("folder", INK2))
-                            .child(self.repo.clone()),
+                            .child(folder)
+                            .child(icon("down", INK3))
+                            .on_click(cx.listener(|this, _, _, cx| this.add_project(cx))),
                     )
                     .child(self.composer_box(true, cx))
                     .child(div().mt_2().flex().flex_col().children(
@@ -623,23 +1042,208 @@ impl Rozu {
                     )),
             )
     }
+
+    /// Pick the AI you pay for, sign in through its CLI, pick a model, effort and folder.
+    fn setup_page(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let first_run = self.settings.provider.is_none();
+        let plans: Vec<AnyElement> = PLANS
+            .iter()
+            .map(|plan| {
+                let access = self
+                    .access
+                    .get(plan.id)
+                    .copied()
+                    .unwrap_or(Access::Checking);
+                let orb = self.orb(format!("plan-{}", plan.id), access_state(access), cx);
+                let on = self.plan == plan.id;
+                div()
+                    .id(plan.id)
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .px(px(16.))
+                    .py(px(12.))
+                    .rounded(px(12.))
+                    .border_1()
+                    .border_color(rgb(if on { INK2 } else { LINE }))
+                    .bg(rgb(BOX))
+                    .cursor_pointer()
+                    .child(orb)
+                    .child(
+                        div().flex_1().flex().flex_col().child(plan.name).child(
+                            div()
+                                .text_size(px(14.))
+                                .text_color(rgb(INK3))
+                                .child(plan.plan),
+                        ),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(14.))
+                            .text_color(rgb(INK2))
+                            .child(access_text(access)),
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| this.pick_plan(plan.id, cx)))
+                    .into_any_element()
+            })
+            .collect();
+        let plan = PLANS
+            .iter()
+            .find(|p| p.id == self.plan)
+            .unwrap_or(&PLANS[0]);
+        let access = self
+            .access
+            .get(plan.id)
+            .copied()
+            .unwrap_or(Access::Checking);
+        let action = match access {
+            Access::Missing => Some(("Install and sign in", true)),
+            Access::SignedOut => Some(("Sign in", true)),
+            Access::Installed => Some(("Sign in", false)),
+            Access::Checking | Access::Ready => None,
+        };
+        let ready = matches!(access, Access::Ready | Access::Installed);
+        let models: Vec<ModelChoice> = registry::provider_info(plan.id)
+            .map(backend::models)
+            .unwrap_or_default();
+        let efforts = backend::efforts(plan.id);
+        let folder = self.project.as_deref().map_or("None yet".into(), name);
+        div()
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .child(drag_bar())
+            .child(
+                div()
+                    .id("setup")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .child(
+                        column()
+                            .max_w(px(620.))
+                            .gap(px(14.))
+                            .py(px(24.))
+                            .child(div().text_size(px(28.)).child(if first_run {
+                                "Welcome to rozu"
+                            } else {
+                                "Your AI"
+                            }))
+                            .child(div().text_color(rgb(INK2)).child(
+                                "Pick the AI you already pay for. rozu works through its official \
+                             app, so your plan covers it and rozu never sees your password.",
+                            ))
+                            .children(plans)
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .children(action.map(|(label, primary)| {
+                                        let cmd = match access {
+                                            Access::Missing => {
+                                                format!("{} && {}", plan.install, plan.login)
+                                            }
+                                            _ => plan.login.to_owned(),
+                                        };
+                                        button("sign-in", label, primary)
+                                            .on_click(move |_, _, _| backend::in_terminal(&cmd))
+                                    }))
+                                    .child(
+                                        button("check", "Check again", false)
+                                            .on_click(cx.listener(|this, _, _, cx| this.check(cx))),
+                                    ),
+                            )
+                            .when(action.is_some(), |d| {
+                                d.child(div().text_size(px(14.)).text_color(rgb(INK3)).child(
+                                    "This opens Terminal. Finish there, then press Check again.",
+                                ))
+                            })
+                            .child(label_text("Model"))
+                            .child(div().flex().flex_wrap().gap_1().children(
+                                models.into_iter().map(|m| {
+                                    let on = self.choice.as_ref() == Some(&m);
+                                    chip(
+                                        SharedString::from(format!("sm:{}", m.model)),
+                                        backend::model_name(&m.model),
+                                        on,
+                                    )
+                                    .on_click(
+                                        cx.listener(move |this, _, _, cx| {
+                                            this.choose(m.clone(), cx)
+                                        }),
+                                    )
+                                }),
+                            ))
+                            .when(!efforts.is_empty(), |d| {
+                                d.child(label_text("Effort"))
+                                    .child(self.effort_chips(efforts, cx))
+                            })
+                            .child(label_text("Folder"))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_3()
+                                    .child(icon("folder", INK2))
+                                    .child(folder)
+                                    .child(button("folder", "Choose folder", false).on_click(
+                                        cx.listener(|this, _, _, cx| this.add_project(cx)),
+                                    )),
+                            )
+                            .child(
+                                div().pt_3().child(
+                                    button("continue", "Continue", ready)
+                                        .when(!ready, |b| b.opacity(0.5).cursor_default())
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            if ready {
+                                                this.finish_setup(cx);
+                                            }
+                                        })),
+                                ),
+                            ),
+                    ),
+            )
+    }
 }
 
 impl Render for Rozu {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let main = match self.current {
-            Some(ix) => self.thread_page(ix, cx).into_any_element(),
-            None => self.home_page(cx).into_any_element(),
+        let main = match self.page {
+            Page::Thread(id) => self.thread_page(id, cx).into_any_element(),
+            Page::Home => self.home_page(cx).into_any_element(),
+            Page::Setup => self.setup_page(cx).into_any_element(),
         };
+        let first_run = self.settings.provider.is_none();
         div()
             .size_full()
+            .relative()
             .flex()
             .bg(rgb(BG))
             .text_color(rgb(INK))
             .font_family(".SystemUIFont")
             .text_size(px(15.))
-            .child(self.sidebar(cx))
+            .when(!first_run, |d| d.child(self.sidebar(cx)))
             .child(main)
+            .when(self.menu, |d| {
+                d.child(
+                    deferred(
+                        div()
+                            .id("backdrop")
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .size_full()
+                            .occlude()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.menu = false;
+                                cx.notify();
+                            })),
+                    )
+                    .with_priority(1),
+                )
+            })
     }
 }
 
@@ -647,6 +1251,84 @@ impl Focusable for Rozu {
     fn focus_handle(&self, cx: &App) -> FocusHandle {
         self.composer.focus_handle(cx)
     }
+}
+
+fn name(root: &Path) -> SharedString {
+    root.file_name()
+        .map_or_else(
+            || root.display().to_string(),
+            |n| n.to_string_lossy().into_owned(),
+        )
+        .into()
+}
+
+fn access_state(access: Access) -> ActivityState {
+    match access {
+        Access::Checking => ActivityState::Thinking,
+        Access::Missing => ActivityState::Offline,
+        Access::SignedOut => ActivityState::Waiting,
+        Access::Ready | Access::Installed => ActivityState::Done,
+    }
+}
+
+fn access_text(access: Access) -> &'static str {
+    match access {
+        Access::Checking => "Checking",
+        Access::Missing => "Not installed",
+        Access::SignedOut => "Not signed in",
+        Access::Ready => "Ready",
+        Access::Installed => "Installed",
+    }
+}
+
+fn label_text(text: &'static str) -> Div {
+    div()
+        .pt_2()
+        .text_size(px(14.))
+        .text_color(rgb(INK3))
+        .child(text)
+}
+
+fn menu_heading(text: &'static str) -> Div {
+    div()
+        .px_2()
+        .pt_2()
+        .pb_1()
+        .text_size(px(13.))
+        .text_color(rgb(INK3))
+        .child(text)
+}
+
+fn chip(id: impl Into<gpui::ElementId>, label: impl Into<SharedString>, on: bool) -> Stateful<Div> {
+    div()
+        .id(id)
+        .border_1()
+        .border_color(rgb(if on { INK } else { LINE }))
+        .when(on, |b| b.bg(rgb(INK)).text_color(rgb(BG)))
+        .rounded_full()
+        .px(px(12.))
+        .py(px(3.))
+        .text_size(px(14.))
+        .cursor_pointer()
+        .child(label.into())
+}
+
+/// An icon button shown while the pointer is over its `group`.
+fn hover_icon(
+    id: impl Into<gpui::ElementId>,
+    group: &'static str,
+    i: &'static str,
+) -> Stateful<Div> {
+    div()
+        .id(id)
+        .flex_none()
+        .rounded(px(6.))
+        .p(px(2.))
+        .cursor_pointer()
+        .invisible()
+        .group_hover(group, |s| s.visible())
+        .hover(|s| s.bg(rgb(LINE)))
+        .child(icon(i, INK3))
 }
 
 fn step_row(step: &Step, orb: Option<Entity<OrbView>>) -> Div {
@@ -750,7 +1432,7 @@ fn icon(name: &'static str, color: u32) -> Svg {
         .text_color(rgb(color))
 }
 
-fn account() -> impl IntoElement {
+fn account() -> Div {
     let name = std::env::var("USER").unwrap_or_default();
     let initial: String = name
         .chars()

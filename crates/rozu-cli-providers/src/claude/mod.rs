@@ -62,6 +62,8 @@ pub struct ClaudeCliConfig {
     /// Extra environment for the CLI (tests).
     pub env: Vec<(String, String)>,
     pub max_line_bytes: usize,
+    /// `--effort` (low, medium, high, xhigh, max); `None` keeps Claude's default.
+    pub effort: Option<String>,
 }
 
 impl ClaudeCliConfig {
@@ -80,6 +82,7 @@ impl ClaudeCliConfig {
             gate,
             env: Vec::new(),
             max_line_bytes: DEFAULT_MAX_LINE_BYTES,
+            effort: None,
         }
     }
 }
@@ -191,6 +194,10 @@ impl ClaudeCliProvider {
         args.push(DISALLOWED_BUILTIN_TOOLS.join(",").into());
         args.push("--append-system-prompt".into());
         args.push(system_prompt.into());
+        if let Some(effort) = &self.config.effort {
+            args.push("--effort".into());
+            args.push(effort.into());
+        }
         if let Some(session) = resume {
             args.push("--resume".into());
             args.push(session.into());

@@ -159,6 +159,7 @@ async fn tool_use_turn_maps_to_stream_events() {
     assert!(args.contains(&"--strict-mcp-config".to_owned()));
     assert!(!args.iter().any(|a| a.contains("bypassPermissions")));
     assert!(!args.contains(&"--resume".to_owned()));
+    assert!(!args.contains(&"--effort".to_owned()));
     let disallowed = arg_after(args, "--disallowedTools").unwrap();
     for tool in [
         "Bash",
@@ -420,4 +421,26 @@ async fn version_and_auth_status_read_only_what_they_need() {
     assert_eq!(status.logged_in, Some(true));
     assert_eq!(status.auth_method.as_deref(), Some("claude.ai"));
     assert!(!format!("{status:?}").contains("example.invalid"));
+}
+
+#[tokio::test]
+async fn effort_is_passed_on() {
+    let config = |effort: Option<&str>| {
+        let mut c = ClaudeCliConfig::new(
+            "/bin/true",
+            std::env::temp_dir(),
+            "/nonexistent/rozu",
+            vec![],
+            Arc::new(ReadOnlyGate),
+        );
+        c.effort = effort.map(str::to_owned);
+        ClaudeCliProvider::new(c).unwrap()
+    };
+    let args: Vec<String> = config(Some("xhigh"))
+        .args("opus", "", None)
+        .into_iter()
+        .map(|a| a.into_string().unwrap())
+        .collect();
+    assert_eq!(arg_after(&args, "--effort"), Some("xhigh"));
+    assert_eq!(arg_after(&args, "--model"), Some("opus"));
 }

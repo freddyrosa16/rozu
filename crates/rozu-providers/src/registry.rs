@@ -199,7 +199,7 @@ pub fn models_for(provider: &str) -> Vec<ModelInfo> {
         Some(Kind::Xai) => xai::models(),
         // The CLI's aliases, which follow the newest model of each family. Any other id the CLI
         // accepts works too (see `resolve`).
-        Some(Kind::ClaudeCli) => ["sonnet", "opus", "haiku"]
+        Some(Kind::ClaudeCli) => ["sonnet", "opus", "fable", "haiku"]
             .into_iter()
             .map(|id| ModelInfo::subscription(CLAUDE_CLI_ID, id, CLAUDE_CLI_CONTEXT))
             .collect(),
