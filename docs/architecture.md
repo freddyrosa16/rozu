@@ -27,8 +27,8 @@ default denial of unknown vendor requests.
 
 ## Desktop and CLI
 
-The desktop app separates project/chat orchestration from sidebar, chat, composer, picker, setup, and
-terminal views. Provider catalog/setup metadata is separate from the backend chat worker. Each worker
+The desktop app separates project/chat orchestration from sidebar, chat, home, setup, and model-picker
+views, with a shared composer component. Provider catalog/setup metadata is separate from the backend chat worker. Each worker
 owns its session and writer; queued prompts carry their cancellation token. Deleting a chat waits for
 the worker's final save before deleting its file and index entry. Failed resume is surfaced as an error.
 Model and effort changes apply to the next turn while retaining the session, writer, approval policy,
