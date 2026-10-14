@@ -41,6 +41,14 @@ cargo build --release
 # `/model` alone shows the current one.
 ./target/release/rozu chat --workspace .
 
+# Every chat is saved. List them, then continue one (no ID: this workspace's latest).
+./target/release/rozu sessions                 # --all for every workspace, or a search word
+./target/release/rozu chat --resume
+./target/release/rozu chat --resume 20261014T1302Z -- "and now the tests"
+
+# Project memory: ROZU.md and AGENTS.md in the workspace root, plus notes added with `/pin <note>`
+# (kept in .rozu/pinned.md), are sent with every request.
+
 # Approval mode (default: auto). See "Approvals and sandbox" below.
 ./target/release/rozu chat --approval read-only "explain src/main.rs"
 ./target/release/rozu chat --approval full "run the tests and fix what fails"

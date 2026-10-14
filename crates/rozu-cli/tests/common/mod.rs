@@ -21,6 +21,7 @@ pub fn base_env() -> Vec<(&'static str, Option<OsString>)> {
             "ROZU_AUDIT_LOG",
             &tmp.join("rozu-cli-tests-approvals.jsonl"),
         ),
+        set("ROZU_SESSIONS_DIR", &tmp.join("rozu-cli-tests-sessions")),
         set("NO_COLOR", &"1"),
         set("ROZU_CODEX_BIN", &"/nonexistent/codex"),
     ];

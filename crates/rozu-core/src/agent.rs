@@ -85,6 +85,12 @@ pub struct Session {
     pub cost_usd: f64,
     /// The most recent turn, including one that was cancelled or failed.
     pub last_turn: TurnUsage,
+    /// Bumped whenever earlier messages are rewritten (compaction), so a store knows to write
+    /// the whole history again instead of appending.
+    pub compactions: u32,
+    /// Prompt plus output tokens of the latest model response: roughly what the next request
+    /// starts from. 0 until a provider reports usage.
+    pub context_tokens: u64,
 }
 
 impl Session {
@@ -103,6 +109,7 @@ impl Session {
     fn record_usage(&mut self, usage: Usage, model: Option<&ModelInfo>) {
         self.usage += usage;
         self.last_turn.usage += usage;
+        self.context_tokens = usage.input_tokens + usage.output_tokens;
         if let Some(model) = model {
             let cost = model.cost_usd(&usage);
             self.cost_usd += cost;
