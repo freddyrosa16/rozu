@@ -509,13 +509,13 @@ mod tests {
         let session = crate::SessionTemp::create("test").unwrap();
         let ctx = ctx.with_temp_dir(session.path());
         let risk = |command: &str| Shell.risk(&json!({ "command": command }), &ctx);
-        // A redirect is opaque even into the session temp dir.
+        // Literal paths retain scope information; shell expansion and redirects still prompt.
         let inside = session.path().join("x.txt");
         assert_eq!(
             risk(&format!("touch {}", inside.display())),
             Risk::WriteWorkspace
         );
-        assert_eq!(risk("touch $TMPDIR/x.txt"), Risk::WriteWorkspace);
+        assert_eq!(risk("touch $TMPDIR/x.txt"), Risk::Opaque);
         assert_eq!(risk("echo hi > \"$TMPDIR/x.txt\""), Risk::Opaque);
         let args = json!({"command": "touch /tmp/rozu-elsewhere.txt"});
         assert_eq!(Shell.risk(&args, &ctx), Risk::WriteOutside);

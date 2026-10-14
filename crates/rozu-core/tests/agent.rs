@@ -11,11 +11,8 @@ use rozu_core::{
     ApprovalRecord, ApprovalRequest, ApprovalResolution, ApprovalRules, Billing, Decision,
     DecisionSource, LongContextPrices, Message, ModelInfo, PendingApproval, PrefixRule,
     ProviderError, Role, SandboxMode, Session, StopReason, StreamEvent, TurnOutcome, Usage,
-    approvals_path,
 };
-use rozu_tools::{
-    AllowRule, NoSandbox, Risk, Shell, Tool, ToolCtx, ToolOutput, ToolRegistry, Workspace,
-};
+use rozu_tools::{NoSandbox, Risk, Shell, Tool, ToolCtx, ToolOutput, ToolRegistry, Workspace};
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -147,7 +144,7 @@ fn shell_harness(steps: Vec<Script>, mode: ApprovalMode, gate: Arc<ScriptedGate>
         |_| {},
         |tools| tools.register(Shell),
         |agent| {
-            let policy = ApprovalPolicy::for_project(mode, agent.workspace().root()).unwrap();
+            let policy = ApprovalPolicy::new(mode);
             // No OS sandbox, so the test behaves the same on every platform.
             agent
                 .with_approval_policy(Arc::new(policy))
@@ -713,14 +710,12 @@ async fn network_commands_prompt_in_auto_mode() {
     );
     assert_eq!(asked[1].risk, Risk::Network);
     assert!(asked[1].network, "the prompt says the network would be on");
-    assert_eq!(
-        asked[1].allow_rule,
-        Some(AllowRule::with_host("curl", "example.com"))
-    );
+    assert_eq!(asked[1].allow_rule, None);
 }
 
 #[tokio::test]
 async fn always_allow_is_persisted_and_reused() {
+    let trusted = tempfile::tempdir().unwrap();
     let gate = ScriptedGate::always(Decision::AlwaysAllowPrefix);
     let mut h = shell_harness(
         vec![
@@ -732,6 +727,13 @@ async fn always_allow_is_persisted_and_reused() {
         gate.clone(),
     );
 
+    let policy = ApprovalPolicy::for_project_in(
+        ApprovalMode::AutoWorkspace,
+        h.agent.workspace().root(),
+        trusted.path(),
+    )
+    .unwrap();
+    h.agent = h.agent.with_approval_policy(Arc::new(policy));
     let (_, events) = h.run("go").await;
 
     assert_eq!(gate.asked().len(), 1);
@@ -744,7 +746,13 @@ async fn always_allow_is_persisted_and_reused() {
         }
     );
     let root = h.agent.workspace().root();
-    let saved = ApprovalRules::load(&approvals_path(root)).unwrap();
+    let path = std::fs::read_dir(trusted.path())
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let saved = ApprovalRules::load(&path).unwrap();
     assert_eq!(
         saved.rules,
         [PrefixRule {

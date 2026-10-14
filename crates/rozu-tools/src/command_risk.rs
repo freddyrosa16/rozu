@@ -2,12 +2,12 @@
 //!
 //! Deliberately simple: the command is split into segments on `&&`, `||`, `;`, `|`, `&`,
 //! newlines, parentheses and backticks (ignoring quotes, which can only add segments), each
-//! segment is classified on its own, and the highest risk wins. Unknown commands count as
-//! [`Risk::WriteWorkspace`].
+//! segment is classified on its own, and the highest risk wins. Only a small, explicit grammar
+//! of reads is automatic. Unknown programs, options and shell syntax are opaque.
 //!
 //! The classifier only decides when to ask; the sandbox is the boundary. Whatever can't be read
-//! off the command line is [`Risk::Opaque`] and asks in every mode (unless the user's own rule
-//! covers a named script): inline code (`python -c`, `perl -e`, `node -e`, `sh -c` / `bash -c` /
+//! off the command line is [`Risk::Opaque`] and asks in every mode: inline code
+//! (`python -c`, `perl -e`, `node -e`, `sh -c` / `bash -c` /
 //! `zsh -c`, scripts fed to an interpreter on stdin or a heredoc, `eval`, `source`, `exec`,
 //! those behind `xargs` or `find -exec`), other interpreters (`osascript`, …) and every output
 //! redirect to a file (`>`, `>>`, `tee`).
@@ -57,7 +57,7 @@ impl CommandRisk {
     const WRITE: Self = Self::new(Risk::WriteWorkspace, false, false);
     const OUTSIDE: Self = Self::new(Risk::WriteOutside, false, false);
     const NETWORK: Self = Self::new(Risk::Network, true, false);
-    /// Runs code rozu can't classify (a named script): asks unless a rule covers it.
+    /// Runs code rozu can't classify, such as a script outside the workspace.
     const OPAQUE: Self = Self::new(Risk::Opaque, false, false);
     /// Inline code or a redirect: opaque, and never covered by a rule.
     const OPAQUE_INLINE: Self = Self::new(Risk::Opaque, false, true);
@@ -216,10 +216,17 @@ fn classify_depth(command: &str, scope: &PathScope, depth: usize) -> CommandRisk
     if depth > MAX_DEPTH {
         return CommandRisk::DESTRUCTIVE.unknown_outside();
     }
-    split_segments(command)
+    let result = split_segments(command)
         .into_iter()
         .map(|segment| classify_segment(segment, scope, depth))
-        .fold(CommandRisk::READ, CommandRisk::max)
+        .fold(CommandRisk::READ, CommandRisk::max);
+    // The shell removes these before recognizing words or operators. Never classify the
+    // fragments as independent commands or let a stored rule cover them.
+    if command.contains("\\\n") || command.contains("\\\r\n") {
+        result.max(CommandRisk::OPAQUE_INLINE)
+    } else {
+        result
+    }
 }
 
 /// Splits a command line into simple commands. Quotes are ignored, so a quoted separator just
@@ -245,11 +252,11 @@ pub fn split_segments(command: &str) -> Vec<&str> {
             i += 1;
             continue;
         }
-        segments.push(command[start..i].trim());
+        segments.push(command[start..i].trim_matches([' ', '\t']));
         i += width;
         start = i;
     }
-    segments.push(command[start..].trim());
+    segments.push(command[start..].trim_matches([' ', '\t']));
     segments.retain(|s| !s.is_empty());
     segments
 }
@@ -257,6 +264,7 @@ pub fn split_segments(command: &str) -> Vec<&str> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Token {
     Word(String),
+    Uncertain,
     /// A redirection operator (`>`, `>>`, `<`, `>&`, `&>`, …) and its target word, if any.
     Redirect {
         op: String,
@@ -270,6 +278,7 @@ fn tokenize(segment: &str) -> Vec<Token> {
     let mut word = String::new();
     let mut in_word = false;
     let mut quoted = false;
+    let mut uncertain = false;
     let mut chars = segment.chars().peekable();
     let flush = |raw: &mut Vec<(String, bool)>, word: &mut String, in_word: &mut bool| {
         if *in_word {
@@ -279,44 +288,56 @@ fn tokenize(segment: &str) -> Vec<Token> {
     };
     while let Some(c) = chars.next() {
         match c {
-            c if c.is_whitespace() => {
+            ' ' | '\t' => {
                 flush(&mut raw, &mut word, &mut in_word);
                 quoted = false;
             }
             '\'' => {
                 in_word = true;
                 quoted = true;
+                let mut closed = false;
                 for c in chars.by_ref() {
                     if c == '\'' {
+                        closed = true;
                         break;
                     }
                     word.push(c);
                 }
+                uncertain |= !closed;
             }
             '"' => {
                 in_word = true;
                 quoted = true;
+                let mut closed = false;
                 while let Some(c) = chars.next() {
                     match c {
-                        '"' => break,
+                        '"' => {
+                            closed = true;
+                            break;
+                        }
                         '\\' => {
-                            if let Some(&next) = chars.peek() {
-                                if matches!(next, '"' | '\\' | '$' | '`') {
-                                    word.push(next);
-                                    chars.next();
-                                    continue;
-                                }
+                            if let Some(next) =
+                                chars.next_if(|c| matches!(c, '"' | '\\' | '$' | '`'))
+                            {
+                                word.push(next);
+                                continue;
                             }
                             word.push('\\');
                         }
-                        c => word.push(c),
+                        c => {
+                            uncertain |= matches!(c, '$' | '`');
+                            word.push(c);
+                        }
                     }
                 }
+                uncertain |= !closed;
             }
             '\\' => {
                 in_word = true;
                 if let Some(next) = chars.next() {
                     word.push(next);
+                } else {
+                    uncertain = true;
                 }
             }
             '>' | '<' | '&' if c != '&' || chars.peek() == Some(&'>') => {
@@ -344,6 +365,7 @@ fn tokenize(segment: &str) -> Vec<Token> {
             }
             c => {
                 in_word = true;
+                uncertain |= matches!(c, '$' | '`' | '*' | '?' | '[' | '{');
                 word.push(c);
             }
         }
@@ -363,6 +385,9 @@ fn tokenize(segment: &str) -> Vec<Token> {
             tokens.push(Token::Word(text));
         }
     }
+    if uncertain {
+        tokens.push(Token::Uncertain);
+    }
     tokens
 }
 
@@ -372,7 +397,7 @@ fn words(segment: &str) -> Vec<String> {
         .into_iter()
         .filter_map(|t| match t {
             Token::Word(w) => Some(w),
-            Token::Redirect { .. } => None,
+            Token::Redirect { .. } | Token::Uncertain => None,
         })
         .collect()
 }
@@ -384,6 +409,7 @@ fn classify_segment(segment: &str, scope: &PathScope, depth: usize) -> CommandRi
     for token in tokens {
         match token {
             Token::Word(w) => words.push(w),
+            Token::Uncertain => result = result.max(CommandRisk::OPAQUE_INLINE),
             Token::Redirect { op, target } => {
                 result = result.max(classify_redirect(&op, target.as_deref(), scope));
             }
@@ -459,8 +485,8 @@ fn is_interpreter(name: &str) -> bool {
         || name == "python"
 }
 
-/// `<interpreter> <script file>` or `python -m <module>`: opaque, but stable enough for an
-/// "always allow" rule naming that script. Everything else (`-c`/`-e` code, flags first, code on
+/// `<interpreter> <script file>` or `python -m <module>` has a stable prefix; its actual risk
+/// still depends on the workspace. Everything else (`-c`/`-e` code, flags first, code on
 /// stdin) is inline code.
 fn runs_named_script(name: &str, args: &[String]) -> bool {
     match args.first().map(String::as_str) {
@@ -475,8 +501,8 @@ fn runs_named_script(name: &str, args: &[String]) -> bool {
 /// `<interpreter> <script file>` (`runs_named_script` holds). One rule for every interpreter
 /// that runs a script like `make` runs a Makefile — shells, `python`, `perl`, `ruby`, `node`: a
 /// script file inside the scope is sandboxed workspace code ([`Risk::WriteWorkspace`]), so
-/// `sh test.sh` and `python test.py` are treated alike. Anything else is opaque (a rule may
-/// cover it): a script outside the scope or behind a `$VAR`, `python -m <module>`, and other
+/// `sh test.sh` and `python test.py` are treated alike. Anything else is opaque and always
+/// prompts: a script outside the scope or behind a `$VAR`, `python -m <module>`, and other
 /// interpreters (`osascript` can drive other apps outside the sandbox).
 fn named_script_risk(name: &str, args: &[String], scope: &PathScope) -> CommandRisk {
     let script_host = SHELLS.contains(&name)
@@ -495,9 +521,14 @@ fn named_script_risk(name: &str, args: &[String], scope: &PathScope) -> CommandR
 
 const SHELLS: &[&str] = &["sh", "bash", "zsh", "dash", "ksh", "fish", "csh", "tcsh"];
 
-/// Program name without its directory (`/bin/rm` → `rm`).
+/// Only bare programs and exact system paths have a known identity. In particular, a
+/// repository executable named `cat` is not the system's read-only utility.
 fn program_name(word: &str) -> &str {
-    word.rsplit('/').next().unwrap_or(word)
+    let name = word
+        .strip_prefix("/usr/bin/")
+        .or_else(|| word.strip_prefix("/bin/"))
+        .unwrap_or(word);
+    if name.contains('/') { "" } else { name }
 }
 
 fn is_assignment(word: &str) -> bool {
@@ -548,84 +579,153 @@ fn operands(args: &[String]) -> Vec<&str> {
     out
 }
 
-const READ_COMMANDS: &[&str] = &[
-    "ls",
-    "cat",
-    "head",
-    "tail",
-    "wc",
-    "pwd",
-    "echo",
-    "printf",
-    "which",
-    "whereis",
-    "type",
-    "file",
-    "stat",
-    "du",
-    "df",
-    "tree",
-    "diff",
-    "cmp",
-    "sort",
-    "uniq",
-    "cut",
-    "tr",
-    "true",
-    "false",
-    "date",
-    "whoami",
-    "id",
-    "uname",
-    "hostname",
-    "basename",
-    "dirname",
-    "realpath",
-    "readlink",
-    "grep",
-    "egrep",
-    "fgrep",
-    "rg",
-    "ag",
-    "fd",
-    "less",
-    "more",
-    "nl",
-    "od",
-    "hexdump",
-    "xxd",
-    "strings",
-    "column",
-    "jq",
-    "test",
-    "[",
-    "seq",
-    "md5",
-    "md5sum",
-    "shasum",
-    "sha1sum",
-    "sha256sum",
-    "cksum",
-    "printenv",
-    "ps",
-    "uptime",
-    "sleep",
-    "tac",
-    "rev",
-    "fold",
-    "fmt",
-    "expand",
-    "comm",
-    "join",
-    "paste",
-    "cd",
-    "export",
-    "set",
-    "unset",
-    "alias",
-    "locale",
-    "lsof",
-];
+/// Supported read-only option grammars. Programs with execution hooks, output files or
+/// configuration overrides are not trusted merely because their usual job is reading.
+fn is_read_command(name: &str, args: &[String]) -> bool {
+    let (short, flags, values): (&str, &[&str], &[&str]) = match name {
+        "ls" => (
+            "1aAbBcCdDfFgGhHiklLmMnNoOpqQrRsStTuUvwxX",
+            &[
+                "--all",
+                "--almost-all",
+                "--classify",
+                "--color=auto",
+                "--color=never",
+                "--color=always",
+            ],
+            &[],
+        ),
+        "cat" => ("benstuvAET", &["--number", "--show-all"], &[]),
+        "head" | "tail" => ("qvFf", &[], &["-n", "-c", "--lines", "--bytes"]),
+        "wc" => ("clmwL", &[], &[]),
+        "pwd" => ("LP", &[], &[]),
+        "echo" => ("neE", &[], &[]),
+        "grep" | "egrep" | "fgrep" => (
+            "EFGHhIiLlnoqRrsvVwxyz",
+            &[
+                "--line-number",
+                "--files-with-matches",
+                "--fixed-strings",
+                "--ignore-case",
+            ],
+            &[
+                "-A",
+                "-B",
+                "-C",
+                "-e",
+                "-f",
+                "-m",
+                "--include",
+                "--exclude",
+                "--exclude-dir",
+            ],
+        ),
+        "rg" => (
+            "nNliIsSvVwFx0",
+            &[
+                "--files",
+                "--hidden",
+                "--no-ignore",
+                "--no-config",
+                "--line-number",
+                "--files-with-matches",
+                "--fixed-strings",
+                "--ignore-case",
+                "--count",
+                "--json",
+                "--stats",
+            ],
+            &[
+                "-A",
+                "-B",
+                "-C",
+                "-e",
+                "-f",
+                "-g",
+                "-t",
+                "-T",
+                "-m",
+                "--glob",
+                "--type",
+                "--max-count",
+                "--max-depth",
+            ],
+        ),
+        "sort" => (
+            "bdfghinMruVz",
+            &[],
+            &["-k", "-t", "--key", "--field-separator"],
+        ),
+        "uniq" => ("cdiuz", &[], &["-f", "-s", "-w"]),
+        "cut" => ("ns", &["--complement"], &["-b", "-c", "-d", "-f"]),
+        "tr" => ("cdsCt", &[], &[]),
+        "diff" => (
+            "abBiqrsuUw",
+            &["--brief", "--recursive", "--unified"],
+            &["-U", "-I"],
+        ),
+        "cmp" => ("bls", &[], &[]),
+        "du" | "df" => ("ahHiklLmPstx", &[], &[]),
+        "basename" | "dirname" | "readlink" | "realpath" => ("aefmnqsz", &[], &[]),
+        "jq" => (
+            "cersSMCjnR",
+            &[
+                "--raw-output",
+                "--compact-output",
+                "--slurp",
+                "--exit-status",
+                "--null-input",
+                "--raw-input",
+            ],
+            &[],
+        ),
+        "find" => (
+            "",
+            &[
+                "-print",
+                "-print0",
+                "-empty",
+                "-type",
+                "-name",
+                "-iname",
+                "-path",
+                "-ipath",
+                "-maxdepth",
+                "-mindepth",
+            ],
+            &[],
+        ),
+        "true" | "false" | "whoami" | "id" | "uname" | "uptime" => ("agnrups", &[], &[]),
+        _ => return false,
+    };
+    safe_operands(args, short, flags, values).is_some_and(|count| name != "uniq" || count <= 1)
+}
+
+/// Count operands while accepting only declared options. A value-taking short option may
+/// attach its value (`-n10`); no other unknown option or abbreviated long option is accepted.
+fn safe_operands(args: &[String], short: &str, flags: &[&str], values: &[&str]) -> Option<usize> {
+    let mut count = 0;
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        if arg == "--" {
+            return Some(count + args.count());
+        }
+        if !arg.starts_with('-') || arg == "-" {
+            count += 1;
+        } else if flags.contains(&arg.as_str()) {
+        } else if values.contains(&arg.as_str()) {
+            args.next()?;
+        } else if values.iter().any(|flag| {
+            arg.strip_prefix(flag).is_some_and(|value| {
+                !value.is_empty() && (flag.len() == 2 || value.starts_with('='))
+            })
+        }) {
+        } else if arg.starts_with("--") || !arg[1..].chars().all(|c| short.contains(c)) {
+            return None;
+        }
+    }
+    Some(count)
+}
 
 const NETWORK_COMMANDS: &[&str] = &[
     "curl",
@@ -633,6 +733,7 @@ const NETWORK_COMMANDS: &[&str] = &[
     "ssh",
     "scp",
     "sftp",
+    "rsync",
     "ftp",
     "telnet",
     "nc",
@@ -653,6 +754,50 @@ const NETWORK_COMMANDS: &[&str] = &[
     "gh",
 ];
 
+/// Network access does not authorize local execution, config files or arbitrary outputs.
+/// Only ordinary HTTP requests have a small, explicit option grammar; other clients may
+/// launch proxies, shells, plugins or aliases and must prompt even in full-access mode.
+fn network_risk(name: &str, args: &[String]) -> CommandRisk {
+    let safe = match name {
+        "curl" => safe_operands(
+            args,
+            "fIsSLivq",
+            &[
+                "--fail",
+                "--silent",
+                "--show-error",
+                "--location",
+                "--head",
+                "--include",
+                "--verbose",
+                "--disable",
+            ],
+            &["-H", "--header", "--max-time", "--connect-timeout"],
+        )
+        .is_some(),
+        "wget" => safe_operands(
+            args,
+            "qvS",
+            &[
+                "--quiet",
+                "--verbose",
+                "--server-response",
+                "--spider",
+                "--no-verbose",
+                "--no-config",
+            ],
+            &["--timeout", "--tries", "--user-agent", "--header"],
+        )
+        .is_some(),
+        _ => false,
+    };
+    if safe {
+        CommandRisk::NETWORK
+    } else {
+        CommandRisk::NETWORK.max(CommandRisk::OPAQUE_INLINE)
+    }
+}
+
 const ALWAYS_DESTRUCTIVE: &[&str] = &[
     "sudo", "doas", "su", "pkexec", "dd", "fdisk", "sfdisk", "parted", "diskutil", "shred",
     "wipefs", "shutdown", "reboot", "halt", "poweroff", "mkswap",
@@ -661,67 +806,27 @@ const ALWAYS_DESTRUCTIVE: &[&str] = &[
 /// Commands that write to the paths they are given.
 const PATH_WRITERS: &[&str] = &["cp", "mv", "touch", "mkdir", "ln", "install", "truncate"];
 
+/// Assignments and wrappers can change PATH, configuration or the executable. They are
+/// deliberately not unwrapped; only the actual first word selects the program grammar.
 fn classify_words(words: &[String], scope: &PathScope, depth: usize) -> CommandRisk {
-    // Skip `FOO=bar`, shell keywords and transparent wrappers. `exec` replaces the shell with
-    // whatever follows, so it makes the segment opaque too.
-    let mut i = 0;
-    let mut prefix = CommandRisk::READ;
-    while i < words.len() {
-        let w = words[i].as_str();
-        if w == "exec" {
-            prefix = CommandRisk::OPAQUE_INLINE;
-            i += 1;
-        } else if is_assignment(w)
-            || matches!(
-                w,
-                "!" | "{"
-                    | "}"
-                    | "if"
-                    | "then"
-                    | "else"
-                    | "elif"
-                    | "fi"
-                    | "do"
-                    | "done"
-                    | "while"
-                    | "until"
-                    | "time"
-                    | "nohup"
-                    | "command"
-                    | "builtin"
-            )
-        {
-            i += 1;
-        } else if w == "env" || w == "nice" || w == "timeout" || w == "stdbuf" {
-            i += 1;
-            // Their own flags (and a timeout's duration) come before the wrapped command.
-            while i < words.len()
-                && (words[i].starts_with('-')
-                    || is_assignment(&words[i])
-                    || (w == "timeout" && words[i].starts_with(|c: char| c.is_ascii_digit())))
-            {
-                i += 1;
-            }
-        } else {
-            break;
-        }
+    if depth > MAX_DEPTH {
+        return CommandRisk::OPAQUE_INLINE;
     }
-    prefix.max(classify_program(&words[i..], scope, depth))
-}
-
-/// Classifies `words` once wrappers and keywords are skipped: the program and its arguments.
-fn classify_program(words: &[String], scope: &PathScope, depth: usize) -> CommandRisk {
     let Some(first) = words.first() else {
         return CommandRisk::READ;
     };
     let args = &words[1..];
     let name = program_name(first);
 
+    if name.is_empty() || is_assignment(first) {
+        return CommandRisk::OPAQUE_INLINE;
+    }
+
     if ALWAYS_DESTRUCTIVE.contains(&name) || name.starts_with("mkfs") {
         return CommandRisk::DESTRUCTIVE.unknown_outside();
     }
     if NETWORK_COMMANDS.contains(&name) {
-        return CommandRisk::NETWORK;
+        return network_risk(name, args);
     }
     if is_interpreter(name) {
         if (name.starts_with("python") || name.starts_with("pypy"))
@@ -757,29 +862,16 @@ fn classify_program(words: &[String], scope: &PathScope, depth: usize) -> Comman
         }
         "eval" => classify_depth(&args.join(" "), scope, depth + 1).max(CommandRisk::OPAQUE_INLINE),
         "source" | "." => CommandRisk::OPAQUE_INLINE,
-        "xargs" => {
-            let mut j = 0;
-            while j < args.len() && args[j].starts_with('-') {
-                let takes_value = matches!(
-                    args[j].as_str(),
-                    "-n" | "-I" | "-L" | "-P" | "-d" | "-s" | "-E" | "-a"
-                );
-                j += if takes_value { 2 } else { 1 };
-            }
-            if j >= args.len() {
-                CommandRisk::WRITE // xargs defaults to echo, but keep it simple
-            } else {
-                classify_words(&args[j..], scope, depth + 1)
-            }
-        }
         "find" => classify_find(args, scope, depth),
         "sed" => {
-            if args.iter().any(|a| {
-                a == "--in-place" || a.starts_with("--in-place=") || short_flags(a).contains('i')
-            }) {
-                CommandRisk::WRITE
-            } else {
+            if matches!(args, [flag, script, paths @ ..]
+                if flag == "-n" && script.ends_with('p')
+                    && script.chars().all(|c| c.is_ascii_digit() || ",$p".contains(c))
+                    && paths.iter().all(|p| !p.starts_with('-')))
+            {
                 CommandRisk::READ
+            } else {
+                CommandRisk::OPAQUE_INLINE
             }
         }
         "git" => classify_git(args),
@@ -823,18 +915,6 @@ fn classify_program(words: &[String], scope: &PathScope, depth: usize) -> Comman
         }
         "kill" | "killall" | "pkill" => CommandRisk::OUTSIDE,
         "launchctl" | "systemctl" | "crontab" => CommandRisk::OUTSIDE.unknown_outside(),
-        "rsync" => {
-            let ops = operands(args);
-            if ops
-                .iter()
-                .any(|p| p.contains("::") || p.starts_with("rsync://") || is_remote(p))
-            {
-                CommandRisk::NETWORK
-            } else {
-                let dest = ops.last().copied().into_iter().collect();
-                writes_to(CommandRisk::WRITE, dest, scope, CommandRisk::OUTSIDE)
-            }
-        }
         // These write only their destination (the last operand), unless `-t <dir>` names it.
         "cp" | "ln" | "install" if !has_arg(args, &["-t", "--target-directory"]) => {
             let dest = operands(args).last().copied().into_iter().collect();
@@ -846,19 +926,24 @@ fn classify_program(words: &[String], scope: &PathScope, depth: usize) -> Comman
             scope,
             CommandRisk::OUTSIDE,
         ),
-        name if READ_COMMANDS.contains(&name) => CommandRisk::READ,
-        "npm" | "pnpm" | "yarn" | "bun" => {
-            let sub = operands(args).first().copied();
-            match sub {
-                None if name == "yarn" => CommandRisk::NETWORK,
-                Some(
-                    "install" | "i" | "ci" | "add" | "update" | "upgrade" | "up" | "publish"
-                    | "dlx" | "create" | "exec" | "x" | "audit" | "outdated" | "view" | "info"
-                    | "login" | "fetch",
-                ) => CommandRisk::NETWORK,
-                _ => CommandRisk::WRITE,
-            }
+        name if is_read_command(name, args) => CommandRisk::READ,
+        "make" | "just" | "cmake" | "ninja" | "swift" | "dotnet" | "mvn" | "gradle" => {
+            CommandRisk::WRITE
         }
+        "npm" | "pnpm" | "yarn" | "bun" => match args.first().map(String::as_str) {
+            Some("dlx" | "create" | "exec" | "x") => {
+                CommandRisk::NETWORK.max(CommandRisk::OPAQUE_INLINE)
+            }
+            Some(flag) if flag.starts_with('-') => {
+                CommandRisk::NETWORK.max(CommandRisk::OPAQUE_INLINE)
+            }
+            None if name == "yarn" => CommandRisk::NETWORK,
+            Some(
+                "install" | "i" | "ci" | "add" | "update" | "upgrade" | "up" | "publish" | "audit"
+                | "outdated" | "view" | "info" | "login" | "fetch",
+            ) => CommandRisk::NETWORK,
+            _ => CommandRisk::WRITE,
+        },
         "pip" | "pip3" => pip_risk(args),
         "uv" => match operands(args).as_slice() {
             ["pip", "install" | "download" | "sync", ..]
@@ -905,15 +990,7 @@ fn classify_program(words: &[String], scope: &PathScope, depth: usize) -> Comman
             Some(&("rm" | "rmi" | "prune" | "system" | "volume")) => CommandRisk::DESTRUCTIVE,
             _ => CommandRisk::WRITE,
         },
-        _ => CommandRisk::WRITE,
-    }
-}
-
-/// `host:path` or `user@host:path` (not a local path with a colon after a slash).
-fn is_remote(arg: &str) -> bool {
-    match arg.find(':') {
-        Some(colon) => !arg[..colon].contains('/'),
-        None => false,
+        _ => CommandRisk::OPAQUE_INLINE,
     }
 }
 
@@ -941,57 +1018,34 @@ fn pip_risk(args: &[String]) -> CommandRisk {
 }
 
 fn classify_find(args: &[String], scope: &PathScope, depth: usize) -> CommandRisk {
-    let mut result = CommandRisk::READ;
     for (i, arg) in args.iter().enumerate() {
         match arg.as_str() {
             "-delete" => return CommandRisk::DESTRUCTIVE,
             "-exec" | "-execdir" | "-ok" | "-okdir" => {
-                let rest: Vec<String> = args[i + 1..]
-                    .iter()
-                    .take_while(|a| !matches!(a.as_str(), ";" | "\\;" | "+"))
-                    .filter(|a| a.as_str() != "{}")
-                    .cloned()
-                    .collect();
-                result = result.max(classify_words(&rest, scope, depth + 1));
-            }
-            "-fprint" | "-fprint0" | "-fprintf" | "-fls" => {
-                result = result.max(CommandRisk::WRITE);
+                return classify_words(&args[i + 1..], scope, depth + 1)
+                    .max(CommandRisk::OPAQUE_INLINE);
             }
             _ => {}
         }
     }
-    result
+    if !args.iter().any(|a| a == "--") && is_read_command("find", args) {
+        CommandRisk::READ
+    } else {
+        CommandRisk::OPAQUE_INLINE
+    }
 }
 
 fn classify_git(args: &[String]) -> CommandRisk {
-    // Skip global options: `-C <dir>`, `-c <k=v>`, `--git-dir=…`, `--no-pager`, …
-    let mut i = 0;
-    while i < args.len() && args[i].starts_with('-') {
-        i += if matches!(args[i].as_str(), "-C" | "-c") {
-            2
-        } else {
-            1
-        };
-    }
-    let Some(sub) = args.get(i) else {
-        return CommandRisk::READ;
+    // Even status/diff/log can run a configured fsmonitor, pager or external diff. Keep Git
+    // opaque until execution itself can disable every such hook; only add useful risk metadata.
+    let Some((sub, rest)) = args.split_first() else {
+        return CommandRisk::OPAQUE_INLINE;
     };
-    let rest = &args[i + 1..];
     let ops = operands(rest);
-    match sub.as_str() {
-        "status" | "diff" | "log" | "show" | "blame" | "rev-parse" | "ls-files" | "ls-tree"
-        | "grep" | "describe" | "shortlog" | "cat-file" | "rev-list" | "help" | "version"
-        | "whatchanged" | "check-ignore" | "name-rev" | "merge-base" | "for-each-ref"
-        | "show-ref" | "show-branch" | "count-objects" | "var" => CommandRisk::READ,
-        "fetch" | "pull" | "clone" | "ls-remote" | "submodule" | "archive" => {
-            if sub == "archive" && !has_arg(rest, &["--remote"]) {
-                CommandRisk::WRITE
-            } else {
-                CommandRisk::NETWORK
-            }
-        }
+    let metadata = match sub.as_str() {
+        "fetch" | "pull" | "clone" | "ls-remote" | "submodule" => CommandRisk::NETWORK,
         "push" => {
-            let force = has_short_flag(rest, 'f')
+            if has_short_flag(rest, 'f')
                 || has_short_flag(rest, 'd')
                 || has_arg(
                     rest,
@@ -1004,120 +1058,60 @@ fn classify_git(args: &[String]) -> CommandRisk {
                         "--prune",
                     ],
                 )
-                || ops.iter().any(|r| r.starts_with('+') || r.starts_with(':'));
-            if force {
-                CommandRisk::DESTRUCTIVE
+                || ops.iter().any(|r| r.starts_with('+') || r.starts_with(':'))
+            {
+                CommandRisk::DESTRUCTIVE.max(CommandRisk::NETWORK)
             } else {
                 CommandRisk::NETWORK
             }
         }
-        "reset" => {
-            if has_arg(rest, &["--hard", "--merge", "--keep"]) {
-                CommandRisk::DESTRUCTIVE
-            } else {
-                CommandRisk::WRITE
-            }
+        "reset" if has_arg(rest, &["--hard", "--merge", "--keep"]) => CommandRisk::DESTRUCTIVE,
+        "clean" if has_short_flag(rest, 'f') || has_arg(rest, &["--force"]) => {
+            CommandRisk::DESTRUCTIVE
         }
-        "clean" => {
-            if has_short_flag(rest, 'f') || has_arg(rest, &["--force"]) {
-                CommandRisk::DESTRUCTIVE
-            } else {
-                CommandRisk::READ // without -f git clean refuses (or just lists with -n)
-            }
-        }
-        "branch" => {
-            let delete = has_short_flag(rest, 'd') || has_arg(rest, &["--delete"]);
-            let force = has_short_flag(rest, 'f') || has_arg(rest, &["--force"]);
+        "branch"
             if has_short_flag(rest, 'D')
-                || (delete && force)
                 || has_short_flag(rest, 'M')
                 || has_short_flag(rest, 'C')
-            {
-                CommandRisk::DESTRUCTIVE
-            } else if ops.is_empty() {
-                CommandRisk::READ
-            } else {
-                CommandRisk::WRITE
-            }
+                || ((has_short_flag(rest, 'd') || has_arg(rest, &["--delete"]))
+                    && (has_short_flag(rest, 'f') || has_arg(rest, &["--force"]))) =>
+        {
+            CommandRisk::DESTRUCTIVE
         }
-        "checkout" => {
+        "checkout"
             if rest.iter().any(|a| a == "--" || a == ".")
                 || has_short_flag(rest, 'f')
-                || has_arg(rest, &["--force"])
-            {
-                CommandRisk::DESTRUCTIVE
-            } else {
-                CommandRisk::WRITE
-            }
+                || has_arg(rest, &["--force"]) =>
+        {
+            CommandRisk::DESTRUCTIVE
         }
-        "switch" => {
-            if has_arg(rest, &["--discard-changes", "--force"]) || has_short_flag(rest, 'f') {
-                CommandRisk::DESTRUCTIVE
-            } else {
-                CommandRisk::WRITE
-            }
+        "switch"
+            if has_arg(rest, &["--discard-changes", "--force"]) || has_short_flag(rest, 'f') =>
+        {
+            CommandRisk::DESTRUCTIVE
         }
-        "restore" => {
-            let staged_only = has_arg(rest, &["--staged"]) || has_short_flag(rest, 'S');
-            let worktree = has_arg(rest, &["--worktree"]) || has_short_flag(rest, 'W');
-            if staged_only && !worktree {
-                CommandRisk::WRITE
-            } else {
-                CommandRisk::DESTRUCTIVE
-            }
+        "restore"
+            if !(has_arg(rest, &["--staged"]) || has_short_flag(rest, 'S'))
+                || has_arg(rest, &["--worktree"])
+                || has_short_flag(rest, 'W') =>
+        {
+            CommandRisk::DESTRUCTIVE
         }
-        "stash" => match ops.first() {
-            Some(&("drop" | "clear")) => CommandRisk::DESTRUCTIVE,
-            Some(&("list" | "show")) => CommandRisk::READ,
-            _ => CommandRisk::WRITE,
-        },
-        "tag" => {
-            if has_short_flag(rest, 'd') || has_arg(rest, &["--delete"]) {
-                CommandRisk::DESTRUCTIVE
-            } else if ops.is_empty() || has_short_flag(rest, 'l') || has_arg(rest, &["--list"]) {
-                CommandRisk::READ
-            } else {
-                CommandRisk::WRITE
-            }
+        "stash" if matches!(ops.first(), Some(&("drop" | "clear"))) => CommandRisk::DESTRUCTIVE,
+        "tag" | "update-ref" if has_short_flag(rest, 'd') || has_arg(rest, &["--delete"]) => {
+            CommandRisk::DESTRUCTIVE
         }
-        "remote" => match ops.first() {
-            None | Some(&("show" | "get-url")) => CommandRisk::READ,
-            Some(&("update" | "prune")) => CommandRisk::NETWORK,
-            _ => CommandRisk::WRITE,
-        },
-        "config" => {
-            if has_arg(
-                rest,
-                &["--get", "--get-all", "--list", "-l", "--get-regexp"],
-            ) {
-                CommandRisk::READ
-            } else if has_arg(rest, &["--global", "--system"]) {
-                CommandRisk::OUTSIDE.unknown_outside()
-            } else {
-                CommandRisk::WRITE
-            }
+        "reflog" if matches!(ops.first(), Some(&("expire" | "delete"))) => CommandRisk::DESTRUCTIVE,
+        "prune" | "filter-branch" | "filter-repo" => CommandRisk::DESTRUCTIVE,
+        "gc" if rest.iter().any(|a| a.starts_with("--prune")) => CommandRisk::DESTRUCTIVE,
+        "config" if has_arg(rest, &["--global", "--system"]) => {
+            CommandRisk::OUTSIDE.unknown_outside()
         }
-        "reflog" => match ops.first() {
-            Some(&("expire" | "delete")) => CommandRisk::DESTRUCTIVE,
-            _ => CommandRisk::READ,
-        },
-        "gc" | "prune" => {
-            if rest.iter().any(|a| a.starts_with("--prune")) || sub == "prune" {
-                CommandRisk::DESTRUCTIVE
-            } else {
-                CommandRisk::WRITE
-            }
-        }
-        "filter-branch" | "filter-repo" => CommandRisk::DESTRUCTIVE,
-        "update-ref" => {
-            if has_short_flag(rest, 'd') {
-                CommandRisk::DESTRUCTIVE
-            } else {
-                CommandRisk::WRITE
-            }
-        }
-        _ => CommandRisk::WRITE,
-    }
+        "archive" if has_arg(rest, &["--remote"]) => CommandRisk::NETWORK,
+        "remote" if matches!(ops.first(), Some(&("update" | "prune"))) => CommandRisk::NETWORK,
+        _ => CommandRisk::OPAQUE_INLINE,
+    };
+    metadata.max(CommandRisk::OPAQUE_INLINE)
 }
 
 #[cfg(test)]

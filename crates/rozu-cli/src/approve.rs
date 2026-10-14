@@ -167,6 +167,7 @@ const CODEX_ONCE_KEY: &str =
 
 /// The approval card: what will run, how it is confined and the available keys.
 pub fn render_card(req: &ApprovalRequest, color: bool) -> String {
+    use rozu_runtime::approval_text;
     let (bold, reset) = if color {
         ("\x1b[1m", "\x1b[0m")
     } else {
@@ -175,15 +176,17 @@ pub fn render_card(req: &ApprovalRequest, color: bool) -> String {
     let mut out = if req.blocked_retry {
         format!(
             "╭─ {bold}the sandbox blocked {}: rerun it unsandboxed?{reset} · risk: {}\n",
-            req.tool, req.risk
+            approval_text(&req.tool).replace('\n', "\\n"),
+            req.risk
         )
     } else {
         format!(
             "╭─ {bold}approve {}?{reset} · risk: {}\n",
-            req.tool, req.risk
+            approval_text(&req.tool).replace('\n', "\\n"),
+            req.risk
         )
     };
-    for line in req.preview.lines() {
+    for line in approval_text(&req.preview).lines() {
         out.push_str(&format!("│ {line}\n"));
     }
     if req.blocked_retry {
@@ -199,7 +202,7 @@ pub fn render_card(req: &ApprovalRequest, color: bool) -> String {
         for path in &req.extra_writes {
             out.push_str(&format!(
                 "│ also writable for this command: {}\n",
-                path.display()
+                approval_text(&path.display().to_string()).replace('\n', "\\n")
             ));
         }
         if req.outside_unknown && is_codex(req) {
@@ -226,7 +229,10 @@ pub fn render_card(req: &ApprovalRequest, color: bool) -> String {
         "[n] deny (optionally `n <reason>`)".to_owned()
     });
     if let Some(rule) = req.allow_rule.as_ref().filter(|_| keys.always_allow) {
-        parts.push(format!("[a] always allow `{rule}` in this project"));
+        parts.push(format!(
+            "[a] always allow `{}` in this project",
+            approval_text(&rule.to_string()).replace('\n', "\\n")
+        ));
     }
     if keys.unsandboxed {
         parts.push(if is_codex(req) {
@@ -410,7 +416,7 @@ mod tests {
                 "╭─ approve shell? · risk: network\n\
                  │ $ curl https://example.com\n\
                  │ sandbox: seatbelt (writes: workspace + session tmp) · network: on\n\
-                 ╰─ [y] approve  [n] deny (optionally `n <reason>`)  [a] always allow `curl (host example.com)` in this project  {UNSANDBOXED_KEY}"
+                 ╰─ [y] approve  [n] deny (optionally `n <reason>`)  {UNSANDBOXED_KEY}"
             )
         );
         let card = render_card(&request(None), false);
@@ -418,6 +424,23 @@ mod tests {
         let mut off = request(None);
         off.sandbox = SandboxMode::Off;
         assert!(!render_card(&off, false).contains("[u]"));
+    }
+
+    #[test]
+    fn approval_controls_are_visible_and_metadata_stays_on_one_line() {
+        let mut req = request(Some(AllowRule::prefix("safe\nspoof\u{1b}[2J")));
+        req.risk = Risk::WriteOutside;
+        req.network = false;
+        req.tool = "shell\nspoof\r".into();
+        req.preview = "rm file #\u{1b}[2J\u{8}\u{202e}safe\nsecond line".into();
+        req.extra_writes = vec!["/outside\nspoof\u{1b}[2J".into()];
+        let card = render_card(&req, false);
+        assert!(!card.chars().any(|c| c.is_control() && c != '\n'), "{card}");
+        assert!(card.contains("shell\\nspoof\\r?"), "{card}");
+        assert!(card.contains("│ second line\n"), "{card}");
+        assert!(card.contains("/outside\\nspoof\\u{1b}[2J"), "{card}");
+        assert!(card.contains("safe\\nspoof\\u{1b}[2J"), "{card}");
+        assert!(!card.contains('\u{202e}'));
     }
 
     #[test]
@@ -440,10 +463,7 @@ mod tests {
         req.sandbox = SandboxMode::Enforced(CODEX_SANDBOX);
         req.outside_unknown = true;
         let card = render_card(&req, false);
-        assert!(
-            card.contains("sandbox: codex's own (writes: workspace + tmp; network off)"),
-            "{card}"
-        );
+        assert!(card.contains("sandbox: codex's own sandbox"), "{card}");
         assert!(card.contains(CODEX_ONCE_KEY), "{card}");
         assert!(!card.contains("UNSANDBOXED"), "{card}");
         assert!(card.contains("Codex's sandbox will block that"), "{card}");
@@ -553,7 +573,12 @@ mod tests {
                 let ask = asks.recv().await.unwrap();
                 answer(ask, &input, true, false).await;
             });
-            assert_eq!(gate.decide(request(curl_rule())).await, expected);
+            let mut req = request(Some(AllowRule::prefix("cp")));
+            req.risk = Risk::WriteOutside;
+            req.network = false;
+            req.preview = "$ cp local /outside".into();
+            req.args = json!({"command": "cp local /outside"});
+            assert_eq!(gate.decide(req).await, expected);
             answering.await.unwrap();
         }
     }

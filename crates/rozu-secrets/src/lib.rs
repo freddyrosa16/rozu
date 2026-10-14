@@ -1,8 +1,8 @@
 //! Credential storage for rozu.
 //!
 //! Stores provider API keys in the OS keychain (`keyring`, service `dev.rozu`) and never in files
-//! or logs; keys are wrapped in `secrecy::SecretString`. Also owns the official Sign in with
-//! ChatGPT flow (OAuth 2.0 PKCE with a loopback redirect) and token refresh (M4).
+//! or logs; keys are wrapped in `secrecy::SecretString`. Subscription authentication belongs
+//! to the official vendor CLIs; rozu never reads their credential files.
 
 use std::collections::HashMap;
 use std::sync::Mutex;

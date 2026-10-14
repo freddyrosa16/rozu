@@ -12,7 +12,7 @@
 > {"method":"item/completed","params":{"item":{"type":"commandExecution","id":"call_2","command":"/bin/zsh -lc 'git push --force origin main'","commandActions":[],"cwd":"/fake/ws","status":"declined"},"threadId":"thr_1","turnId":"turn_1"}}
 > {"id":"srv-3","method":"item/commandExecution/requestApproval","params":{"itemId":"call_3","threadId":"thr_1","turnId":"turn_1","startedAtMs":4,"command":"/bin/zsh -lc 'curl -s https://example.com'"}}
 <
-> {"id":"srv-4","method":"execCommandApproval","params":{"callId":"legacy_1","conversationId":"thr_1","command":["bash","-lc","ls -la"],"cwd":"__CWD__","parsedCmd":[]}}
+> {"id":"srv-4","method":"execCommandApproval","params":{"callId":"legacy_1","conversationId":"thr_1","command":["/bin/bash","-lc","ls -la"],"cwd":"__CWD__","parsedCmd":[]}}
 <
 > {"id":"srv-5","method":"item/commandExecution/requestApproval","params":{"itemId":"call_5","threadId":"thr_1","turnId":"turn_1","startedAtMs":5,"command":"/bin/zsh -lc 'ls'","reason":"command failed in the sandbox; retry without it?"}}
 <

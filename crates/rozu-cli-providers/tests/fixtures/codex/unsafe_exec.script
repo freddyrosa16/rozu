@@ -1,0 +1,16 @@
+# Approval requests only: the fake vendor never executes these command strings.
+< turn/start
+> {"id":__ID__,"result":{"turn":{"id":"turn_1","items":[],"status":"inProgress"}}}
+> {"id":"unsafe-1","method":"item/commandExecution/requestApproval","params":{"itemId":"unsafe_1","threadId":"thr_1","turnId":"turn_1","command":"./sh -c 'ls'"}}
+<
+> {"id":"unsafe-2","method":"item/commandExecution/requestApproval","params":{"itemId":"unsafe_2","threadId":"thr_1","turnId":"turn_1","command":"/bin/sh -c './cat private.txt'"}}
+<
+> {"id":"unsafe-3","method":"item/commandExecution/requestApproval","params":{"itemId":"unsafe_3","threadId":"thr_1","turnId":"turn_1","command":"/bin/sh -c 'rg --pre ./filter needle victim.txt'"}}
+<
+> {"id":"unsafe-4","method":"item/commandExecution/requestApproval","params":{"itemId":"unsafe_4","threadId":"thr_1","turnId":"turn_1","command":"/bin/sh -c 'sort -o victim.txt source.txt'"}}
+<
+> {"id":"unsafe-5","method":"item/commandExecution/requestApproval","params":{"itemId":"unsafe_5","threadId":"thr_1","turnId":"turn_1","command":"/bin/sh -c 'r\\\nm -rf build'"}}
+<
+> {"id":"unsafe-6","method":"execCommandApproval","params":{"callId":"unsafe_6","conversationId":"thr_1","command":["/tmp/bash","-c","ls"],"cwd":"__CWD__"}}
+<
+> {"method":"turn/completed","params":{"threadId":"thr_1","turn":{"id":"turn_1","items":[],"status":"completed"}}}

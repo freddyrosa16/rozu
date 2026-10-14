@@ -240,10 +240,10 @@ async fn chat(args: ChatArgs) -> anyhow::Result<ExitCode> {
                 Ok((next_agent, next)) => {
                     agent = next_agent;
                     choice = next;
-                    if let Some(writer) = writer.as_mut() {
-                        if let Err(err) = writer.set_model(choice.provider.id, &choice.model) {
-                            tracing::warn!(error = %err, "could not save the model switch");
-                        }
+                    if let Some(writer) = writer.as_mut()
+                        && let Err(err) = writer.set_model(choice.provider.id, &choice.model)
+                    {
+                        tracing::warn!(error = %err, "could not save the model switch");
                     }
                     printer.status(&format!("switched to {}", choice.spec()));
                     printer.unpriced_note(&choice);
@@ -291,24 +291,23 @@ async fn chat(args: ChatArgs) -> anyhow::Result<ExitCode> {
             eprintln!("error: {err}");
         }
     }
-    if let Some(writer) = writer.as_ref().filter(|_| interactive) {
-        if session
+    if let Some(writer) = writer.as_ref().filter(|_| interactive)
+        && session
             .messages
             .iter()
             .any(|m| m.role == rozu_core::Role::User)
-        {
-            printer.status(&format!("resume with: rozu chat --resume {}", writer.id()));
-        }
+    {
+        printer.status(&format!("resume with: rozu chat --resume {}", writer.id()));
     }
     Ok(ExitCode::SUCCESS)
 }
 
 fn save(writer: &mut Option<SessionWriter>, session: &Session) {
-    if let Some(w) = writer.as_mut() {
-        if let Err(err) = w.sync(session) {
-            eprintln!("warning: could not save the chat, so it won't be resumable: {err}");
-            *writer = None;
-        }
+    if let Some(w) = writer.as_mut()
+        && let Err(err) = w.sync(session)
+    {
+        eprintln!("warning: could not save the chat, so it won't be resumable: {err}");
+        *writer = None;
     }
 }
 

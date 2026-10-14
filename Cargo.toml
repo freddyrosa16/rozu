@@ -1,5 +1,5 @@
 [workspace]
-resolver = "2"
+resolver = "3"
 members = ["crates/*"]
 # GUI spikes are throwaway, standalone projects.
 exclude = ["spikes"]
@@ -7,7 +7,7 @@ exclude = ["spikes"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.99"
 license = "MIT"
 repository = "https://github.com/freddyrosa16/rozu"
 publish = false
@@ -37,7 +37,7 @@ eventsource-stream = "0.2"
 fastrand = "2"
 futures = "0.3"
 ignore = "0.4"
-# keyring 3 (not 4): 4.x needs Rust 1.88 and reorganizes the store API.
+# Keep keyring 3's existing store API; upgrading it is a separate migration.
 keyring = "3.6"
 libc = "0.2"
 portable-pty = "0.9"
@@ -57,6 +57,7 @@ rpassword = "7"
 rusqlite = { version = "0.40", features = ["bundled"] }
 schemars = "1"
 secrecy = "0.10"
+sha2 = "0.10"
 signal-hook-registry = "1.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

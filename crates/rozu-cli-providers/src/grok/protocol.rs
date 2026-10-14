@@ -224,17 +224,17 @@ pub fn looks_logged_out(lower: &str) -> bool {
 /// MCP tools become the tool itself (`rozu__read_file` → `read_file`), anything else is
 /// `grok:<name>`.
 pub fn tool_call(name: &str, raw_input: &Value) -> (String, Value) {
-    if name == USE_TOOL {
-        if let Some(target) = raw_input["tool_name"].as_str() {
-            let args = raw_input
-                .get("tool_input")
-                .cloned()
-                .unwrap_or_else(|| json!({}));
-            return match target.strip_prefix(ROZU_TOOL_PREFIX) {
-                Some(tool) => (tool.to_owned(), args),
-                None => (format!("grok:{target}"), args),
-            };
-        }
+    if name == USE_TOOL
+        && let Some(target) = raw_input["tool_name"].as_str()
+    {
+        let args = raw_input
+            .get("tool_input")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        return match target.strip_prefix(ROZU_TOOL_PREFIX) {
+            Some(tool) => (tool.to_owned(), args),
+            None => (format!("grok:{target}"), args),
+        };
     }
     (format!("grok:{name}"), raw_input.clone())
 }

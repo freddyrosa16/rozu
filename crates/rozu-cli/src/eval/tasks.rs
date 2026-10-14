@@ -14,7 +14,7 @@ use rozu_core::{
     Session, TurnOutcome, new_session_id,
 };
 use rozu_store::{SessionMeta, SessionStore, unix_now};
-use rozu_tools::{ToolRegistry, platform_sandbox};
+use rozu_tools::{ToolRegistry, Workspace, platform_sandbox};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -24,6 +24,9 @@ use rozu_runtime::{AgentFactory, TERMINAL_HOST, resolve_choice, system_prompt};
 
 #[derive(Debug, Args)]
 pub struct TasksArgs {
+    /// Trust this fixture/recording to execute real tools and commands with your permissions.
+    #[arg(long)]
+    trusted: bool,
     #[arg(long, value_enum, default_value_t = Mode::Dry)]
     mode: Mode,
     #[arg(long, default_value = "evals/tasks")]
@@ -121,15 +124,22 @@ impl Task {
     /// What's wrong with the repo / answer after a run.
     pub fn check(&self, root: &Path, session: &Session) -> Vec<String> {
         let mut failures = Vec::new();
+        let workspace = match Workspace::new(root) {
+            Ok(workspace) => workspace,
+            Err(err) => return vec![format!("cannot check workspace: {err}")],
+        };
+        let read = |path: &str| -> anyhow::Result<String> {
+            Ok(std::fs::read_to_string(workspace.resolve(path)?)?)
+        };
         for (path, needle) in &self.expect.files {
-            match std::fs::read_to_string(root.join(path)) {
+            match read(path) {
                 Ok(text) if text.contains(needle.as_str()) => {}
                 Ok(_) => failures.push(format!("{path} doesn't contain {needle:?}")),
                 Err(err) => failures.push(format!("{path}: {err}")),
             }
         }
         for path in &self.expect.unchanged {
-            let now = std::fs::read_to_string(root.join(path)).ok();
+            let now = read(path).ok();
             if now.as_ref() != self.files.get(path) {
                 failures.push(format!("{path} changed"));
             }
@@ -159,6 +169,11 @@ impl Task {
 }
 
 pub async fn run(args: TasksArgs) -> anyhow::Result<ExitCode> {
+    if !args.trusted {
+        bail!(
+            "eval tasks and replay execute real tools and commands; inspect the input and pass --trusted to run it"
+        );
+    }
     let mut tasks: Vec<Task> = load_fixtures(&args.dir, "task")?;
     if !args.names.is_empty() {
         tasks.retain(|t| args.names.contains(&t.name));
@@ -218,8 +233,7 @@ async fn run_task(
     let replay = Arc::new(ReplayProvider::new(task.steps()));
     let agent = match choice {
         None => {
-            let policy =
-                ApprovalPolicy::for_project(ApprovalMode::from(approval), workspace.root())?;
+            let policy = ApprovalPolicy::new(ApprovalMode::from(approval));
             Agent::new(
                 replay.clone(),
                 Arc::new(ToolRegistry::standard()),
@@ -257,13 +271,13 @@ async fn run_task(
     if outcome != TurnOutcome::Completed {
         failures.push(format!("the turn ended with {outcome:?}"));
     }
-    if let Some(want) = task.expect.asked.filter(|_| choice.is_none()) {
-        if gate.asked() < want {
-            failures.push(format!(
-                "{} approval prompts, expected at least {want}",
-                gate.asked()
-            ));
-        }
+    if let Some(want) = task.expect.asked.filter(|_| choice.is_none())
+        && gate.asked() < want
+    {
+        failures.push(format!(
+            "{} approval prompts, expected at least {want}",
+            gate.asked()
+        ));
     }
     if choice.is_none() && replay.remaining() > 0 {
         failures.push(format!(

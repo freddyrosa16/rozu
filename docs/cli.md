@@ -72,19 +72,27 @@ app uses the same store.
 
 ## Project memory and compaction
 `ROZU.md` and `AGENTS.md` in the workspace root, plus notes added with `/pin <note>` (kept in
-`.rozu/pinned.md`), are sent with every request, after the system prompt. Each file is capped at 32 KB.
+`.rozu/pinned.md`), are sent with every request, after the system prompt. Each file is read with a 32 KB cap.
+Memory files and `.rozu` must be regular files/directories, not symlinks; pinned notes cannot grow beyond 32 KB.
 
 Long chats compact themselves: at 60% of the context window old tool outputs are hidden, at 80% older turns
 are summarized; the system prompt, project memory and the last 3 turns are never touched. `/compact` does it
 now; `--memory off|mask|summarize|default` picks the policy. Vendor CLIs (`claude-cli`, `codex`, `grok`) keep
 and compact their own context, so `/compact` does nothing there.
 
+File writes and patches are limited to 1 MiB. Patches also cap edit/hunk counts and matching work; split
+larger changes into smaller files or use a reviewed command. Approval details remain complete and scrollable;
+requests needing an approval larger than 2 MiB are denied instead of clipped.
+
 ## Evals
 Dry runs script the model, so they need no keys; add `--mode live --provider ...` for a real one.
+Tasks and replays still execute real tools and shell checks. Inspect their fixtures/recordings first, then
+pass `--trusted` to authorize execution. Replay copies reject symlinks and special files; fixture paths must
+stay inside their temporary workspace. The memory eval does not need `--trusted`.
 
 ```sh
-./target/release/rozu eval tasks                # evals/tasks: each task in a temp repo, checked by its outcome
-./target/release/rozu eval replay evals/recorded/fix-failing-test.jsonl --workspace evals/recorded/fix-failing-test
+./target/release/rozu eval tasks --trusted      # evals/tasks: each task in a temp repo, checked by its outcome
+./target/release/rozu eval replay --trusted evals/recorded/fix-failing-test.jsonl --workspace evals/recorded/fix-failing-test
 ./target/release/rozu eval memory --seeds 3     # rows per memory condition in rozu-eval-memory.jsonl
 ```
 

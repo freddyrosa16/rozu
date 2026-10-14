@@ -246,10 +246,10 @@ impl TurnGuard {
 
 impl Drop for TurnGuard {
     fn drop(&mut self) {
-        if !self.finished {
-            if let Some(mut process) = self.state.process.take() {
-                process.kill();
-            }
+        if !self.finished
+            && let Some(mut process) = self.state.process.take()
+        {
+            process.kill();
         }
     }
 }

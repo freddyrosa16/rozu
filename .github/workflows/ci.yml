@@ -4,6 +4,14 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
@@ -12,41 +20,51 @@ jobs:
   landing-page:
     name: landing page tests
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f
+        with:
+          toolchain: '1.99.0'
+          components: rustfmt
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '22'
-      - run: node --test tests/waves.test.cjs
+      - run: ./scripts/check.sh quick
 
   check:
     name: fmt / clippy / test (${{ matrix.os }})
+    needs: landing-page
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
         os: [macos-latest, ubuntu-latest]
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f
+        with:
+          toolchain: '1.99.0'
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
-      - name: cargo fmt
-        run: cargo fmt --all --check
-      - name: cargo clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
-      - name: cargo test
-        run: cargo test --workspace
-      - name: evals (mocked providers)
-        run: |
-          cargo run -q -p rozu-cli -- eval tasks
-          cargo run -q -p rozu-cli -- eval replay evals/recorded/fix-failing-test.jsonl --workspace evals/recorded/fix-failing-test
-          cargo run -q -p rozu-cli -- eval memory --out "$RUNNER_TEMP/memory.jsonl"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: ./scripts/check.sh rust
 
   deny:
     name: cargo-deny
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          rust-version: '1.99.0'
+          arguments: --all-features --locked

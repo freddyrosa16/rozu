@@ -371,6 +371,40 @@ async fn command_approvals_go_through_rozu_policy() {
     }));
 }
 
+#[tokio::test]
+async fn ambiguous_commands_reach_the_gate_even_in_full_mode() {
+    let fake = fake(&["handshake.script", "unsafe_exec.script"]);
+    let gate = TestGate::new(|_| false);
+    let provider = provider_with(&fake, gate.clone(), ApprovalMode::FullAccess);
+    let (events, err) = collect(&provider, request("default", vec![Message::user("go")])).await;
+    assert_eq!(err, None);
+    let asked = gate.asked();
+    assert_eq!(asked.len(), 6);
+    assert!(
+        asked
+            .iter()
+            .all(|req| req.risk >= Risk::Opaque && req.allow_rule.is_none())
+    );
+    let records = approvals(&events);
+    assert_eq!(records.len(), 6);
+    assert!(
+        records
+            .iter()
+            .all(|record| !record.decision.is_approval() && record.source == DecisionSource::Gate)
+    );
+    for id in 1..=5 {
+        assert_eq!(
+            fake.reply(&format!("unsafe-{id}"))["result"]["decision"],
+            "decline"
+        );
+    }
+    assert!(
+        fake.reply("unsafe-6")["result"]["decision"]
+            .get("denied")
+            .is_some()
+    );
+}
+
 /// The prompt is on the stream while the user is still thinking, not after the answer.
 #[tokio::test]
 async fn codex_prompts_are_reported_before_the_user_answers() {

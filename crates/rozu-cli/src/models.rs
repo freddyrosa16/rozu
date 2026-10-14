@@ -18,14 +18,14 @@ pub fn run() -> anyhow::Result<ExitCode> {
     );
     let mut codex_listed = false;
     for model in registry::models() {
-        if model.provider == CODEX_ID {
-            if let Some(live) = &codex_live {
-                if !codex_listed {
-                    print_codex_models(live);
-                    codex_listed = true;
-                }
-                continue;
+        if model.provider == CODEX_ID
+            && let Some(live) = &codex_live
+        {
+            if !codex_listed {
+                print_codex_models(live);
+                codex_listed = true;
             }
+            continue;
         }
         let is_default = registry::provider_info(&model.provider)
             .is_some_and(|provider| provider.default_model == model.id);

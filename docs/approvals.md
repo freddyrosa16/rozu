@@ -6,7 +6,7 @@ either auto-approved or shown as an approval card with the exact command or diff
 | `--approval` | runs without asking | asks |
 |---|---|---|
 | `read-only` | reads | everything else |
-| `auto` (default) | reads, workspace writes | network, writes outside the workspace, opaque, destructive |
+| `auto` (default) | reads, sandboxed workspace writes | network, writes outside the workspace, opaque, destructive |
 | `full` | everything else | opaque, destructive |
 
 The desktop app offers the same three modes on its setup page (the gear at the bottom left); the choice applies
@@ -47,7 +47,9 @@ Destructive commands (`rm -rf`, `git push --force`, `git reset --hard`, `git bra
 redirects to paths outside the workspace, …) **always** ask, in every mode. So do **opaque** commands, whose effect
 rozu can't read off the command line: inline code (`python -c`, `perl -e`, `node -e`, `sh -c`/`bash -c`/`zsh -c`,
 code on an interpreter's stdin or in a heredoc, `eval`, `source`, `exec`), other interpreters (`osascript`, …),
-scripts outside the workspace, and any output redirect or `tee` to a file (`> out.txt`). A **script file inside the
+scripts outside the workspace, Git commands (repository configuration can execute programs), unrecognized
+programs/options, shell assignments/wrappers, execution-capable network clients (`ssh`, `scp`, `npx`,
+`npm exec`, and similar), and any output redirect or `tee` to a file (`> out.txt`). A **script file inside the
 workspace** is treated the same whichever interpreter runs it (`sh`, `bash`, `zsh`, `python`, `perl`, `ruby`,
 `node`): like `make`, it's a sandboxed workspace write, so `sh test.sh` and `python test.py` run without a prompt in
 `auto` and `full`.
@@ -59,11 +61,20 @@ Keys at the CLI prompt (the app shows the same choices as buttons):
 |---|---|
 | `y` | approve; the command still runs in the sandbox |
 | `n` | deny; `n <reason>` (or a reason on the next line) is passed to the agent |
-| `a` | approve and always allow this rule in this project: the command prefix (`cargo test`), the interpreter and script (`python3 -m pytest`), or for network clients the program **and host** (`curl` to `example.com` only). Not offered for destructive commands, inline interpreter code or redirects |
+| `a` | approve and always allow this rule in this project: the command prefix (`cargo test`), the interpreter and workspace script (`python3 tests.py`). Not offered for network, opaque or destructive commands |
 | `u` | run **unsandboxed, this command only**: no sandbox at all, full access to your files and the network. Never remembered, never chosen by a mode or rule. Only offered where there is a sandbox to lift |
 
-Rules live in `.rozu/approvals.json` in the workspace; tools and sandboxed commands can't write there. Without a
-terminal on stdin, every prompt is denied.
+Rules live in the user's configuration directory under `approvals/<workspace-sha256>.json`, keyed by the
+canonical workspace path. The directory is private (0700), and files are private (0600). Repository
+`.rozu/approvals.json` files are ignored: old approvals must be made again. If the configuration directory
+itself lies inside the open workspace, rules stay in memory for that session. Network permissions are never
+remembered because the sandbox cannot enforce destination-host restrictions; legacy host rules are inert.
+Without a terminal on stdin, every prompt is denied.
+
+Cards escape terminal and bidirectional control characters, show the complete available preview and list every
+additional writable path. The desktop preview scrolls in both directions. Approvals show complete command,
+content, diff and permission details; prompts above 2 MiB are denied and must be split into smaller calls.
+Linux cards say there is no OS sandbox.
 
 ## Audit log
 Every approval decision (automatic or yours, allowed or denied) is appended to the audit log

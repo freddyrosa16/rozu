@@ -169,11 +169,11 @@ struct Listener {
 
 impl EventListener for Listener {
     fn send_event(&self, event: Event) {
-        if let Event::PtyWrite(text) = event {
-            if let Ok(mut writer) = self.writer.lock() {
-                let _ = writer.write_all(text.as_bytes());
-                let _ = writer.flush();
-            }
+        if let Event::PtyWrite(text) = event
+            && let Ok(mut writer) = self.writer.lock()
+        {
+            let _ = writer.write_all(text.as_bytes());
+            let _ = writer.flush();
         }
     }
 }

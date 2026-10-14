@@ -228,6 +228,15 @@ impl ToolExecutor {
         cancel: &CancellationToken,
         events: &mpsc::Sender<AgentEvent>,
     ) -> (Decision, DecisionSource) {
+        // Full previews must be inspectable; never ask a user to approve a hidden suffix.
+        if request.preview.len() > 2 * 1024 * 1024 {
+            return (
+                Decision::Deny {
+                    reason: "approval details exceed 2 MiB; split this into smaller calls".into(),
+                },
+                DecisionSource::Policy,
+            );
+        }
         let prompt = self.gate.asks_user() && !cancel.is_cancelled();
         if prompt {
             let _ = events
@@ -285,10 +294,10 @@ impl ToolExecutor {
                 self.record_decision(request, &decision, &source),
             ))
             .await;
-        if decision == Decision::AlwaysAllowPrefix {
-            if let Err(err) = self.policy.remember(request) {
-                warn!(error = %err, "could not save the always-allow rule");
-            }
+        if decision == Decision::AlwaysAllowPrefix
+            && let Err(err) = self.policy.remember(request)
+        {
+            warn!(error = %err, "could not save the always-allow rule");
         }
         (decision, source)
     }

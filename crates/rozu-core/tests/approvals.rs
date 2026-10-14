@@ -10,8 +10,8 @@ use std::sync::{Arc, Mutex};
 
 use common::{ScriptedGate, approvals, deny};
 use rozu_core::{
-    ApprovalMode, ApprovalPolicy, ApprovalRecord, AuditLog, Decision, DecisionSource, ToolExecutor,
-    approvals_path,
+    ApprovalMode, ApprovalPolicy, ApprovalRecord, ApprovalRequest, AuditLog, Decision,
+    DecisionSource, SandboxMode, ToolExecutor,
 };
 use rozu_tools::{
     Risk, SANDBOX_BLOCKED, Sandbox, SandboxPolicy, Shell, ToolOutput, ToolRegistry, Workspace,
@@ -79,7 +79,9 @@ impl Fixture {
         let outside = out.path().canonicalize().unwrap();
         let mut tools = ToolRegistry::new();
         tools.register(Shell);
-        let policy = ApprovalPolicy::for_project(mode, workspace.root()).unwrap();
+        let policy =
+            ApprovalPolicy::for_project_in(mode, workspace.root(), &outside.join("approvals"))
+                .unwrap();
         let exec = ToolExecutor::new(Arc::new(tools), gate.clone(), Arc::new(policy), sandbox);
         Self {
             _dirs: (ws, out),
@@ -232,7 +234,7 @@ async fn unsandboxed_escape_runs_once_and_is_not_persisted() {
     assert!(output.content.starts_with("denied:"), "{output:?}");
     assert_eq!(std::fs::read_to_string(&target).unwrap(), "once\n");
     assert_eq!(f.gate.asked().len(), 2);
-    assert!(!approvals_path(f.workspace.root()).exists());
+    assert!(!f.outside.join("approvals").exists());
 }
 
 /// The policy never lifts the sandbox on its own, whatever the mode or rules.
@@ -349,14 +351,15 @@ async fn every_decision_lands_in_the_audit_log() {
         AuditLog::open(&log_path, "session-42").unwrap(),
     )));
 
+    let copy = format!("cp a.txt {}", f.outside.join("copied.txt").display());
     let mut records = Vec::new();
     for command in [
         "ls",                                           // auto: read
         "touch a.txt",                                  // auto: sandboxed workspace write
         "python3 -m pytest",                            // user: approve
         "curl https://example.com",                     // user: deny
-        "curl https://x.dev/a",                         // user: always allow (host x.dev)
-        "curl https://x.dev/b",                         // rule
+        copy.as_str(),                                  // user: always allow
+        copy.as_str(),                                  // rule
         "echo secret sk-ant-abcdefghijklmnopqrstu > f", // user: unsandboxed
     ] {
         records.extend(f.shell(command).await.1);
@@ -395,7 +398,7 @@ async fn every_decision_lands_in_the_audit_log() {
         field("decision"),
         ["allow", "allow", "allow", "deny", "allow", "allow", "allow"]
     );
-    assert_eq!(entries[5]["rule"], "curl (host x.dev)");
+    assert_eq!(entries[5]["rule"], "cp");
     assert_eq!(entries[3]["reason"], "no");
     for entry in &entries {
         assert_eq!(entry["session_id"], "session-42");
@@ -506,4 +509,40 @@ mod macos {
         let (output, _) = f.shell(&remove(&canary)).await;
         assert!(canary.exists(), "{}", output.content);
     }
+}
+
+#[tokio::test]
+async fn oversized_approval_details_are_denied_instead_of_hidden() {
+    let (f, _) = faked(ApprovalMode::FullAccess, [Decision::Approve], false);
+    let mut request = ApprovalRequest {
+        call_id: "large".into(),
+        tool: "shell".into(),
+        args: json!({}),
+        risk: Risk::Opaque,
+        preview: "x".repeat(2 * 1024 * 1024 + 1),
+        sandbox: SandboxMode::Off,
+        network: false,
+        extra_writes: vec![],
+        outside_unknown: false,
+        blocked_retry: false,
+        allow_rule: None,
+    };
+    let (events, _rx) = mpsc::channel(16);
+    let cancel = CancellationToken::new();
+    for forced in [false, true] {
+        let (decision, source) = if forced {
+            f.exec.ask_user(&request, &cancel, &events).await
+        } else {
+            f.exec.decide(&request, &Shell, &cancel, &events).await
+        };
+        assert!(matches!(decision, Decision::Deny { reason } if reason.contains("split")));
+        assert_eq!(source, DecisionSource::Policy);
+    }
+    assert!(f.gate.asked().is_empty());
+    request.preview = "visible\n".repeat(2000) + "last action";
+    assert_eq!(
+        f.exec.ask_user(&request, &cancel, &events).await.0,
+        Decision::Approve
+    );
+    assert_eq!(f.gate.asked()[0].preview, request.preview);
 }
