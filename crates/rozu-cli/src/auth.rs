@@ -302,6 +302,19 @@ mod tests {
 
     use super::*;
 
+    /// Runs `status` again while it reports ETXTBSY: a test thread forking at the moment a fake
+    /// CLI was being written holds its write handle until that child execs.
+    async fn settled<F: std::future::Future<Output = String>>(status: impl Fn() -> F) -> String {
+        for _ in 0..20 {
+            let line = status().await;
+            if !line.contains("Text file busy") {
+                return line;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        status().await
+    }
+
     /// The fake `claude` from the provider fixtures, wrapped so it finds its auth.json.
     fn fake_claude(dir: &std::path::Path) -> PathBuf {
         let fixtures = concat!(
@@ -323,7 +336,8 @@ mod tests {
     #[tokio::test]
     async fn claude_cli_status_shows_version_and_login_only() {
         let dir = tempfile::tempdir().unwrap();
-        let line = claude_cli_status(Some(fake_claude(dir.path()))).await;
+        let bin = fake_claude(dir.path());
+        let line = settled(|| claude_cli_status(Some(bin.clone()))).await;
         assert!(line.starts_with("claude-cli: "), "{line}");
         assert!(line.ends_with("(9.9.9), logged in (claude.ai)"), "{line}");
         // Other fields of `claude auth status` never reach the output.
@@ -358,20 +372,20 @@ mod tests {
     #[tokio::test]
     async fn codex_cli_status_shows_version_and_auth_mode_only() {
         let dir = tempfile::tempdir().unwrap();
-        let line = codex_cli_status(Some(fake_codex(dir.path(), "Logged in using ChatGPT"))).await;
+        let status = |text: &str| {
+            let bin = fake_codex(dir.path(), text);
+            settled(move || codex_cli_status(Some(bin.clone())))
+        };
+        let line = status("Logged in using ChatGPT").await;
         assert!(line.starts_with("codex: "), "{line}");
         assert!(line.ends_with("(0.147.0), logged in (ChatGPT)"), "{line}");
 
         // The masked key `codex login status` prints is never shown.
-        let line = codex_cli_status(Some(fake_codex(
-            dir.path(),
-            "Logged in using an API key - sk-proj-***ABCD",
-        )))
-        .await;
+        let line = status("Logged in using an API key - sk-proj-***ABCD").await;
         assert!(line.ends_with("logged in (API key)"), "{line}");
         assert!(!line.contains("ABCD"), "{line}");
 
-        let line = codex_cli_status(Some(fake_codex(dir.path(), "Not logged in"))).await;
+        let line = status("Not logged in").await;
         assert!(line.contains("run `rozu auth login codex`"), "{line}");
 
         let missing = codex_cli_status(None).await;
@@ -391,7 +405,7 @@ mod tests {
         let bin = dir.path().join("grok");
         std::fs::copy(fake, &bin).unwrap();
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let line = grok_cli_status(Ok(bin)).await;
+        let line = settled(|| grok_cli_status(Ok(bin.clone()))).await;
         assert!(line.starts_with("grok: "), "{line}");
         assert!(line.contains("(1.0.52), login status unknown"), "{line}");
         assert!(line.contains("rozu auth login grok"), "{line}");
