@@ -1,89 +1,43 @@
 //! `rozu chat --provider claude-cli` against the fake `claude` binary, and `rozu mcp-serve`
-//! over real stdio. No real claude CLI is run.
-
+//! over real stdio.
 #![cfg(unix)]
 
-use std::os::unix::fs::PermissionsExt;
+mod common;
+
 use std::path::{Path, PathBuf};
 
 use assert_cmd::Command;
+use common::{FakeCli, json_lines, read_json_lines, rozu, stdout_of};
 use predicates::prelude::PredicateBooleanExt;
 use predicates::str::contains;
 use serde_json::Value;
 
-const CLAUDE_FIXTURES: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../rozu-cli-providers/tests/fixtures/claude"
-);
-const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
-
-fn rozu() -> Command {
-    let mut cmd = Command::cargo_bin("rozu").expect("rozu binary is built");
-    cmd.env(
-        "ROZU_LOG_FILE",
-        Path::new(env!("CARGO_TARGET_TMPDIR")).join("rozu-cli-tests.log"),
-    )
-    // Keep test decisions out of the developer's audit log.
-    .env(
-        "ROZU_AUDIT_LOG",
-        Path::new(env!("CARGO_TARGET_TMPDIR")).join("rozu-cli-tests-approvals.jsonl"),
-    )
-    .env_remove("ROZU_LOG_STDERR")
-    .env_remove("RUST_LOG")
-    .env_remove("ROZU_PROVIDER")
-    .env_remove("ROZU_MODEL")
-    .env("NO_COLOR", "1")
-    // Never run the developer's real Codex CLI (e.g. for `rozu models`).
-    .env("ROZU_CODEX_BIN", "/nonexistent/codex");
-    cmd
+fn claude_fixture(name: &str) -> PathBuf {
+    FakeCli::fixtures("claude").join(name)
 }
 
-/// The fake claude, its scenario and log directories, and a workspace.
-struct Fake {
-    dir: tempfile::TempDir,
+/// A fake claude whose scenario files (`turns/<name>`) are copied from `from`.
+fn fake(scenario: &[(&str, PathBuf)]) -> FakeCli {
+    let fake = FakeCli::new("claude", &[]);
+    for (name, from) in scenario {
+        std::fs::copy(from, fake.path(&format!("turns/{name}"))).unwrap();
+    }
+    fake
 }
 
-impl Fake {
-    fn new() -> Self {
-        let dir = tempfile::tempdir().unwrap();
-        for sub in ["turns", "log", "workspace"] {
-            std::fs::create_dir(dir.path().join(sub)).unwrap();
-        }
-        let bin = dir.path().join("claude");
-        std::fs::copy(Path::new(CLAUDE_FIXTURES).join("fake_claude.sh"), &bin).unwrap();
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-        Self { dir }
-    }
+fn chat(fake: &FakeCli) -> Command {
+    fake.chat("claude-cli")
+}
 
-    fn path(&self, rel: &str) -> PathBuf {
-        self.dir.path().join(rel)
-    }
-
-    fn scenario(&self, name: &str, from: &Path) -> &Self {
-        std::fs::copy(from, self.path(&format!("turns/{name}"))).unwrap();
-        self
-    }
-
-    fn chat(&self) -> Command {
-        let mut cmd = rozu();
-        cmd.env("ROZU_CLAUDE_BIN", self.path("claude"))
-            .env("FAKE_CLAUDE_TURNS", self.path("turns"))
-            .env("FAKE_CLAUDE_LOG", self.path("log"))
-            .args(["chat", "--provider", "claude-cli", "--workspace"])
-            .arg(self.path("workspace"));
-        cmd
-    }
+fn text_of(v: &Value) -> &str {
+    v["content"][0]["text"].as_str().unwrap()
 }
 
 #[test]
 fn chat_with_claude_cli_streams_text_tools_and_usage_without_cost() {
-    let fake = Fake::new();
-    fake.scenario(
-        "turn1.jsonl",
-        &Path::new(CLAUDE_FIXTURES).join("tool_use.jsonl"),
-    );
+    let fake = fake(&[("turn1.jsonl", claude_fixture("tool_use.jsonl"))]);
 
-    fake.chat()
+    chat(&fake)
         .args(["--model", "opus", "summarize README"])
         .write_stdin("")
         .assert()
@@ -98,7 +52,7 @@ fn chat_with_claude_cli_streams_text_tools_and_usage_without_cost() {
         // The CLI's own stderr goes to the log file only.
         .stderr(contains("stderr noise").not());
 
-    let args = std::fs::read_to_string(fake.path("log/args.txt")).unwrap();
+    let args = fake.read("log/args.txt");
     assert!(args.contains("--model\nopus\n"), "{args}");
     assert!(
         args.contains("--permission-prompt-tool\nmcp__rozu__approve\n"),
@@ -108,21 +62,20 @@ fn chat_with_claude_cli_streams_text_tools_and_usage_without_cost() {
 
 #[test]
 fn claude_requests_go_through_rozu_mcp_and_its_approval_prompt() {
-    // The fake claude runs the real `rozu mcp-serve` from the generated --mcp-config: one
-    // workspace write (auto-approved), a force push through rozu's shell (destructive: always
-    // asks the user, here denied because stdin isn't a terminal), and a permission prompt for
-    // Claude's own Bash (denied by policy: it would run outside rozu's sandbox).
-    let fake = Fake::new();
-    fake.scenario(
-        "turn1.jsonl",
-        &Path::new(CLAUDE_FIXTURES).join("text.jsonl"),
-    )
-    .scenario(
-        "mcp1.jsonl",
-        &Path::new(FIXTURES).join("mcp_write_and_force_push.jsonl"),
-    );
+    // The fake claude runs the real `rozu mcp-serve` from the generated --mcp-config: a
+    // workspace write (auto-approved), a force push (destructive, so it asks the user and is
+    // denied without a terminal), and a permission prompt for Claude's own Bash (denied: it
+    // would run outside rozu's sandbox).
+    let fake = fake(&[
+        ("turn1.jsonl", claude_fixture("text.jsonl")),
+        (
+            "mcp1.jsonl",
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/mcp_write_and_force_push.jsonl"),
+        ),
+    ]);
 
-    fake.chat()
+    chat(&fake)
         .arg("write a note, then force push")
         .write_stdin("")
         .assert()
@@ -136,29 +89,15 @@ fn claude_requests_go_through_rozu_mcp_and_its_approval_prompt() {
             "✗ denied: rozu runs shell commands only in its sandbox",
         ));
 
-    assert_eq!(
-        std::fs::read_to_string(fake.path("workspace/notes.md")).unwrap(),
-        "from claude\n"
-    );
-    let responses: Vec<Value> = std::fs::read_to_string(fake.path("log/mcp1.out"))
-        .unwrap()
-        .lines()
-        .map(|l| serde_json::from_str(l).unwrap())
-        .collect();
+    assert_eq!(fake.read("workspace/notes.md"), "from claude\n");
+    let responses = read_json_lines(&fake.path("log/mcp1.out"));
     let by_id = |id: u64| responses.iter().find(|r| r["id"] == id).unwrap();
     assert_eq!(by_id(0)["result"]["serverInfo"]["name"], "rozu");
     assert_eq!(by_id(1)["result"]["isError"], false);
     let push = &by_id(2)["result"];
     assert_eq!(push["isError"], true, "{push}");
-    assert!(
-        push["content"][0]["text"]
-            .as_str()
-            .unwrap()
-            .contains("non-interactively"),
-        "{push}"
-    );
-    let verdict: Value =
-        serde_json::from_str(by_id(3)["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert!(text_of(push).contains("non-interactively"), "{push}");
+    let verdict: Value = serde_json::from_str(text_of(&by_id(3)["result"])).unwrap();
     assert_eq!(verdict["behavior"], "deny", "{verdict}");
     assert!(
         verdict["message"]
@@ -171,12 +110,8 @@ fn claude_requests_go_through_rozu_mcp_and_its_approval_prompt() {
 
 #[test]
 fn chat_reports_claude_not_logged_in() {
-    let fake = Fake::new();
-    fake.scenario(
-        "turn1.jsonl",
-        &Path::new(CLAUDE_FIXTURES).join("not_logged_in.jsonl"),
-    );
-    fake.chat()
+    let fake = fake(&[("turn1.jsonl", claude_fixture("not_logged_in.jsonl"))]);
+    chat(&fake)
         .arg("hi")
         .write_stdin("")
         .assert()
@@ -188,8 +123,8 @@ fn chat_reports_claude_not_logged_in() {
 
 #[test]
 fn chat_reports_a_missing_claude_binary() {
-    let fake = Fake::new();
-    fake.chat()
+    let fake = fake(&[]);
+    chat(&fake)
         .env("ROZU_CLAUDE_BIN", fake.path("nope/claude"))
         .arg("hi")
         .write_stdin("")
@@ -201,8 +136,7 @@ fn chat_reports_a_missing_claude_binary() {
 
 #[test]
 fn models_lists_claude_cli_as_subscription() {
-    let output = rozu().arg("models").assert().success().get_output().clone();
-    let stdout = String::from_utf8(output.stdout).unwrap();
+    let stdout = stdout_of(rozu().arg("models"));
     let line = stdout
         .lines()
         .find(|l| l.starts_with("claude-cli/sonnet *"))
@@ -225,37 +159,25 @@ fn mcp_serve_round_trips_over_stdio() {
     .join("\n")
         + "\n";
 
-    let output = rozu()
-        .env_remove("ROZU_APPROVAL_SOCKET")
-        .args(["mcp-serve", "--workspace"])
-        .arg(workspace.path())
-        .write_stdin(input)
-        .assert()
-        .success()
-        .get_output()
-        .clone();
-    let responses: Vec<Value> = String::from_utf8(output.stdout)
-        .unwrap()
-        .lines()
-        .map(|l| serde_json::from_str(l).expect("stdout is pure JSON-RPC"))
-        .collect();
+    let stdout = stdout_of(
+        rozu()
+            .env_remove("ROZU_APPROVAL_SOCKET")
+            .args(["mcp-serve", "--workspace"])
+            .arg(workspace.path())
+            .write_stdin(input),
+    );
+    let responses = json_lines(&stdout);
     assert_eq!(responses.len(), 4, "{responses:?}");
     let by_id = |id: u64| responses.iter().find(|r| r["id"] == id).unwrap();
     assert_eq!(by_id(1)["result"]["protocolVersion"], "2025-06-18");
     let tools = by_id(2)["result"]["tools"].as_array().unwrap();
     assert!(tools.iter().any(|t| t["name"] == "approve"));
     assert!(tools.iter().any(|t| t["name"] == "apply_patch"));
-    let read = by_id(3)["result"]["content"][0]["text"].as_str().unwrap();
+    let read = text_of(&by_id(3)["result"]);
     assert!(read.contains("# hi"), "{read}");
-    // Destructive with no parent to ask: denied by default, and nothing was deleted.
+    // No parent to ask, so the destructive command is denied and nothing is deleted.
     let denied = &by_id(4)["result"];
     assert_eq!(denied["isError"], true);
-    assert!(
-        denied["content"][0]["text"]
-            .as_str()
-            .unwrap()
-            .contains("denied by default"),
-        "{denied}"
-    );
+    assert!(text_of(denied).contains("denied by default"), "{denied}");
     assert!(workspace.path().join("README.md").exists());
 }

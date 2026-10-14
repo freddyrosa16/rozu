@@ -194,40 +194,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn masks_openai_key() {
-        assert_eq!(
-            redact("key=sk-abcdefghijklmnop1234 done"),
-            "key=sk-[REDACTED] done"
-        );
-    }
-
-    #[test]
-    fn masks_openai_project_key() {
-        assert_eq!(redact("sk-proj-AbC_dEf-1234567890xyz"), "sk-[REDACTED]");
-    }
-
-    #[test]
-    fn masks_anthropic_key_keeping_prefix() {
-        assert_eq!(
-            redact("Bearer sk-ant-api03-AbCdEfGhIjKlMnOp_qrs-tuv"),
-            "Bearer sk-ant-[REDACTED]"
-        );
-    }
-
-    #[test]
-    fn masks_xai_key() {
-        assert_eq!(
-            redact("XAI_API_KEY=xai-0123456789abcdefABCDEF"),
-            "XAI_API_KEY=xai-[REDACTED]"
-        );
-    }
-
-    #[test]
-    fn masks_multiple_keys() {
-        assert_eq!(
-            redact("a=sk-aaaaaaaaaaaaaaaaaaaa b=xai-bbbbbbbbbbbbbbbbbbbb"),
-            "a=sk-[REDACTED] b=xai-[REDACTED]"
-        );
+    fn masks_api_keys() {
+        for (input, expected) in [
+            ("key=sk-abcdefghijklmnop1234 done", "key=sk-[REDACTED] done"),
+            ("sk-proj-AbC_dEf-1234567890xyz", "sk-[REDACTED]"),
+            (
+                "Bearer sk-ant-api03-AbCdEfGhIjKlMnOp_qrs-tuv",
+                "Bearer sk-ant-[REDACTED]",
+            ),
+            (
+                "XAI_API_KEY=xai-0123456789abcdefABCDEF",
+                "XAI_API_KEY=xai-[REDACTED]",
+            ),
+            (
+                "a=sk-aaaaaaaaaaaaaaaaaaaa b=xai-bbbbbbbbbbbbbbbbbbbb",
+                "a=sk-[REDACTED] b=xai-[REDACTED]",
+            ),
+        ] {
+            assert_eq!(redact(input), expected);
+        }
     }
 
     #[test]

@@ -101,7 +101,6 @@ mod tests {
             "follows the OS at startup"
         );
 
-        // Overriding, then toggling back, follows the OS again.
         let mut rm = ReducedMotion::new(true);
         rm.toggle();
         assert_eq!(
@@ -114,13 +113,11 @@ mod tests {
         rm.toggle();
         assert_eq!(rm, ReducedMotion::new(true));
 
-        // Without an override, OS changes apply.
         let mut rm = ReducedMotion::new(false);
         assert!(rm.set_os(true));
         assert!(rm.effective());
         assert!(!rm.set_os(true), "same reading");
 
-        // The override wins over OS changes until it's toggled back.
         let mut rm = ReducedMotion::new(false);
         rm.toggle();
         assert!(rm.effective());
@@ -136,31 +133,32 @@ mod tests {
     fn fps_by_window_and_state() {
         let orb = Orb::new(Thinking, 0.0);
         let p = FramePolicy::default();
-        assert_eq!(p.fps(&orb, 1.0), 60);
-        assert_eq!(
-            FramePolicy {
-                low_power: true,
-                ..p
-            }
-            .fps(&orb, 1.0),
-            30
-        );
-        assert_eq!(
-            FramePolicy {
-                focused: false,
-                ..p
-            }
-            .fps(&orb, 1.0),
-            0
-        );
-        assert_eq!(
-            FramePolicy {
-                visible: false,
-                ..p
-            }
-            .fps(&orb, 1.0),
-            0
-        );
+        for (policy, fps) in [
+            (p, 60),
+            (
+                FramePolicy {
+                    low_power: true,
+                    ..p
+                },
+                30,
+            ),
+            (
+                FramePolicy {
+                    focused: false,
+                    ..p
+                },
+                0,
+            ),
+            (
+                FramePolicy {
+                    visible: false,
+                    ..p
+                },
+                0,
+            ),
+        ] {
+            assert_eq!(policy.fps(&orb, 1.0), fps, "{policy:?}");
+        }
         assert_eq!(
             p.interval(&orb, 1.0),
             Some(Duration::from_secs_f64(1.0 / 60.0))

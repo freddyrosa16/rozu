@@ -133,6 +133,13 @@ mod tests {
     use crate::orb::Orb;
     use crate::state::ActivityState;
 
+    fn unlit_dot() -> Sample {
+        let mut dot = Orb::new(ActivityState::Done, 0.0).sample(5.0)[0];
+        dot.lit = 0.0;
+        dot.s = 1.0;
+        dot
+    }
+
     #[test]
     fn each_size_draws_its_own_dots() {
         let small = Orb::with_size(OrbSize::Small, ActivityState::Thinking, 0.0).sample(0.5);
@@ -164,7 +171,6 @@ mod tests {
             // Dots with a state size of 0 (Offline's dropped rings, Editing's blinked-off caret) are skipped.
             let shown: Vec<_> = pts.iter().filter(|p| p.s > 0.02).collect();
             assert_eq!(dots.len(), shown.len());
-            // The nearest drawn sample is drawn last.
             let near = shown
                 .iter()
                 .max_by(|a, b| a.p[2].total_cmp(&b.p[2]))
@@ -203,9 +209,7 @@ mod tests {
 
     #[test]
     fn light_and_depth_brighten_the_front() {
-        let mut near = Orb::new(ActivityState::Done, 0.0).sample(5.0)[0];
-        near.lit = 0.0;
-        near.s = 1.0;
+        let mut near = unlit_dot();
         near.p = [0.0, 0.0, 1.0];
         let mut far = near;
         far.p = [0.0, 0.0, -1.0];
@@ -231,10 +235,7 @@ mod tests {
 
     #[test]
     fn state_size_scales_the_radius() {
-        // radius = base · s · k · …: the same dot at s = 1.3 is 1.3× the s = 1 dot.
-        let mut a = Orb::new(ActivityState::Done, 0.0).sample(5.0)[0];
-        a.lit = 0.0;
-        a.s = 1.0;
+        let a = unlit_dot();
         let mut b = a;
         b.s = 1.3;
         let (ra, rb) = (

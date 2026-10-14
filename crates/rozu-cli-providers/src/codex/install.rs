@@ -181,19 +181,17 @@ mod tests {
 
     #[test]
     fn login_status_is_reduced_to_the_mode() {
-        assert_eq!(
-            parse_login_status("Logged in using ChatGPT\n"),
-            LoginStatus::ChatGpt
-        );
-        assert_eq!(
-            parse_login_status("Logged in using an API key - sk-proj-***abcd\n"),
-            LoginStatus::ApiKey
-        );
-        assert_eq!(
-            parse_login_status("Not logged in\n"),
-            LoginStatus::NotLoggedIn
-        );
-        assert_eq!(parse_login_status("???"), LoginStatus::Unknown);
+        for (out, status) in [
+            ("Logged in using ChatGPT\n", LoginStatus::ChatGpt),
+            (
+                "Logged in using an API key - sk-proj-***abcd\n",
+                LoginStatus::ApiKey,
+            ),
+            ("Not logged in\n", LoginStatus::NotLoggedIn),
+            ("???", LoginStatus::Unknown),
+        ] {
+            assert_eq!(parse_login_status(out), status, "{out}");
+        }
         assert_eq!(
             parse_version("codex-cli 0.147.0\n").as_deref(),
             Some("0.147.0")

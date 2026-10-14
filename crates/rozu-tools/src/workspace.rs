@@ -188,6 +188,10 @@ mod tests {
         (dir, ws)
     }
 
+    fn outside<T>(r: Result<T, PathError>) -> bool {
+        matches!(r, Err(PathError::Outside(_)))
+    }
+
     #[test]
     fn resolves_relative_paths_inside() {
         let (_dir, ws) = setup();
@@ -216,21 +220,15 @@ mod tests {
             Err(PathError::Outside("src/../../secret.txt".into()))
         );
         // Missing targets outside are still "outside", not "not found".
-        assert!(matches!(
-            ws.resolve("../../nope"),
-            Err(PathError::Outside(_))
-        ));
+        assert!(outside(ws.resolve("../../nope")));
     }
 
     #[test]
     fn rejects_absolute_paths_outside() {
         let (dir, ws) = setup();
-        let outside = dir.path().join("secret.txt");
-        assert!(matches!(
-            ws.resolve(outside.to_str().unwrap()),
-            Err(PathError::Outside(_))
-        ));
-        assert!(matches!(ws.resolve("/"), Err(PathError::Outside(_))));
+        let secret = dir.path().join("secret.txt");
+        assert!(outside(ws.resolve(secret.to_str().unwrap())));
+        assert!(outside(ws.resolve("/")));
     }
 
     #[test]
@@ -249,11 +247,8 @@ mod tests {
         std::os::unix::fs::symlink(dir.path().join("secret.txt"), ws.root().join("link.txt"))
             .unwrap();
         std::os::unix::fs::symlink(dir.path(), ws.root().join("parent")).unwrap();
-        assert!(matches!(ws.resolve("link.txt"), Err(PathError::Outside(_))));
-        assert!(matches!(
-            ws.resolve("parent/secret.txt"),
-            Err(PathError::Outside(_))
-        ));
+        assert!(outside(ws.resolve("link.txt")));
+        assert!(outside(ws.resolve("parent/secret.txt")));
     }
 
     #[cfg(unix)]
@@ -280,10 +275,7 @@ mod tests {
             ws.root().join("src/main.rs")
         );
         for bad in ["../x.txt", "src/../../x.txt", "/etc/passwd", ".", "/"] {
-            assert!(
-                matches!(ws.resolve_for_write(bad), Err(PathError::Outside(_))),
-                "{bad}"
-            );
+            assert!(outside(ws.resolve_for_write(bad)), "{bad}");
         }
     }
 
@@ -292,14 +284,8 @@ mod tests {
     fn resolve_for_write_rejects_symlinked_dir_escape() {
         let (dir, ws) = setup();
         std::os::unix::fs::symlink(dir.path(), ws.root().join("parent")).unwrap();
-        assert!(matches!(
-            ws.resolve_for_write("parent/new.txt"),
-            Err(PathError::Outside(_))
-        ));
-        assert!(matches!(
-            ws.resolve_for_write("parent/secret.txt"),
-            Err(PathError::Outside(_))
-        ));
+        assert!(outside(ws.resolve_for_write("parent/new.txt")));
+        assert!(outside(ws.resolve_for_write("parent/secret.txt")));
     }
 
     #[test]
