@@ -1,0 +1,161 @@
+<!doctype html>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>rozu App Mockup</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono&display=swap">
+<style>
+/* rozu desktop app mockup: a Capy-style sidebar and a centered chat, in Claude's grey with white text. */
+:root{--bg:#262624;--side:#1F1E1D;--panel:#2B2A28;--raise:#33322F;--line:#3B3A37;--ink:#fff;--ink2:#C9C7BF;--ink3:#9C9A92;
+  --rose:#C9A9A0;--ok:#4ADE80;--warn:#FBBF24;--bad:#F87171;--pr:#A78BFA;--mono:"Geist Mono",ui-monospace,Menlo,monospace;color-scheme:dark}
+*{box-sizing:border-box}[hidden]{display:none!important}
+body{margin:0;padding:16px;background:var(--bg);color:var(--ink);font:13.5px/1.5 Geist,system-ui,sans-serif}
+button{font:inherit;color:inherit;background:none;border:0;cursor:pointer;text-align:left}
+code{font:12px var(--mono)}
+.win{max-width:1440px;margin:auto;height:820px;display:grid;grid:auto minmax(0,1fr)/284px minmax(0,1fr);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+.bar{grid-column:1/-1;display:flex;gap:7px;align-items:center;padding:9px 14px;background:var(--side);border-bottom:1px solid var(--line)}
+.bar i{width:11px;height:11px;border-radius:50%;background:var(--line)}.bar b{margin-left:8px;font-size:12.5px;font-weight:500}
+aside{background:var(--side);border-right:1px solid var(--line);display:flex;flex-direction:column;min-height:0}
+svg.i{width:16px;height:16px;flex:none;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
+.row{display:flex;align-items:center;gap:10px;width:100%;padding:7px 10px;border-radius:8px;font-size:14px}
+.row:hover,.on{background:var(--raise)}
+.head{display:flex;align-items:center;padding:12px 10px 4px 18px;font-size:14px}.head span{flex:1}
+.ib{width:28px;height:28px;display:grid;place-items:center;border-radius:6px;color:var(--ink2)}.ib:hover{background:var(--raise)}
+.mark{width:26px;height:26px;border-radius:50%;background:var(--ink);color:var(--side);display:grid;place-items:center;font-weight:600;margin-right:auto}
+nav,.list{padding:0 8px;display:grid;gap:1px}.list{overflow:auto;flex:1;align-content:start}
+.grp{color:var(--ink2);font-size:13.5px;padding:9px 10px 5px}.grp em{font-style:normal;color:var(--ink3)}
+.grp .c{margin-left:auto;width:14px;color:var(--ink3);transition:transform .15s}.grp[aria-expanded=true] .c{transform:rotate(90deg)}
+.th{display:grid;grid:auto auto/minmax(0,1fr) 22px;gap:2px 10px;padding:7px 10px;border-radius:8px;cursor:pointer}
+.th b{font-weight:400;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.th small{font-size:12.5px;color:var(--ink3);display:flex;gap:4px;align-items:center}.th small span{color:var(--ok);display:flex;gap:3px;align-items:center}.th small svg.i{width:13px;height:13px}
+.th canvas{grid-area:1/2/3}.th:hover{background:var(--raise)}
+canvas.orb{width:22px;height:22px;flex:none}
+.orb[data-tone=success]{filter:drop-shadow(0 0 2px var(--ok))}.orb[data-tone=warning]{filter:drop-shadow(0 0 2px var(--warn))}.orb[data-tone=danger]{filter:drop-shadow(0 0 2px var(--bad))}
+.acct{position:relative;border-top:1px solid var(--line);padding:6px}
+.av{width:32px;height:32px;border-radius:50%;background:var(--rose);color:var(--side);display:grid;place-items:center;font-weight:600}
+.acct small{display:block;color:var(--ink3);font-size:12.5px}.acct .row{line-height:1.25}
+.subs{position:absolute;inset:auto 8px calc(100% + 6px);background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px;display:grid;gap:8px;font-size:12px}
+.subs div{display:flex;justify-content:space-between;color:var(--ink2)}.subs u{text-decoration:none;color:var(--ink3);font-family:var(--mono)}
+main{display:grid;grid-template-rows:auto 1fr auto;min-height:0;--pad:max(20px,calc((100% - 760px)/2))}
+main h2{margin:0;padding:12px;font-size:14px;text-align:center;border-bottom:1px solid var(--line)}
+.feed{overflow:auto;padding:24px var(--pad);display:flex;flex-direction:column;gap:12px}
+.me{align-self:flex-end;max-width:78%;background:var(--raise);border-radius:12px 12px 4px;padding:10px 13px}
+.feed p{margin:0;max-width:68ch}
+.step{display:flex;gap:8px;align-items:center;color:var(--ink3);font-size:12.5px}
+.live .t{background:linear-gradient(90deg,var(--ink3),var(--ink),var(--ink3)) 0/200%;-webkit-background-clip:text;background-clip:text;color:transparent;animation:s 1.6s linear infinite}
+@keyframes s{to{background-position:-200%}}
+.add{color:var(--ok)}.del{color:var(--bad)}
+.card{border:1px solid var(--line);border-radius:10px;padding:12px 14px;display:grid;gap:10px;background:var(--panel);max-width:68ch}
+.card pre{margin:0;font:12px var(--mono);background:var(--bg);border:1px solid var(--line);border-radius:7px;padding:8px 10px;overflow-x:auto}
+.card small{color:var(--ink3)}
+.btn{font-size:12.5px;border:1px solid var(--line);background:var(--raise);border-radius:7px;padding:5px 12px;margin-right:6px}
+.pri{background:var(--ink);color:var(--bg)}
+.box{margin:12px var(--pad) 18px;border:1px solid var(--line);border-radius:12px;background:var(--panel);padding:10px 12px;display:grid;gap:10px}
+.box textarea{all:unset;min-height:40px}.box div{display:flex;gap:12px;color:var(--ink3);font-size:12.5px;align-items:center}
+.send{margin-left:auto;width:28px;height:28px;border-radius:50%;background:var(--ink);color:var(--bg);text-align:center}
+:focus-visible{outline:2px solid var(--rose);outline-offset:2px}
+@media (max-width:720px){.win{height:auto;grid-template-columns:1fr}aside{border:0}.list{max-height:320px}}
+</style>
+
+<svg width="0" height="0" style="position:absolute">
+  <symbol id="new" viewBox="0 0 24 24"><path d="M12 4H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-6M17.5 3.5a2.1 2.1 0 0 1 3 3L13 14l-4 1 1-4z"/></symbol>
+  <symbol id="list" viewBox="0 0 24 24"><path d="M9 6h11M9 12h11M9 18h11M4 6h.01M4 12h.01M4 18h.01"/></symbol>
+  <symbol id="pr" viewBox="0 0 24 24"><circle cx="6" cy="6" r="2.5"/><circle cx="6" cy="18" r="2.5"/><circle cx="18" cy="18" r="2.5"/><path d="M6 8.5v7M18 15.5V9a3 3 0 0 0-3-3h-4M13 3.5 10.5 6 13 8.5"/></symbol>
+  <symbol id="auto" viewBox="0 0 24 24"><path d="M4 12a8 8 0 0 1 14-5.3L20 9M20 4v5h-5M20 12a8 8 0 0 1-14 5.3L4 15M4 20v-5h5"/></symbol>
+  <symbol id="more" viewBox="0 0 24 24"><path d="M5 12h.01M12 12h.01M19 12h.01" stroke-width="3"/></symbol>
+  <symbol id="search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="m20 20-4.2-4.2"/></symbol>
+  <symbol id="side" viewBox="0 0 24 24"><rect x="3.5" y="5" width="17" height="14" rx="2.5"/><path d="M9 5v14"/></symbol>
+  <symbol id="pin" viewBox="0 0 24 24"><path d="M15 4.5 19.5 9l-3 1-3.5 3.5.5 4-1.5 1.5L5 12l1.5-1.5 4 .5L14 7.5zM8.5 15.5l-4 4"/></symbol>
+  <symbol id="folder" viewBox="0 0 24 24"><path d="M3.5 7a2 2 0 0 1 2-2h4l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/></symbol>
+  <symbol id="fplus" viewBox="0 0 24 24"><use href="#folder"/><path d="M12 10.5v5M9.5 13h5"/></symbol>
+  <symbol id="chev" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></symbol>
+</svg>
+
+<div class="win">
+  <div class="bar"><i></i><i></i><i></i><b>rozu</b></div>
+  <aside>
+    <div class="head" style="padding-top:14px"><b class="mark">r</b><button class="ib" aria-label="Search"><svg class="i"><use href="#search"/></svg></button><button class="ib" aria-label="Hide sidebar"><svg class="i"><use href="#side"/></svg></button></div>
+    <nav id="nav"></nav>
+    <div class="head"><span>Projects</span><button class="ib" aria-label="Project options"><svg class="i"><use href="#more"/></svg></button><button class="ib" aria-label="New project"><svg class="i"><use href="#fplus"/></svg></button></div>
+    <div class="list" id="projects"></div>
+    <div class="acct"><div class="subs" id="subs" hidden></div>
+      <button class="row" id="me"><span class="av">F</span><span>Freddy<small>Claude Max · ChatGPT · SuperGrok</small></span></button></div>
+  </aside>
+  <main>
+    <h2>Save and resume sessions</h2>
+    <div class="feed" id="feed">
+      <div class="me">Start M4: save each session as JSONL with a SQLite index so I can close rozu and pick up where I left off.</div>
+      <div id="steps"></div>
+      <p id="say1" hidden>Sessions now write one JSON line per event to <code>~/.rozu/sessions/</code>, and a SQLite index lists them by project and date. <code>rozu chat --resume</code> reopens the last one. I'd like to run the tests to check it.</p>
+      <div class="card" id="ask" hidden>
+        <div class="step" style="color:var(--ink);font-weight:500"><canvas class="orb" id="askOrb" data-state="waiting"></canvas>Run a command?</div>
+        <pre>cargo test -p rozu-store -p rozu-cli</pre>
+        <small>Runs inside the sandbox. Writes only to <code>target/</code>. No network.</small>
+        <div><button class="btn pri" id="allow">Allow once</button><button class="btn">Always allow cargo test</button><button class="btn">Deny</button></div>
+      </div>
+      <div id="run"></div>
+      <p id="say2" hidden>All 37 tests pass. Close rozu, open it again, and <code>rozu chat --resume</code> picks up this session.</p>
+      <button class="btn" id="replay" style="align-self:flex-start">Replay</button>
+    </div>
+    <div class="box"><textarea aria-label="Message" placeholder="Ask rozu to do something in rozu…"></textarea>
+      <div><span>Claude Sonnet</span><span>Auto</span><button class="send" aria-label="Send">↑</button></div></div>
+  </main>
+</div>
+
+<script src="../v7.5/reference/v7.5-orb.js"></script>
+<script>
+const $=id=>document.getElementById(id),ic=n=>`<svg class="i"><use href="#${n}"/></svg>`,orb=(s,id='')=>`<canvas class="orb" data-state="${s}"${id&&` id="${id}"`}></canvas>`;
+
+// Sidebar (example data). Queued and not-started threads use the Offline orb (Freddy's call).
+$('nav').innerHTML=[['new','New thread'],['list','Threads'],['pr','Pull requests'],['auto','Automations'],['more','More']]
+  .map(([i,t],k)=>`<button class="row${k?'':' on'}">${ic(i)}${t}</button>`).join('');
+const P=[['rozu',1,[['Save and resume sessions','thinking','thinking'],['Activity orbs v7.5','done','2h','rozu#2'],['ROZU.md memory loader','running','running tests'],
+    ['Compaction strategy','offline','queued'],['Grok Build provider','done','1d','3 PRs'],['Seatbelt network rules','offline','1d']]],
+  ['setupviz-web',0,[['Checkout page spacing','error','3d','setupviz#41'],['Pricing table copy','done','4d','2 PRs']]],
+  ['setupviz-api',0,[['Rate limit on uploads','running','running tests']]]];
+$('projects').innerHTML=`<button class="row grp">${ic('pin')}Pinned <em>1</em>${ic('chev')}</button>`+P.map(([n,open,ts])=>
+  `<button class="row grp" aria-expanded="${!!open}">${ic('folder')}${n} <em>${ts.length}</em><svg class="i c"><use href="#chev"/></svg></button>
+  <div${open?'':' hidden'}>${ts.map(([t,s,m,pr],k)=>`<div class="th${open&&!k?' on':''}"><b>${t}</b>${orb(s,open&&!k?'cur':'')}<small${open&&!k?' id="curMeta"':''}>${m}${pr?` · <span>${ic('pr')}${pr}</span>`:''}</small></div>`).join('')}</div>`).join('');
+document.querySelectorAll('[aria-expanded]').forEach(g=>g.onclick=()=>{const o=g.getAttribute('aria-expanded')!='true';g.setAttribute('aria-expanded',o);g.nextElementSibling.hidden=!o});
+document.querySelectorAll('.th').forEach(t=>t.onclick=()=>document.querySelectorAll('.th').forEach(x=>x.classList.toggle('on',x==t)));
+$('subs').innerHTML=[['Claude Max','34% of 5h'],['ChatGPT','12% of week'],['SuperGrok','connected']].map(([a,b])=>`<div>${a}<u>${b}</u></div>`).join('');
+$('me').onclick=()=>$('subs').hidden^=1;
+
+// Orbs: the approved v7.5 motion (sample() from v7.5-orb.js), drawn with finer dots. The colored glow is a CSS
+// drop-shadow on the canvas, not a canvas shadow per dot. Colors are read once, canvases are sized once,
+// hidden ones are skipped, and Done/Error stop drawing once they have settled.
+const COL={none:'#F4F1EA'},root=getComputedStyle(document.documentElement),reduce=matchMedia('(prefers-reduced-motion:reduce)').matches;
+[['warning','--warn'],['success','--ok'],['danger','--bad']].forEach(([k,v])=>COL[k]=root.getPropertyValue(v).trim());
+function paint(c,T){
+  const o=c.dataset.state,tl=c.tl;
+  if(!tl||tl.at(-1).orb!=o){c.tl=[...(tl||[]).slice(-1),{orb:o,start:tl?T:T-3*Math.random()}];c.done=0}
+  if(c.done||!c.offsetParent)return;
+  const dpr=devicePixelRatio||1,S=22,W=S*dpr,g=c.getContext('2d'),t=reduce?STILL[o]:T,line=reduce?[{orb:o,start:0}]:c.tl;
+  if(c.width!=W)c.width=c.height=W;
+  g.setTransform(dpr,0,0,dpr,0,0);g.clearRect(0,0,S,S);
+  const pts=sample(line,t,SMALL).map(b=>({...b,z:b.p[2],k:F/(F-b.p[2])})).sort((a,b)=>a.z-b.z);
+  if(c.dataset.tone!=ORBS[o].tone)c.dataset.tone=ORBS[o].tone;
+  for(const b of pts){if(b.s<=.02)continue;
+    const dn=cl((b.z+1.2)/2.4),lam=(-.55*b.p[0]+.6*b.p[1]+.58*b.p[2])/(Math.hypot(...b.p)||1)*.5+.5,tint=b.tone!='none';
+    g.globalAlpha=cl(cl((.12+.88*dn)*(.62+.48*lam)+.5*b.lit)*b.a*(b.dim?.85:1));g.fillStyle=COL[b.tone];
+    g.beginPath();g.arc(S/2+b.p[0]*b.k*S*.4,S/2-b.p[1]*b.k*S*.4,Math.max(.4,S*.045*b.s*b.k*(.4+.6*dn)*(.9+.2*lam)*(1+.55*b.lit)*(tint?.48:.6)),0,TAU);g.fill()}
+  if(reduce||ORBS[o].plays_once&&T-c.tl.at(-1).start>SETTLE+.2)c.done=1;
+}
+(function frame(now){document.querySelectorAll('canvas.orb').forEach(c=>paint(c,now/1000));requestAnimationFrame(frame)})(0);
+
+// The thread plays out live: each step shows the orb for what it is doing, then the Done orb.
+const STEPS=[['thinking',2200,'Thinking','Thought for 6s'],['reading',2200,'Reading PLAN.md','Read <code>PLAN.md</code>, <code>crates/rozu-store/src/lib.rs</code>, 2 more'],
+  ['searching',2000,'Searching for SessionId','Searched for <code>SessionId</code> in 14 files'],
+  ['editing',2600,'Editing session.rs','Edited <code>rozu-store/src/session.rs</code> <span class="add">+142</span> <span class="del">−3</span>'],
+  ['editing',2000,'Editing chat.rs','Edited <code>rozu-cli/src/chat.rs</code> <span class="add">+38</span> <span class="del">−11</span>']];
+let timers=[];const at=(ms,f)=>timers.push(setTimeout(f,ms));
+const step=(s,txt)=>`<div class="step live">${orb(s)}<span class="t">${txt}</span></div>`;
+const now=(s,m)=>{$('cur').dataset.state=s;$('curMeta').textContent=m};
+const finish=el=>{el.classList.remove('live');el.querySelector('canvas').dataset.state='done'};
+function play(){timers.forEach(clearTimeout);timers=[];
+  ['say1','ask','say2'].forEach(i=>$(i).hidden=true);$('steps').innerHTML=$('run').innerHTML='';$('allow').disabled=0;$('allow').textContent='Allow once';
+  let t=0;for(const [s,ms,live,txt] of STEPS){at(t,()=>{$('steps').insertAdjacentHTML('beforeend',step(s,txt));now(s,live.toLowerCase())});t+=ms;at(t,()=>finish($('steps').lastChild))}
+  at(t+150,()=>{$('say1').hidden=$('ask').hidden=false;$('askOrb').dataset.state='waiting';now('waiting','waiting on you')})}
+$('allow').onclick=()=>{if($('allow').disabled)return;$('allow').disabled=1;$('allow').textContent='Allowed';$('askOrb').dataset.state='done';
+  $('run').innerHTML=step('running','Ran <code>cargo test -p rozu-store -p rozu-cli</code>');now('running','running tests');
+  at(3200,()=>{finish($('run').firstChild);$('say2').hidden=false;now('done','done')})};
+$('replay').onclick=play;play();
+</script>
