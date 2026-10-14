@@ -340,6 +340,21 @@ pub struct SessionWriter {
     usage: (Usage, f64, u64),
 }
 
+impl Drop for SessionWriter {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+
+            // A concurrent fork can retain the open-file description until exec. Release
+            // ownership now rather than waiting for every inherited descriptor to close.
+            unsafe {
+                libc::flock(self.file.as_raw_fd(), libc::LOCK_UN);
+            }
+        }
+    }
+}
+
 impl SessionWriter {
     pub fn id(&self) -> &str {
         &self.meta.id

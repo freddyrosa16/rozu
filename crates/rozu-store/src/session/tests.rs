@@ -324,6 +324,23 @@ fn a_session_has_one_writer_and_cannot_be_deleted_while_open() {
 
 #[cfg(unix)]
 #[test]
+fn dropping_a_writer_releases_the_lock_even_with_an_inherited_descriptor() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SessionStore::open(dir.path()).unwrap();
+    let mut writer = store.create(meta("s", Path::new("/w"))).unwrap();
+    let original = chat(&["keep me"]);
+    writer.sync(&original).unwrap();
+    // A concurrent fork temporarily retains this same open-file description until exec.
+    let inherited = writer.file.try_clone().unwrap();
+    drop(writer);
+
+    let (session, _writer) = store.resume("s").unwrap();
+    assert_eq!(session.messages, original.messages);
+    drop(inherited);
+}
+
+#[cfg(unix)]
+#[test]
 fn writer_lock_child() {
     let Some(dir) = std::env::var_os("ROZU_STORE_LOCK_CHILD_DIR") else {
         return;
