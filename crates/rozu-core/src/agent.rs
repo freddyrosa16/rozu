@@ -18,6 +18,10 @@ use crate::approval::{
     ApprovalGate, ApprovalMode, ApprovalPolicy, ApprovalResolution, PendingApproval, ReadOnlyGate,
 };
 use crate::audit::AuditLog;
+use crate::compact::{
+    Compaction, MemoryPolicy, SUMMARY_HEADER, SUMMARY_PROMPT, estimate_tokens, mask_tool_outputs,
+    pinned_len, recent_start, transcript,
+};
 use crate::exec::ToolExecutor;
 use crate::model::{
     ChatRequest, ContentPart, Message, ModelInfo, Role, StreamEvent, ToolSpec, Usage,
@@ -41,6 +45,8 @@ pub struct AgentConfig {
     /// Prices for cost accounting. `None` (an unlisted model) means tokens are counted but cost
     /// is unknown; so does a subscription model ([`ModelInfo::is_metered`] is false).
     pub model_info: Option<ModelInfo>,
+    /// Compaction thresholds, as shares of `model_info`'s context window (no window: never).
+    pub memory: MemoryPolicy,
 }
 
 impl AgentConfig {
@@ -52,6 +58,7 @@ impl AgentConfig {
             max_output_tokens: None,
             max_tool_output_bytes: MAX_OUTPUT_BYTES,
             model_info: None,
+            memory: MemoryPolicy::DEFAULT,
         }
     }
 
@@ -91,6 +98,8 @@ pub struct Session {
     /// Prompt plus output tokens of the latest model response: roughly what the next request
     /// starts from. 0 until a provider reports usage.
     pub context_tokens: u64,
+    /// What compaction did during the most recent turn, if anything.
+    pub last_compaction: Option<Compaction>,
 }
 
 impl Session {
@@ -300,6 +309,7 @@ impl Agent {
         cancel: CancellationToken,
     ) -> Result<TurnOutcome, AgentError> {
         session.messages.push(Message::user(user_input));
+        session.last_compaction = None;
         session.last_turn = TurnUsage {
             usage: Usage::default(),
             cost_usd: self.config.priced_model().map(|_| 0.0),
@@ -311,6 +321,9 @@ impl Agent {
         let ctx = self.exec.ctx(self.workspace.clone(), cancel.clone());
 
         for step in 1..=self.config.max_steps {
+            if let Some(done) = self.compact_with(session, &cancel, false).await {
+                session.last_compaction = Some(done);
+            }
             debug!(step, "requesting model response");
             let request = ChatRequest {
                 model: self.config.model.clone(),
@@ -387,6 +400,106 @@ impl Agent {
             }
         }
         Ok(finish(events, TurnOutcome::MaxSteps).await)
+    }
+
+    /// Whether the provider is a vendor CLI that keeps (and compacts) its own context.
+    pub fn manages_own_context(&self) -> bool {
+        self.provider.kind() == ProviderKind::AgentBackend
+    }
+
+    /// Masks and summarizes everything but the pinned prefix and the recent turns now, whatever
+    /// the context size (`/compact`). Does nothing for an agent backend.
+    pub async fn compact(&self, session: &mut Session, cancel: CancellationToken) -> Compaction {
+        self.compact_with(session, &cancel, true)
+            .await
+            .unwrap_or_default()
+    }
+
+    /// Applies [`MemoryPolicy`]: masking, then summarizing, each when its threshold is passed
+    /// (`force`: regardless). `None` when nothing changed.
+    async fn compact_with(
+        &self,
+        session: &mut Session,
+        cancel: &CancellationToken,
+        force: bool,
+    ) -> Option<Compaction> {
+        if self.manages_own_context() {
+            return None;
+        }
+        let policy = self.config.memory;
+        let window = self.config.model_info.as_ref().map(|i| i.context_window);
+        let used = |s: &Session| match s.context_tokens {
+            0 => estimate_tokens(&s.messages),
+            n => n,
+        };
+        let over = |share: Option<f32>, tokens: u64| {
+            force
+                || matches!((share, window), (Some(share), Some(window))
+                    if tokens as f64 >= f64::from(window) * f64::from(share))
+        };
+        let mut done = Compaction {
+            tokens_before: used(session),
+            ..Compaction::default()
+        };
+        let end = recent_start(&session.messages, policy.keep_turns);
+        if over(policy.mask_at, done.tokens_before) {
+            done.masked = mask_tool_outputs(&mut session.messages, end);
+            if done.masked > 0 {
+                session.context_tokens = estimate_tokens(&session.messages);
+            }
+        }
+        if over(policy.summarize_at, used(session)) {
+            match self.summarize(session, cancel).await {
+                Ok(n) => done.summarized = n,
+                Err(err) => warn!(error = %err, "could not summarize older turns"),
+            }
+        }
+        if done.masked + done.summarized == 0 {
+            return None;
+        }
+        session.compactions += 1;
+        session.context_tokens = estimate_tokens(&session.messages);
+        done.tokens_after = session.context_tokens;
+        debug!(?done, "compacted the conversation");
+        Some(done)
+    }
+
+    /// Replaces the messages between the pinned prefix and the recent turns with one summary.
+    /// Returns how many messages it replaced.
+    async fn summarize(
+        &self,
+        session: &mut Session,
+        cancel: &CancellationToken,
+    ) -> Result<usize, AgentError> {
+        let start = pinned_len(&session.messages);
+        let end = recent_start(&session.messages, self.config.memory.keep_turns).max(start);
+        if end - start < 2 {
+            return Ok(0);
+        }
+        let request = ChatRequest {
+            model: self.config.model.clone(),
+            messages: vec![
+                Message::system(SUMMARY_PROMPT),
+                Message::user(transcript(&session.messages[start..end])),
+            ],
+            tools: Vec::new(),
+            max_output_tokens: self.config.max_output_tokens,
+        };
+        // The summary isn't shown to the user.
+        let (quiet, closed) = mpsc::channel(1);
+        drop(closed);
+        let mut output = StepOutput::default();
+        match self
+            .stream_step(request, session, &quiet, cancel, &mut output)
+            .await
+        {
+            StreamEnd::Done if !output.text.trim().is_empty() => {}
+            StreamEnd::Failed(err) => return Err(err.into()),
+            _ => return Ok(0),
+        }
+        let summary = Message::system(format!("{SUMMARY_HEADER}\n{}", output.text.trim()));
+        session.messages.splice(start..end, [summary]);
+        Ok(end - start)
     }
 
     /// Streams one model response into `output`, forwarding text and usage as it arrives.

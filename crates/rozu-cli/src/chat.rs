@@ -29,8 +29,8 @@ use rozu_cli_providers::{
 };
 use rozu_core::{
     Agent, AgentConfig, AgentError, AgentEvent, ApprovalMode, ApprovalPolicy, ApprovalRecord,
-    AuditLog, DEFAULT_MAX_STEPS, Decision, DecisionSource, Provider, Session, ToolExecutor,
-    TurnOutcome, TurnUsage, approvals_path, new_session_id,
+    AuditLog, DEFAULT_MAX_STEPS, Decision, DecisionSource, MemoryPolicy, Provider, Session,
+    ToolExecutor, TurnOutcome, TurnUsage, approvals_path, new_session_id,
 };
 use rozu_providers::registry::{CLAUDE_CLI_ID, CODEX_ID, GROK_ID};
 use rozu_providers::{ModelChoice, PROVIDERS, registry};
@@ -89,6 +89,10 @@ pub struct ChatArgs {
     /// workspace's latest. Uses the chat's last model unless --provider or --model is given.
     #[arg(long, num_args = 0..=1, default_missing_value = "last", value_name = "ID")]
     resume: Option<String>,
+    /// How older turns are shrunk near the context window: default (hide old tool outputs at
+    /// 60%, summarize at 80%), mask, summarize or off. `/compact` does both now.
+    #[arg(long, default_value = "default", value_parser = memory_preset)]
+    memory: MemoryPolicy,
     /// Don't save this chat.
     #[arg(long)]
     no_save: bool,
@@ -108,6 +112,7 @@ struct AgentFactory {
     tools: Arc<ToolRegistry>,
     workspace: Workspace,
     max_steps: usize,
+    memory: MemoryPolicy,
     approval: ApprovalArg,
     policy: Arc<ApprovalPolicy>,
     gate: Arc<CliGate>,
@@ -153,6 +158,7 @@ impl AgentFactory {
         };
         let mut config = AgentConfig::new(&choice.model).with_model_info(choice.info.clone());
         config.max_steps = self.max_steps;
+        config.memory = self.memory;
         Ok(
             Agent::new(provider, self.tools.clone(), self.workspace.clone(), config)
                 .with_approval_policy(self.policy.clone())
@@ -295,6 +301,13 @@ impl AgentFactory {
     }
 }
 
+fn memory_preset(name: &str) -> Result<MemoryPolicy, String> {
+    MemoryPolicy::preset(name).ok_or_else(|| {
+        let names: Vec<_> = MemoryPolicy::PRESETS.iter().map(|(n, _)| *n).collect();
+        format!("expected one of {}", names.join(", "))
+    })
+}
+
 /// The provider to use when neither `--provider` nor `--model` is given: with no API key
 /// configured anywhere, the first installed of claude-cli, codex and grok (claude-cli when
 /// none is, so the error says how to install it); else the registry's default.
@@ -419,6 +432,7 @@ async fn chat(args: ChatArgs) -> anyhow::Result<ExitCode> {
         tools: Arc::new(ToolRegistry::standard()),
         workspace: workspace.clone(),
         max_steps: args.max_steps,
+        memory: args.memory,
         approval: args.approval,
         policy: Arc::new(policy),
         gate,
@@ -481,7 +495,7 @@ async fn chat(args: ChatArgs) -> anyhow::Result<ExitCode> {
     let interactive = io.interactive;
     if interactive {
         printer.status(&format!(
-            "rozu {} · {} · {}\napprovals: {} · sandbox: {}\n{}\nCtrl-C cancels a turn (twice exits) · /model <provider/model> switches · /pin <note> remembers · Ctrl-D or /exit quits",
+            "rozu {} · {} · {}\napprovals: {} · sandbox: {}\n{}\nCtrl-C cancels a turn (twice exits) · /model <provider/model> switches · /pin <note> remembers · /compact shrinks · Ctrl-D or /exit quits",
             env!("CARGO_PKG_VERSION"),
             choice.spec(),
             workspace.root().display(),
@@ -529,6 +543,24 @@ async fn chat(args: ChatArgs) -> anyhow::Result<ExitCode> {
                     printer.unpriced_note(&choice);
                 }
                 Err(err) => eprintln!("error: {err:#}"),
+            }
+            continue;
+        }
+        if command_arg(input, "/compact").is_some() {
+            if agent.manages_own_context() {
+                printer.status(&format!(
+                    "{} keeps and compacts its own context",
+                    choice.provider.id
+                ));
+                continue;
+            }
+            let done = agent.compact(&mut session, interrupts.begin_turn()).await;
+            interrupts.end_turn();
+            if done.masked + done.summarized == 0 {
+                printer.status("nothing to compact yet");
+            } else {
+                printer.status(&compacted_line(&done));
+                save(&mut writer, &session);
             }
             continue;
         }
@@ -580,11 +612,7 @@ fn set_system(
     mode: ApprovalMode,
     memory: &ProjectMemory,
 ) {
-    let old = session
-        .messages
-        .iter()
-        .take_while(|m| m.role == rozu_core::Role::System)
-        .count();
+    let old = rozu_core::compact::pinned_len(&session.messages);
     let mut system = vec![rozu_core::Message::system(system_prompt(workspace, mode))];
     system.extend(memory.prompt().map(rozu_core::Message::system));
     session.messages.splice(..old, system);
@@ -704,8 +732,27 @@ async fn turn(
     };
     let (result, ()) = tokio::join!(run, render);
     io.interrupts.end_turn();
+    if let Some(done) = &session.last_compaction {
+        io.printer.status(&compacted_line(done));
+    }
     io.printer.usage_line(&session.last_turn);
     result
+}
+
+fn compacted_line(done: &rozu_core::Compaction) -> String {
+    let mut what = Vec::new();
+    if done.masked > 0 {
+        what.push(format!("hid {} old tool outputs", done.masked));
+    }
+    if done.summarized > 0 {
+        what.push(format!("summarized {} older messages", done.summarized));
+    }
+    format!(
+        "[compacted: {} · ~{} → ~{} tokens; pinned memory kept]",
+        what.join(", "),
+        done.tokens_before,
+        done.tokens_after
+    )
 }
 
 /// The argument of `/name arg`, or `""` for a bare `/name`; `None` for other input.
