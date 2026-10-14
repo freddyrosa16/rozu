@@ -83,6 +83,8 @@ pub struct CliProcess {
     max_line_bytes: usize,
     pgid: Option<u32>,
     stderr_tail: Arc<Mutex<VecDeque<String>>>,
+    /// The task draining stderr into `stderr_tail`; ends when the child closes stderr.
+    stderr_reader: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl CliProcess {
@@ -115,7 +117,7 @@ impl CliProcess {
             .take()
             .ok_or_else(|| io::Error::other("no stdout pipe"))?;
         let stderr_tail = Arc::new(Mutex::new(VecDeque::new()));
-        if let Some(stderr) = child.stderr.take() {
+        let stderr_reader = child.stderr.take().map(|stderr| {
             let tail = stderr_tail.clone();
             let label = cmd.label.clone();
             tokio::spawn(async move {
@@ -129,8 +131,8 @@ impl CliProcess {
                         tail.push_back(line);
                     }
                 }
-            });
-        }
+            })
+        });
         info!(target: "rozu::cli", cli = %cmd.label, pid = ?pgid, program = %cmd.program.display(), "started");
         Ok(Self {
             label: cmd.label.clone(),
@@ -140,6 +142,7 @@ impl CliProcess {
             max_line_bytes: cmd.max_line_bytes,
             pgid,
             stderr_tail,
+            stderr_reader,
         })
     }
 
@@ -180,8 +183,18 @@ impl CliProcess {
         }
     }
 
-    /// The last few stderr lines (for classifying failures; never shown verbatim).
-    pub fn stderr_tail(&self) -> Vec<String> {
+    /// The last few stderr lines (for classifying failures; never shown verbatim). Once the
+    /// child has exited this waits briefly for the reader to drain what it wrote last, so a
+    /// "not logged in" line printed just before exit is not missed.
+    pub async fn stderr_tail(&mut self) -> Vec<String> {
+        if let Some(reader) = self.stderr_reader.take() {
+            if tokio::time::timeout(Duration::from_millis(500), reader)
+                .await
+                .is_err()
+            {
+                // Still running (stderr open): read what's there now.
+            }
+        }
         self.stderr_tail
             .lock()
             .map(|tail| tail.iter().cloned().collect())
