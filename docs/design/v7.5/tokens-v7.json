@@ -155,6 +155,11 @@
       "$type": "duration",
       "$value": "600ms"
     },
+    "orbAfterWaiting": {
+      "$type": "duration",
+      "$value": "1.3s",
+      "$description": "Done or Error right after Waiting: no morph; the breath fills up to the full globe over the settle, in the new tone"
+    },
     "orbStagger": {
       "$type": "duration",
       "$value": "300ms",
