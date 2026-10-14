@@ -14,6 +14,15 @@ preserved on the [`archive/python-v0`](https://github.com/freddyrosa16/rozu/tree
 The static landing page (`index.html`, `styles.css`, `waves.js`, `assets/`, `tests/waves.test.cjs`) is still on main
 for now because GitHub Pages serves it.
 
+## Try the app (M5, macOS)
+The desktop app is early: a sidebar of threads and a centered chat, driven by the same core as `rozu chat`.
+It uses your installed claude, codex or grok CLI (click the model name to switch), or an API key.
+
+```sh
+cargo build -p rozu-cli -p rozu-app   # the app needs `rozu` next to it for tool calls
+./target/debug/rozu-app ~/path/to/project
+```
+
 ## Try the CLI (M3)
 `rozu chat` runs the agent against OpenAI (Responses API), Anthropic (Messages API) or xAI (Responses API
 at `api.x.ai`) with workspace tools: `read_file`, `list_dir`, `grep`, `write_file`, `apply_patch` and `shell`.

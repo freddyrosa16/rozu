@@ -75,7 +75,7 @@ while IFS= read -r step <&3 || [ -n "$step" ]; do
                 ;;
             esac
         fi
-        got=$(printf '%s\n' "$line" | sed -n 's/^{"id":\([0-9][0-9]*\),.*/\1/p')
+        got=$(printf '%s\n' "$line" | sed -n 's/^{\("[a-z]*":"[^"]*",\)*"id":\([0-9][0-9]*\).*/\2/p')
         [ -n "$got" ] && id=$got
         ;;
     '> '*) printf '%s\n' "${step#> }" | sed "s/__ID__/$id/g; s|__CWD__|$cwd|g" ;;

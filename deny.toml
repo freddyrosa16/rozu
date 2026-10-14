@@ -6,6 +6,9 @@ all-features = true
 [advisories]
 version = 2
 yanked = "deny"
+# GPUI pulls in crates whose authors stopped maintaining them (async-std, ttf-parser, paste, …)
+# with no maintained release to move to; still flag our own direct dependencies.
+unmaintained = "workspace"
 
 [licenses]
 version = 2
@@ -24,6 +27,8 @@ allow = [
     "MPL-2.0",
     "CC0-1.0",
     "0BSD",
+    # libfuzzer-sys, via GPUI's image decoding (rav1e).
+    "NCSA",
 ]
 
 [bans]

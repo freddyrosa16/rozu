@@ -1,0 +1,25 @@
+[package]
+name = "rozu-app"
+description = "The rozu desktop app (GPUI, macOS only)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+rozu-activity.workspace = true
+rozu-cli-providers.workspace = true
+rozu-core.workspace = true
+rozu-providers.workspace = true
+rozu-secrets.workspace = true
+rozu-tools.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+
+# GPUI only builds on macOS here; elsewhere the binary just says so.
+[target.'cfg(target_os = "macos")'.dependencies]
+gpui = { version = "0.2", features = ["runtime_shaders"] }
