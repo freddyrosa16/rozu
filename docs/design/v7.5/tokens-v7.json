@@ -214,8 +214,8 @@
       },
       "doneDraw": {
         "$type": "duration",
-        "$value": "450ms",
-        "$description": "check stroke, from 250ms, then a 250ms pop"
+        "$value": "500ms",
+        "$description": "the globe fills up green, then a 300ms pop"
       },
       "errorShake": {
         "$type": "duration",

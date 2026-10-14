@@ -1,5 +1,5 @@
 # rozu: Handoff spec (CURRENT: v7.5, live activity, a dotted globe per state)
-**Status:** current spec as of 2026-10-13. **v7.5** replaces the v7.4 ring-and-symbol orbs with one object for all nine states: a globe of small matte dots on lines of latitude, and the state is what the globe is doing (sparks rippling out, a reading band, a roaming lens, a caret writing the globe from the bottom up, a fast helical spin, a breath, dropped rings). Done and Error gather the dots into the v7.4 check and cross, with the rest resting on a faint ring. The 22px pill draws its own smaller point set, tuned rather than scaled. The look is inspired by dotted-globe loading indicators (libraries.dev/orbs), with rozu's own motions, projection, light and morph. The pill itself (orb, label, timer, `3/5` step text, no progress bar) is unchanged from v7.2.
+**Status:** current spec as of 2026-10-13. **v7.5** replaces the v7.4 ring-and-symbol orbs with one object for all nine states: a globe of small matte dots on lines of latitude, and the state is what the globe is doing (sparks rippling out, a reading band, a roaming lens, a caret writing the globe from the bottom up, a fast helical spin, a breath, dropped rings). Done and Error are the same globe in green and red: Done fills up and pops once, Error shakes once, both then hold. The 22px pill draws its own smaller point set, tuned rather than scaled. The look is inspired by dotted-globe loading indicators (libraries.dev/orbs), with rozu's own motions, projection, light and morph. The pill itself (orb, label, timer, `3/5` step text, no progress bar) is unchanged from v7.2.
 - Everything v7.5 doesn't redefine comes from v5 (Appendix B: chrome ramp, type, spacing, focus) and then v1 (Appendix A: layout, keyboard map, approvals, accessibility).
 - **Superseded:** the v7.2/v7.3 per-state clouds and the v7.4 ring-and-symbol orbs (removed from the repo; see git history), and v6.x (Appendix C), meaning the bead family, the bead tokens and the v5 progress line under the pill.
 - **Screens:** `screens/v7.5-sheet-{dark,light}.png` (all nine states, 96px and in the 22px pill), `screens/v7.5-strip-{dark,light}.png` (each state over one loop at 96px and at 22px) and `screens/v7.5-morphs.png` (Running into Waiting, Done, Error and Offline; Waiting into Done and Error).
@@ -20,7 +20,7 @@
 | v7.2 | Oct 13 | A bold signature cue per state (readable at 22px), stronger depth plus a top-left light, a distinct tempo per state, and a 150ms brighten pulse on change | Superseded by v7.4 |
 | v7.3 | Oct 13 | Six states redesigned to match the liked four (lens, ink stroke, pause bars, halo, break, broken ring). Fixes the JS bug that ignored per-state dot size | Superseded by v7.4 |
 | v7.4 | Oct 13 | One fully dotted ring for every state, with a symbol per state inside it | Superseded by v7.5 |
-| **v7.5** | Oct 13 | A dotted globe for every state, in the style of libraries.dev/orbs but with rozu's own motions; two tuned point sets (284 dots, 86 at 22px). Done and Error keep the v7.4 check and cross | **Current** |
+| **v7.5** | Oct 13 | A dotted globe for every state, in the style of libraries.dev/orbs but with rozu's own motions; two tuned point sets (284 dots, 86 at 22px). Done and Error are the globe in green and red. | **Current** |
 
 ## 1. Tokens (tokens-v7, layered after v6; no new hues)
 | Token | Value | Use |
@@ -63,8 +63,8 @@
 | Editing | Editing `<file>` | A caret writes every dot of the globe, ring by ring, from the bottom to the top over 2s; the newest ring and a half is brighter; held, then cleared in .3s | 2.6s | 1.1s |
 | Running | Running `<cmd>` | It spins fast with a helical stripe racing round it | .9s | .3s |
 | Waiting (amber) | Waiting for approval · Y / N | It stops and breathes | 1.8s | .45s |
-| Done (green) | Done · 42s · 2 files | 42% of the dots draw a check (450ms from 250ms, one pop); the rest rest on a faint ring | once | 1.5s |
-| Error (red) | Command failed · R retry | The same, as a cross, with one damped shake (from 300ms, 900ms) | once | 1.5s |
+| Done (green) | Done · 42s · 2 files | The globe fills up (Waiting's breath, 0→1 over 500ms) then pops once (s ×1.15, 500–800ms) and holds full | once | 1.5s |
+| Error (red) | Command failed · R retry | The full globe with one damped shake (from 300ms, 900ms), then holds | once | 1.5s |
 | Offline (dim) | Offline · retrying in 3s | It dims, shrinks to 92% and its rings drop out in 400ms slots | 2.4s | .3s |
 
 ## 4. Motion
@@ -73,7 +73,7 @@
   - Mid-morph z lift of +.55·sin(πq) toward the camera.
   - Lit, size and α multiplier are interpolated. Tone and dim flip at q = .5.
   - The previous state keeps generating during the morph, so nothing restarts, and an interrupt starts from the live sample.
-- **Done or Error right after Waiting:** no morph. The breathing globe keeps breathing on Waiting's clock and fills up to the full bright globe over the 1.3s settle, in green or red (plus the pulse); the check and the cross are for Done and Error that come from any other state. The next change starts from that full globe.
+- **Done or Error right after Waiting:** no morph. The breathing globe keeps breathing on Waiting's clock and fills up to the full bright globe over the 1.3s settle, in green or red (plus the pulse). From any other state Done and Error morph in like everything else (Done through its fill-up, Error with its shake). The next change starts from that full globe.
 - **Brighten pulse:** on every state change, lit += .8·sin(π·t/.15) over the first 150ms.
 - **Tempo:** per state, as in §3. Done and Error play once, then settle.
 - **Crispness:** at 22px, dots ≤1.6 device px are drawn as pixel-snapped squares; larger dots are AA discs. Text is regular AA text, never drawn into the orb.
@@ -82,7 +82,7 @@
 - Triggered by the OS setting or `prefers-reduced-motion`.
 - Each state shows one static frame (T in §3), and each still frame shows its state.
 - State changes use a 150ms cross-fade instead of the morph. The brighten pulse becomes a single 150ms α bump with no movement.
-- The spins, the sparks, the writing, the band, the lens, the blink, the check's draw, the cross's shake and the ring flicker are all off. The label carries the state.
+- The spins, the sparks, the writing, the band, the lens, the blink, Done's pop, Error's shake and the ring flicker are all off. The label carries the state.
 
 ## 6. GPUI notes
 - **One instanced draw:** a single quad pipeline with **at most 284 instances** per orb (86 in the pill). Instance data: `{pos: vec2, radius, alpha, tone_idx}`.

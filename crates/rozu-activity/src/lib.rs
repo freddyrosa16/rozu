@@ -30,7 +30,7 @@ pub use debounce::{Debouncer, MIN_DWELL};
 pub use events::{Activity, ActivityEvent, ActivityTracker, ApprovalOutcome, tool_state};
 #[cfg(feature = "core")]
 pub use events::{from_agent_event, from_agent_events};
-pub use generate::{CAMERA, Dot, GLYPH_Z, MAX_DOTS, OrbSize, R, Vec3, generate, hash, vnoise};
+pub use generate::{CAMERA, Dot, MAX_DOTS, OrbSize, R, Vec3, breath, generate, hash, vnoise};
 pub use orb::{MORPH, MORPH_END, Orb, PULSE, SETTLE, STAGGER, Sample};
 pub use policy::{FramePolicy, ReducedMotion};
 pub use project::{DrawDot, MAX_POINTS, POINTS_22, ProjectOptions, project, project_with};
