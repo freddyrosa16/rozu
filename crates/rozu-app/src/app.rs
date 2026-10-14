@@ -96,6 +96,10 @@ struct Rozu {
     choice: Option<ModelChoice>,
     effort: Option<String>,
     menu: bool,
+    /// The provider whose models the menu shows.
+    menu_tab: Option<&'static str>,
+    /// Codex's own model list, once it answered.
+    live: backend::Live,
     /// The plan picked on the setup page, and what each plan's CLI says.
     plan: &'static str,
     access: HashMap<&'static str, Access>,
@@ -140,6 +144,8 @@ impl Rozu {
             providers: backend::providers(),
             choice,
             menu: false,
+            menu_tab: None,
+            live: Vec::new(),
             plan: PLANS[0].id,
             access: HashMap::new(),
             composer,
@@ -147,6 +153,16 @@ impl Rozu {
             scroll: ScrollHandle::new(),
             _sent: sent,
         };
+        let codex = app.backend.codex_models();
+        cx.spawn(async move |this, cx| {
+            if let Ok(live) = codex.await {
+                let _ = this.update(cx, |app, cx| {
+                    app.live = live;
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
         if first_run {
             app.setup(cx);
         } else {
@@ -655,11 +671,27 @@ impl Rozu {
             };
             live.push((i, state));
         }
+        let steps: Vec<bool> = thread
+            .feed
+            .items
+            .iter()
+            .map(|item| matches!(item, Item::Step(_)))
+            .collect();
         let items: Vec<AnyElement> = live
             .into_iter()
             .map(|(i, state)| {
                 let orb = state.map(|s| self.orb(format!("{id}-{i}"), s, cx));
-                self.item(id, i, orb, cx)
+                let gap = match i {
+                    0 => 0.,
+                    _ if steps[i] && steps[i - 1] => 4.,
+                    _ => 16.,
+                };
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .mt(px(gap))
+                    .child(self.item(id, i, orb, cx))
+                    .into_any_element()
             })
             .collect();
         let title = self
@@ -674,12 +706,12 @@ impl Rozu {
             .flex()
             .flex_col()
             .child(
-                drag_bar().px(px(10.)).child(
+                drag_bar().px(px(20.)).child(
                     div()
-                        .bg(rgb(RAISE))
-                        .rounded(px(8.))
-                        .px(px(10.))
-                        .py(px(3.))
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(rgb(INK3))
                         .child(title),
                 ),
             )
@@ -690,13 +722,7 @@ impl Rozu {
                     .min_h_0()
                     .overflow_y_scroll()
                     .track_scroll(&self.scroll)
-                    .child(
-                        column()
-                            .gap(px(14.))
-                            .py(px(10.))
-                            .pb(px(20.))
-                            .children(items),
-                    ),
+                    .child(column().pt(px(8.)).pb(px(24.)).children(items)),
             )
             .child(column().pb(px(16.)).child(self.composer_box(false, cx)))
     }
@@ -722,6 +748,7 @@ impl Rozu {
                 .child(text.clone())
                 .into_any_element(),
             Item::Text(text) => div()
+                .w_full()
                 .line_height(relative(1.6))
                 .child(text.clone())
                 .into_any_element(),
@@ -820,7 +847,7 @@ impl Rozu {
     fn composer_box(&self, home: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let running = self.running();
         let model = self.choice.as_ref().map_or("No model".into(), |c| {
-            backend::label(c, self.effort.as_deref())
+            backend::label(c, self.effort.as_deref(), &self.live)
         });
         let picker = div()
             .relative()
@@ -838,6 +865,7 @@ impl Rozu {
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.providers = backend::providers();
                         this.menu = true;
+                        this.menu_tab = this.choice.as_ref().map(|c| c.provider.id);
                         cx.notify();
                     })),
             )
@@ -924,33 +952,55 @@ impl Rozu {
                     .child("No AI is set up. Click the gear to pick one."),
             );
         }
-        for provider in &self.providers {
-            list = list.child(menu_heading(backend::provider_name(provider)));
-            for m in backend::models(provider) {
-                let on = self.choice.as_ref() == Some(&m);
-                let key = SharedString::from(format!("m:{}", m.spec()));
-                let label = backend::model_name(&m.model);
-                list = list.child(
-                    div()
-                        .id(key)
-                        .flex()
-                        .items_center()
-                        .px_2()
-                        .py(px(5.))
-                        .rounded(px(8.))
-                        .text_size(px(14.))
-                        .cursor_pointer()
-                        .hover(|s| s.bg(rgb(LINE)))
-                        .child(div().flex_1().child(label))
-                        .when(on, |r| r.child(icon("check", INK)))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.menu = false;
-                            this.choose(m.clone(), cx);
-                        })),
-                );
-            }
+        let tab = self
+            .menu_tab
+            .and_then(|id| self.providers.iter().find(|p| p.id == id))
+            .or(self.providers.first())
+            .copied();
+        if self.providers.len() > 1 {
+            list = list.child(div().flex().flex_wrap().gap_1().p_1().pb_2().children(
+                self.providers.iter().map(|p| {
+                    let id = p.id;
+                    chip(
+                        SharedString::from(format!("tab:{id}")),
+                        backend::provider_name(p),
+                        tab.is_some_and(|t| t.id == id),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.menu_tab = Some(id);
+                        cx.notify();
+                    }))
+                }),
+            ));
         }
-        if let Some(choice) = &self.choice {
+        for m in tab
+            .map(|p| backend::models(p, &self.live))
+            .unwrap_or_default()
+        {
+            let on = self.choice.as_ref() == Some(&m);
+            let key = SharedString::from(format!("m:{}", m.spec()));
+            let label = backend::model_name(&m.model, &self.live);
+            list = list.child(
+                div()
+                    .id(key)
+                    .flex()
+                    .items_center()
+                    .px_2()
+                    .py(px(5.))
+                    .rounded(px(8.))
+                    .text_size(px(14.))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(rgb(LINE)))
+                    .child(div().flex_1().child(label))
+                    .when(on, |r| r.child(icon("check", INK)))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.choose(m.clone(), cx);
+                    })),
+            );
+        }
+        if let Some(choice) = &self.choice
+            && tab.is_some_and(|t| t.id == choice.provider.id)
+        {
             let efforts = backend::efforts(choice.provider.id);
             if !efforts.is_empty() {
                 list = list
@@ -1108,7 +1158,7 @@ impl Rozu {
         };
         let ready = matches!(access, Access::Ready | Access::Installed);
         let models: Vec<ModelChoice> = registry::provider_info(plan.id)
-            .map(backend::models)
+            .map(|p| backend::models(p, &self.live))
             .unwrap_or_default();
         let efforts = backend::efforts(plan.id);
         let folder = self.project.as_deref().map_or("None yet".into(), name);
@@ -1170,7 +1220,7 @@ impl Rozu {
                                     let on = self.choice.as_ref() == Some(&m);
                                     chip(
                                         SharedString::from(format!("sm:{}", m.model)),
-                                        backend::model_name(&m.model),
+                                        backend::model_name(&m.model, &self.live),
                                         on,
                                     )
                                     .on_click(
