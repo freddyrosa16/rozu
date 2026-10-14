@@ -641,7 +641,11 @@ impl Rozu {
         let mut live = Vec::new();
         for (i, item) in thread.feed.items.iter().enumerate() {
             let state = match item {
-                Item::Step(s) if s.done.is_none() => Some(s.state),
+                Item::Step(s) => Some(match s.done {
+                    None => s.state,
+                    Some(_) if s.failed => ActivityState::Error,
+                    Some(_) => ActivityState::Done,
+                }),
                 Item::Ask(a) => Some(match a.answer {
                     None => ActivityState::Waiting,
                     Some("Denied" | "Expired") => ActivityState::Offline,
@@ -1332,15 +1336,24 @@ fn hover_icon(
 }
 
 fn step_row(step: &Step, orb: Option<Entity<OrbView>>) -> Div {
-    let line = div().flex().items_center().gap_2().text_color(rgb(INK2));
-    match (&step.done, orb) {
-        (None, orb) => line.children(orb).child(step.label.clone()),
-        (Some(done), _) if step.failed => line.text_color(rgb(BAD)).child(done.clone()),
-        (Some(done), _) => {
+    let line = div()
+        .flex()
+        .items_center()
+        .gap_2()
+        .text_color(rgb(INK2))
+        .children(orb);
+    match &step.done {
+        None => line.child(step.label.clone()),
+        Some(done) if step.failed => line.text_color(rgb(BAD)).child(done.clone()),
+        Some(done) => {
             let (verb, rest) = done.split_once(' ').unwrap_or((done, ""));
-            line.gap_1()
-                .child(verb.to_owned())
-                .child(div().text_color(rgb(INK3)).child(rest.to_owned()))
+            line.child(
+                div()
+                    .flex()
+                    .gap_1()
+                    .child(verb.to_owned())
+                    .child(div().text_color(rgb(INK3)).child(rest.to_owned())),
+            )
         }
     }
 }
