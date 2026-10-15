@@ -70,6 +70,10 @@ app uses the same store.
 ./target/release/rozu chat --no-save           # don't save this one
 ```
 
+Codex and Claude subscription chats use temporary vendor sessions while rozu keeps the saved conversation.
+Grok also keeps its own vendor history, which `--no-save` does not disable. These settings concern local
+session history; see [provider details](providers.md) for restart behavior and limitations.
+
 ## Project memory and compaction
 `ROZU.md` and `AGENTS.md` in the workspace root, plus notes added with `/pin <note>` (kept in
 `.rozu/pinned.md`), are sent with every request, after the system prompt. Each file is read with a 32 KB cap.

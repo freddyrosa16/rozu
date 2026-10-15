@@ -13,7 +13,7 @@ use rozu_cli_providers::claude::install::{claude_auth_status, claude_version};
 use rozu_cli_providers::{ClaudeCliConfig, ClaudeCliProvider};
 use rozu_core::{
     AgentEvent, ApprovalGate, ApprovalRequest, ApprovalResolution, Decision, Message, ModelInfo,
-    PendingApproval, ProviderError, ReadOnlyGate, SandboxMode, StopReason, StreamEvent,
+    PendingApproval, Provider, ProviderError, ReadOnlyGate, SandboxMode, StopReason, StreamEvent,
     TurnOutcome, Usage,
 };
 use rozu_tools::Risk;
@@ -157,6 +157,7 @@ async fn tool_use_turn_maps_to_stream_events() {
         Some("mcp__rozu__approve")
     );
     assert!(args.contains(&"--strict-mcp-config".to_owned()));
+    assert!(args.contains(&"--no-session-persistence".to_owned()));
     assert!(!args.iter().any(|a| a.contains("bypassPermissions")));
     assert!(!args.contains(&"--resume".to_owned()));
     assert!(!args.contains(&"--effort".to_owned()));
@@ -211,9 +212,21 @@ async fn follow_up_turns_reuse_the_process_and_send_only_the_new_message() {
     let fake = fake(&["tool_use.jsonl", "text.jsonl"]);
     let provider = provider(&fake);
     let first = vec![Message::system("s"), Message::user("one")];
-    collect(&provider, request("sonnet", first.clone())).await;
+    let mut stream = provider
+        .stream(request("sonnet", first.clone()), CancellationToken::new())
+        .await
+        .unwrap();
+    loop {
+        if matches!(
+            next(&mut stream).await.unwrap().unwrap(),
+            StreamEvent::Done(_)
+        ) {
+            break;
+        }
+    }
+    drop(stream);
     let mut second = first;
-    second.push(Message::assistant("The README says hello."));
+    second.push(Message::assistant("Let me look.The README says hello."));
     second.push(Message::user("two"));
 
     let (events, err) = collect(&provider, request("sonnet", second)).await;
@@ -290,7 +303,7 @@ async fn missing_binary_is_cli_not_found() {
 }
 
 #[tokio::test]
-async fn cancel_kills_the_cli_and_the_next_turn_resumes_the_session() {
+async fn cancel_restarts_without_vendor_history_and_replays_rozu_history() {
     let fake = hanging_fake();
     std::fs::copy(fake.fixture("text.jsonl"), fake.path("turns/turn2.jsonl")).unwrap();
     let provider = provider(&fake);
@@ -301,15 +314,124 @@ async fn cancel_kills_the_cli_and_the_next_turn_resumes_the_session() {
 
     let (events, err) = collect(
         &provider,
-        request("haiku", vec![Message::user("one"), Message::user("two")]),
+        request(
+            "sonnet",
+            vec![
+                Message::user("one"),
+                Message::assistant("Thinking about it"),
+                Message::user("two"),
+            ],
+        ),
     )
     .await;
     assert_eq!(err, None);
     assert_eq!(events[0], StreamEvent::TextDelta("Hello again!".into()));
     let starts = fake.starts();
     assert_eq!(starts.len(), 2, "restarted after the cancel");
-    assert_eq!(arg_after(&starts[1], "--resume"), Some("sess-123"));
+    for args in &starts {
+        assert!(args.contains(&"--no-session-persistence".into()));
+        assert!(!args.contains(&"--resume".into()));
+    }
+    assert_eq!(arg_after(&starts[1], "--model"), Some("sonnet"));
+    assert_eq!(
+        fake.sent()[1]["message"]["content"][0]["text"],
+        "Earlier in this conversation (with another model):\n\nUser: one\n\nAssistant: Thinking about it\n\nThe user's new message:\ntwo"
+    );
+}
+
+#[tokio::test]
+async fn changing_models_replays_history_then_continues_in_memory() {
+    let fake = fake(&["text.jsonl", "text.jsonl", "text.jsonl"]);
+    let provider = provider(&fake);
+    let mut history = vec![Message::user("one")];
+    assert_eq!(
+        collect(&provider, request("sonnet", history.clone()))
+            .await
+            .1,
+        None
+    );
+    history.extend([Message::assistant("Hello again!"), Message::user("two")]);
+    assert_eq!(
+        collect(&provider, request("haiku", history.clone()))
+            .await
+            .1,
+        None
+    );
+    history.extend([Message::assistant("Hello again!"), Message::user("three")]);
+    assert_eq!(collect(&provider, request("haiku", history)).await.1, None);
+    let starts = fake.starts();
+    assert_eq!(starts.len(), 2);
+    for args in &starts {
+        assert!(args.contains(&"--no-session-persistence".into()));
+        assert!(!args.contains(&"--resume".into()));
+    }
     assert_eq!(arg_after(&starts[1], "--model"), Some("haiku"));
+    let sent = fake.sent();
+    assert_eq!(
+        sent[1]["message"]["content"][0]["text"],
+        "Earlier in this conversation (with another model):\n\nUser: one\n\nAssistant: Hello again!\n\nThe user's new message:\ntwo"
+    );
+    assert_eq!(sent[2]["message"]["content"][0]["text"], "three");
+}
+
+#[tokio::test]
+async fn returning_from_another_provider_replays_its_intervening_turns() {
+    let fake = fake(&["text.jsonl", "text.jsonl"]);
+    let provider = provider(&fake);
+    assert_eq!(
+        collect(&provider, request("sonnet", vec![Message::user("one")]))
+            .await
+            .1,
+        None
+    );
+    let history = vec![
+        Message::user("one"),
+        Message::assistant("Hello again!"),
+        Message::user("ask another provider"),
+        Message::assistant("Other provider's answer"),
+        Message::user("back to Claude"),
+    ];
+    assert_eq!(collect(&provider, request("sonnet", history)).await.1, None);
+    assert_eq!(fake.starts().len(), 2);
+    assert_eq!(
+        fake.sent()[1]["message"]["content"][0]["text"],
+        "Earlier in this conversation (with another model):\n\nUser: one\n\nAssistant: Hello again!\n\nUser: ask another provider\n\nAssistant: Other provider's answer\n\nThe user's new message:\nback to Claude"
+    );
+}
+
+#[tokio::test]
+async fn an_unfinished_stream_restarts_with_the_saved_partial_response() {
+    for exit in [false, true] {
+        let fake = fake(&["partial_then_hang.jsonl", "text.jsonl"]);
+        fake.write(if exit { "turns/exit1" } else { "turns/hang1" }, "");
+        let provider = provider(&fake);
+        let mut stream = start(&provider, "sonnet", &CancellationToken::new()).await;
+        assert_eq!(
+            next(&mut stream).await.unwrap().unwrap(),
+            StreamEvent::TextDelta("Thinking about it".into())
+        );
+        if exit {
+            assert!(matches!(
+                next(&mut stream).await.unwrap(),
+                Err(ProviderError::Api { code: Some(code), .. }) if code == "exit"
+            ));
+        }
+        drop(stream);
+        let history = vec![
+            Message::user("one"),
+            Message::assistant("Thinking about it"),
+            Message::user("continue"),
+        ];
+        assert_eq!(collect(&provider, request("sonnet", history)).await.1, None);
+        let starts = fake.starts();
+        assert_eq!(starts.len(), 2);
+        assert!(starts[1].contains(&"--no-session-persistence".into()));
+        assert!(!starts[1].contains(&"--resume".into()));
+        assert_eq!(
+            fake.sent()[1]["message"]["content"][0]["text"],
+            "Earlier in this conversation (with another model):\n\nUser: one\n\nAssistant: Thinking about it\n\nThe user's new message:\ncontinue"
+        );
+    }
 }
 
 #[tokio::test]
@@ -437,7 +559,7 @@ async fn effort_is_passed_on() {
         ClaudeCliProvider::new(c).unwrap()
     };
     let args: Vec<String> = config(Some("xhigh"))
-        .args("opus", "", None)
+        .args("opus", "")
         .into_iter()
         .map(|a| a.into_string().unwrap())
         .collect();

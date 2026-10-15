@@ -8,7 +8,8 @@
 //! rozu's approval policy and forwards prompts to this process over an [`ApprovalBridge`](rozu_mcp::ApprovalBridge).
 //!
 //! The CLI does its own login and keeps its own credentials; rozu never reads them. Usage is
-//! counted but has no cost (subscription billing).
+//! counted but has no cost (subscription billing). Vendor session persistence is disabled;
+//! restarted processes receive the conversation history saved by rozu.
 
 pub mod install;
 pub mod protocol;
@@ -21,8 +22,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use rozu_core::{
-    ApprovalGate, ChatRequest, EventStream, Provider, ProviderError, ProviderKind, ProviderResult,
-    StreamEvent,
+    ApprovalGate, ChatRequest, EventStream, Message, Provider, ProviderError, ProviderKind,
+    ProviderResult, Role, StreamEvent,
 };
 use rozu_mcp::claude::{DISALLOWED_BUILTIN_TOOLS, MCP_SERVER};
 use rozu_mcp::{APPROVAL_SOCKET_ENV, APPROVE_TOOL};
@@ -92,8 +93,8 @@ struct State {
     process: Option<CliProcess>,
     /// The model the running process was started with.
     model: Option<String>,
-    /// Claude's session id, for `--resume` after a restart (cancel, model switch).
-    session_id: Option<String>,
+    /// The conversation known by the current process, including its last response.
+    history: Vec<Message>,
     /// Decision-log entries from the MCP server and the prompts the bridge opened.
     records: mpsc::UnboundedReceiver<StreamEvent>,
 }
@@ -138,7 +139,7 @@ impl ClaudeCliProvider {
             state: Arc::new(Mutex::new(State {
                 process: None,
                 model: None,
-                session_id: None,
+                history: Vec::new(),
                 records,
             })),
         })
@@ -150,7 +151,7 @@ impl ClaudeCliProvider {
     }
 
     /// The arguments `claude` is started with.
-    pub fn args(&self, model: &str, system_prompt: &str, resume: Option<&str>) -> Vec<OsString> {
+    pub fn args(&self, model: &str, system_prompt: &str) -> Vec<OsString> {
         let mut args: Vec<OsString> = [
             "-p",
             "--input-format",
@@ -159,6 +160,7 @@ impl ClaudeCliProvider {
             "stream-json",
             "--include-partial-messages",
             "--verbose",
+            "--no-session-persistence",
             "--model",
             model,
             "--permission-mode",
@@ -180,18 +182,14 @@ impl ClaudeCliProvider {
             args.push("--effort".into());
             args.push(effort.into());
         }
-        if let Some(session) = resume {
-            args.push("--resume".into());
-            args.push(session.into());
-        }
         args
     }
 
     fn spawn(&self, state: &mut State, model: &str, system_prompt: &str) -> ProviderResult<()> {
         state.process = None;
-        let resume = state.session_id.clone();
+        state.history.clear();
         let mut cmd = CliCommand::new("claude", &self.config.binary);
-        cmd.args = self.args(model, system_prompt, resume.as_deref());
+        cmd.args = self.args(model, system_prompt);
         cmd.cwd = Some(self.config.workspace.clone());
         cmd.env_remove = ENV_REMOVE.iter().map(OsString::from).collect();
         cmd.env = self
@@ -201,7 +199,7 @@ impl ClaudeCliProvider {
             .map(|(k, v)| (k.into(), v.into()))
             .collect();
         cmd.max_line_bytes = self.config.max_line_bytes;
-        info!(target: "rozu::cli", model, resume = resume.as_deref().unwrap_or(""), "starting claude");
+        info!(target: "rozu::cli", model, "starting claude without session persistence");
         let process = CliProcess::spawn(&cmd).map_err(|err| match err.kind() {
             io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied => {
                 ProviderError::CliNotFound {
@@ -231,15 +229,25 @@ fn system_prompt(req: &ChatRequest) -> String {
 }
 
 /// Holds the session lock for one turn. If the turn doesn't finish (cancelled, dropped, failed
-/// mid-stream), the CLI is killed; the next turn restarts it with `--resume`.
+/// mid-stream), the CLI is killed; the next turn replays rozu's history into a fresh process.
 struct TurnGuard {
     state: OwnedMutexGuard<State>,
+    history: Vec<Message>,
+    response: String,
     finished: bool,
 }
 
 impl TurnGuard {
     /// The turn ended cleanly enough that the CLI can take the next one.
     fn keep_process(&mut self, keep: bool) {
+        if keep {
+            self.state.history = std::mem::take(&mut self.history);
+            if !self.response.is_empty() {
+                self.state
+                    .history
+                    .push(Message::assistant(std::mem::take(&mut self.response)));
+            }
+        }
         self.finished = keep;
     }
 }
@@ -276,15 +284,21 @@ impl Provider for ClaudeCliProvider {
         cancel: CancellationToken,
     ) -> ProviderResult<EventStream> {
         let mut state = self.state.clone().lock_owned().await;
-        if state.process.is_none() || state.model.as_deref() != Some(req.model.as_str()) {
+        let has_history = state.process.is_some()
+            && state.model.as_deref() == Some(req.model.as_str())
+            && req.messages.split_last().is_some_and(|(last, previous)| {
+                last.role == Role::User && previous == state.history.as_slice()
+            });
+        if !has_history {
             self.spawn(&mut state, &req.model, &system_prompt(&req))?;
         }
-        let text = turn_text(&req, state.session_id.is_some());
+        let text = turn_text(&req, has_history);
         // Decisions left over from an earlier, interrupted turn.
         while state.records.try_recv().is_ok() {}
         let process = state.process.as_mut().expect("spawned above");
         if let Err(err) = process.send_json(&protocol::user_message(&text)).await {
             state.process = None;
+            state.history.clear();
             return Err(ProviderError::Api {
                 code: Some("cli".into()),
                 message: format!("could not write to claude: {err}"),
@@ -293,6 +307,8 @@ impl Provider for ClaudeCliProvider {
 
         let mut guard = TurnGuard {
             state,
+            history: req.messages,
+            response: String::new(),
             finished: false,
         };
         Ok(Box::pin(async_stream::stream! {
@@ -317,14 +333,16 @@ impl Provider for ClaudeCliProvider {
                     Next::Record(event) => yield Ok(event),
                     Next::Line(Ok(Some(line))) => match mapper.map(&line) {
                         Ok(step) => {
-                            if let Some(id) = step.session_id {
-                                state.session_id = Some(id);
-                            }
                             for event in step.events {
+                                if let StreamEvent::TextDelta(text) = &event {
+                                    guard.response.push_str(text);
+                                }
+                                if matches!(event, StreamEvent::Done(_)) {
+                                    guard.keep_process(true);
+                                }
                                 yield Ok(event);
                             }
                             if step.done {
-                                guard.keep_process(true);
                                 break;
                             }
                         }
@@ -366,8 +384,6 @@ impl Provider for ClaudeCliProvider {
 
 #[cfg(test)]
 mod tests {
-    use rozu_core::Message;
-
     use super::*;
 
     fn request(messages: Vec<Message>) -> ChatRequest {

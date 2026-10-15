@@ -5,7 +5,7 @@
 //!
 //! | `type` | rozu |
 //! |---|---|
-//! | `system` / `init` | session id (for `--resume`), model, MCP server status: logged |
+//! | `system` / `init` | ephemeral session id, model, MCP server status: logged |
 //! | `stream_event` | partial Anthropic SSE events: `text_delta` → text, `tool_use` blocks + `input_json_delta` → tool call start/args/end |
 //! | `assistant` | full messages: text and `tool_use` blocks not already seen as partials |
 //! | `user` | `tool_result` blocks → [`StreamEvent::ToolResult`] |
