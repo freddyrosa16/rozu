@@ -20,6 +20,8 @@ impl Rozu {
                 let on = self.plan == plan.id;
                 div()
                     .id(plan.id)
+                    .w(px(text_w))
+                    .flex_none()
                     .flex()
                     .items_center()
                     .gap_3()
@@ -32,15 +34,25 @@ impl Rozu {
                     .cursor_pointer()
                     .child(logo(plan.id).size(px(22.)))
                     .child(
-                        div().flex_1().flex().flex_col().child(plan.name).child(
-                            div()
-                                .text_size(px(14.))
-                                .text_color(rgb(INK3))
-                                .child(plan.plan),
-                        ),
+                        div()
+                            .w(px((text_w - 180.).max(1.)))
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .child(plan.name)
+                            .child(
+                                div()
+                                    .w(px((text_w - 180.).max(1.)))
+                                    .text_size(px(14.))
+                                    .text_color(rgb(INK3))
+                                    .child(plan.plan),
+                            ),
                     )
                     .child(
                         div()
+                            .w(px(100.))
+                            .flex_none()
+                            .text_right()
                             .text_size(px(14.))
                             .text_color(rgb(INK2))
                             .child(access_text(access)),
@@ -73,6 +85,7 @@ impl Rozu {
         div()
             .flex_1()
             .min_w_0()
+            .min_h_0()
             .flex()
             .flex_col()
             .child(drag_bar())
@@ -100,7 +113,9 @@ impl Rozu {
                             .children(plans)
                             .child(
                                 div()
+                                    .w(px(text_w))
                                     .flex()
+                                    .flex_wrap()
                                     .items_center()
                                     .gap_2()
                                     .children(action.map(|(label, primary)| {
@@ -128,7 +143,7 @@ impl Rozu {
                                 )
                             })
                             .child(label_text("Model"))
-                            .child(div().flex().flex_wrap().gap_1().children(
+                            .child(div().w(px(text_w)).flex().flex_wrap().gap_1().children(
                                 models.into_iter().map(|m| {
                                     let on = self.choice.as_ref() == Some(&m);
                                     chip(
@@ -159,17 +174,23 @@ impl Rozu {
                             .child(label_text("Folder"))
                             .child(
                                 div()
+                                    .w(px(text_w))
                                     .flex()
-                                    .items_center()
                                     .gap_3()
-                                    .child(icon("folder", INK2))
-                                    .child(folder)
+                                    .when(text_w < 480., |d| d.flex_col().items_start())
+                                    .when(text_w >= 480., |d| d.items_center())
+                                    .child(
+                                        div().w(px(if text_w < 480. { text_w } else { text_w - 145. }))
+                                            .min_w_0().flex().items_center().gap_3()
+                                            .child(icon("folder", INK2))
+                                            .child(div().flex_1().min_w_0().truncate().child(folder))
+                                    )
                                     .child(button("folder", "Choose folder", false).on_click(
                                         cx.listener(|this, _, _, cx| this.add_project(cx)),
                                     )),
                             )
                             .child(
-                                div().pt_3().child(
+                                div().w(px(text_w)).pt_3().child(
                                     button("continue", "Continue", ready)
                                         .when(!ready, |b| b.opacity(0.5).cursor_default())
                                         .on_click(cx.listener(move |this, _, _, cx| {

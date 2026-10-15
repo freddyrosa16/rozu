@@ -4,8 +4,10 @@
 //! and model picker), on top of the shared [`widgets`].
 
 mod chat;
+mod customize;
 mod home;
 mod menu;
+mod search;
 mod setup;
 mod sidebar;
 mod widgets;
@@ -71,6 +73,7 @@ pub fn run() {
             );
             let options = WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
+                window_min_size: Some(size(px(560.), px(440.))),
                 titlebar: Some(TitlebarOptions {
                     title: Some("rozu".into()),
                     appears_transparent: true,
@@ -112,6 +115,8 @@ enum Page {
     Home,
     Thread(usize),
     Setup,
+    Search,
+    Customize,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -153,6 +158,16 @@ fn follows_output(page: Page, id: usize, offset_y: f32, max_y: f32) -> bool {
     page == Page::Thread(id) && max_y + offset_y <= 1.
 }
 
+fn sidebar_width(viewport: f32, first_run: bool) -> f32 {
+    if first_run {
+        0.
+    } else if viewport < 900. {
+        88.
+    } else {
+        270.
+    }
+}
+
 struct Rozu {
     backend: Backend,
     settings: Settings,
@@ -162,6 +177,10 @@ struct Rozu {
     threads: Vec<Thread>,
     next_id: usize,
     page: Page,
+    page_focus: FocusHandle,
+    focus_page: bool,
+    compact: bool,
+    sidebar_open: bool,
     providers: Vec<&'static ProviderInfo>,
     choice: Option<ModelChoice>,
     effort: Option<String>,
@@ -170,6 +189,8 @@ struct Rozu {
     menu: bool,
     /// The model menu's search box, and the window height it must fit in.
     search: Entity<Composer>,
+    chat_search: Entity<Composer>,
+    search_state: search::SearchState,
     viewport_h: f32,
     /// The chat column's inner width. Text gets it as a fixed width: GPUI wraps text at the
     /// width it was offered, which inside the scrolling feed is wider than the column.
@@ -203,11 +224,26 @@ impl Rozu {
             c
         });
         let search_sub = cx.subscribe(&search, |this, _, Sent(query), cx| {
-            if let Some(m) = this.matches(query).into_iter().next() {
+            if this.menu
+                && let Some(m) = this.matches(query).into_iter().next()
+            {
                 this.choose(m, cx);
             }
         });
         cx.observe(&search, |_, _, cx| cx.notify()).detach();
+        let chat_search = cx.new(|cx| {
+            let mut c = Composer::new(cx);
+            c.placeholder = "Search chat titles".into();
+            c
+        });
+        cx.observe(&chat_search, |this, _, cx| this.search_chats(cx))
+            .detach();
+        cx.subscribe(&chat_search, |this, _, Sent(query), cx| {
+            if this.page == Page::Search {
+                this.chat_search.update(cx, |c, cx| c.set_text(query, cx));
+            }
+        })
+        .detach();
         window.focus(&composer.focus_handle(cx));
         let mut settings = Settings::load();
         if let Some(root) = launch.clone()
@@ -238,10 +274,16 @@ impl Rozu {
             threads,
             next_id,
             page: Page::Home,
+            page_focus: cx.focus_handle(),
+            focus_page: false,
+            compact: false,
+            sidebar_open: false,
             providers: catalog::providers(),
             choice,
             menu: false,
             search,
+            chat_search,
+            search_state: search::SearchState::default(),
             viewport_h: 800.,
             text_w: 700.,
             _search: search_sub,
@@ -275,7 +317,7 @@ impl Rozu {
         let key = match page {
             Page::Home => Some(DraftKey::Project(self.project.clone())),
             Page::Thread(id) => Some(DraftKey::Thread(id)),
-            Page::Setup => None,
+            Page::Setup | Page::Search | Page::Customize => None,
         };
         let draft = self.drafts.switch(key, &self.composer.read(cx).text);
         if let Page::Thread(id) = page {
@@ -286,7 +328,7 @@ impl Rozu {
                 self.choice = choice;
                 self.effort = effort;
             }
-        } else if page == Page::Home {
+        } else if matches!(page, Page::Home | Page::Customize) {
             self.choice = self
                 .settings
                 .provider
@@ -298,6 +340,8 @@ impl Rozu {
             self.effort = self.settings.effort.clone();
         }
         self.page = page;
+        self.focus_page = true;
+        self.sidebar_open = false;
         self.menu = false;
         let placeholder = match page {
             Page::Thread(_) => "Send follow-up",
@@ -347,6 +391,10 @@ impl Rozu {
     }
 
     fn send(&mut self, text: String, cx: &mut Context<Self>) {
+        if !matches!(self.page, Page::Home | Page::Thread(_)) {
+            self.composer.update(cx, |c, cx| c.set_text(&text, cx));
+            return;
+        }
         let id = match self.page {
             Page::Thread(_) if self.running() => {
                 return self.composer.update(cx, |c, cx| c.set_text(&text, cx));
@@ -513,6 +561,7 @@ impl Rozu {
         if let Some(index) = self.threads.iter().position(|t| t.id == id) {
             let mut thread = self.threads.remove(index);
             if forget && let Some(session) = &thread.session {
+                self.search_state.forget(session);
                 self.backend.forget(session, thread.chat.take());
             }
         }
@@ -620,6 +669,9 @@ impl Rozu {
                         app.open(Page::Home, cx);
                     }
                 }
+                if app.page == Page::Search {
+                    app.search_chats(cx);
+                }
                 cx.notify();
             });
         })
@@ -726,21 +778,25 @@ impl Rozu {
 
 impl Render for Rozu {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.focus_page {
+            window.focus(&self.focus_handle(cx));
+            self.focus_page = false;
+        }
         self.viewport_h = window.viewport_size().height.into();
-        let side = if self.settings.provider.is_some() {
-            270.
-        } else {
-            0.
-        };
-        let main_w = f32::from(window.viewport_size().width) - side;
-        self.text_w = main_w.min(760.) - 56.;
+        let viewport_w = f32::from(window.viewport_size().width);
+        let first_run = self.settings.provider.is_none();
+        self.compact = viewport_w < 900.;
+        let main_w = viewport_w - sidebar_width(viewport_w, first_run);
+        self.text_w = (main_w.min(760.) - 56.).max(1.);
         let main = match self.page {
-            Page::Thread(id) => self.thread_page(id, cx).into_any_element(),
+            Page::Thread(id) => self.thread_page(id, window, cx).into_any_element(),
             Page::Home => self.home_page(cx).into_any_element(),
             Page::Setup => self.setup_page(cx).into_any_element(),
+            Page::Search => self.search_page(cx).into_any_element(),
+            Page::Customize => self.customize_page(cx).into_any_element(),
         };
-        let first_run = self.settings.provider.is_none();
         div()
+            .track_focus(&self.page_focus)
             .size_full()
             .relative()
             .flex()
@@ -748,8 +804,37 @@ impl Render for Rozu {
             .text_color(rgb(INK))
             .font_family(".SystemUIFont")
             .text_size(px(15.))
-            .when(!first_run, |d| d.child(self.sidebar(cx)))
+            .when(!first_run && !self.compact, |d| d.child(self.sidebar(cx)))
+            .when(!first_run && self.compact, |d| {
+                d.child(self.compact_sidebar(cx))
+            })
             .child(main)
+            .when(!first_run && self.compact && self.sidebar_open, |d| {
+                d.child(
+                    deferred(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .size_full()
+                            .flex()
+                            .occlude()
+                            .child(self.sidebar(cx))
+                            .child(
+                                div()
+                                    .id("close-sidebar")
+                                    .flex_1()
+                                    .h_full()
+                                    .bg(gpui::rgba(0x00000066))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.sidebar_open = false;
+                                        cx.notify();
+                                    })),
+                            ),
+                    )
+                    .with_priority(3),
+                )
+            })
             .when(self.menu, |d| {
                 d.child(
                     deferred(
@@ -762,7 +847,7 @@ impl Render for Rozu {
                             .occlude()
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.menu = false;
-                                window.focus(&this.composer.focus_handle(cx));
+                                window.focus(&this.focus_handle(cx));
                                 cx.notify();
                             })),
                     )
@@ -774,7 +859,11 @@ impl Render for Rozu {
 
 impl Focusable for Rozu {
     fn focus_handle(&self, cx: &App) -> FocusHandle {
-        self.composer.focus_handle(cx)
+        match self.page {
+            Page::Home | Page::Thread(_) => self.composer.focus_handle(cx),
+            Page::Search => self.chat_search.focus_handle(cx),
+            Page::Setup | Page::Customize => self.page_focus.clone(),
+        }
     }
 }
 
@@ -810,6 +899,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn compact_navigation_keeps_a_readable_main_pane() {
+        for (width, expected_sidebar) in [(560., 88.), (899., 88.), (900., 270.), (1600., 270.)] {
+            assert_eq!(sidebar_width(width, false), expected_sidebar);
+            assert!(width - sidebar_width(width, false) >= 472.);
+            assert_eq!(sidebar_width(width, true), 0.);
+        }
+    }
+
+    #[test]
     fn output_follows_only_the_visible_chat_at_the_bottom() {
         for (page, offset, maximum, expected) in [
             (Page::Thread(0), 0., 0., true),
@@ -820,6 +918,8 @@ mod tests {
             (Page::Thread(1), -100., 100., false),
             (Page::Home, 0., 0., false),
             (Page::Setup, 0., 0., false),
+            (Page::Search, 0., 0., false),
+            (Page::Customize, 0., 0., false),
         ] {
             assert_eq!(follows_output(page, 0, offset, maximum), expected);
         }

@@ -5,10 +5,9 @@ use super::*;
 impl Rozu {
     pub(super) fn sidebar(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let nav = [
-            ("chat", "New Chat"),
-            ("search", "Search"),
-            ("bot", "Automations"),
-            ("blocks", "Customize"),
+            ("chat", "New Chat", Page::Home),
+            ("search", "Search", Page::Search),
+            ("blocks", "Customize", Page::Customize),
         ];
         let (repos, folders): (Vec<PathBuf>, Vec<PathBuf>) = self
             .settings
@@ -26,6 +25,7 @@ impl Rozu {
             .collect();
         let setup = self.page == Page::Setup;
         div()
+            .id("full-sidebar")
             .w(px(270.))
             .flex_none()
             .flex()
@@ -35,14 +35,23 @@ impl Rozu {
             .border_color(rgb(LINE))
             .px_2()
             .pb_2()
-            .child(drag_bar())
-            .children(nav.into_iter().map(|(i, label)| {
-                let on = label == "New Chat" && self.page == Page::Home;
+            .child(drag_bar().justify_end().pr_2().when(self.compact, |d| {
+                d.child(
+                    button("hide-projects", "Close", false).on_click(cx.listener(
+                        |this, _, _, cx| {
+                            this.sidebar_open = false;
+                            cx.notify();
+                        },
+                    )),
+                )
+            }))
+            .children(nav.into_iter().map(|(i, label, page)| {
+                let on = self.page == page;
                 row(label, i, label)
                     .when(on, |r| r.bg(rgb(RAISE)))
-                    .when(label == "New Chat", |r| {
-                        r.on_click(cx.listener(|this, _, _, cx| this.open(Page::Home, cx)))
-                    })
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.navigate(page, window, cx);
+                    }))
             }))
             .child(
                 div()
@@ -65,7 +74,71 @@ impl Rozu {
                     .id("account")
                     .cursor_pointer()
                     .when(setup, |r| r.bg(rgb(RAISE)))
-                    .on_click(cx.listener(|this, _, _, cx| this.setup(cx))),
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.setup(cx);
+                        window.focus(&this.page_focus);
+                    })),
+            )
+    }
+
+    fn navigate(&mut self, page: Page, window: &mut Window, cx: &mut Context<Self>) {
+        if page == Page::Search {
+            self.open_search(window, cx);
+        } else {
+            self.open(page, cx);
+            window.focus(&self.focus_handle(cx));
+        }
+    }
+
+    pub(super) fn compact_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .id("compact-sidebar")
+            .w(px(88.))
+            .h_full()
+            .flex_none()
+            .flex()
+            .flex_col()
+            .bg(rgb(SIDE))
+            .border_r_1()
+            .border_color(rgb(LINE))
+            .px_2()
+            .pb_2()
+            .child(drag_bar())
+            .children(
+                [
+                    ("chat", "New chat", Page::Home),
+                    ("search", "Search", Page::Search),
+                    ("blocks", "Customize", Page::Customize),
+                ]
+                .into_iter()
+                .map(|(i, label, page)| {
+                    rail_button(label, i, label)
+                        .when(self.page == page, |d| d.bg(rgb(RAISE)))
+                        .on_click(
+                            cx.listener(move |this, _, window, cx| this.navigate(page, window, cx)),
+                        )
+                }),
+            )
+            .child(
+                rail_button("show-projects", "folder", "Projects").on_click(cx.listener(
+                    |this, _, _, cx| {
+                        this.sidebar_open = !this.sidebar_open;
+                        cx.notify();
+                    },
+                )),
+            )
+            .child(
+                rail_button("add-project-compact", "plus", "Add folder")
+                    .on_click(cx.listener(|this, _, _, cx| this.add_project(cx))),
+            )
+            .child(div().flex_1())
+            .child(
+                rail_button("account-compact", "gear", "Your AI")
+                    .when(self.page == Page::Setup, |d| d.bg(rgb(RAISE)))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.setup(cx);
+                        window.focus(&this.page_focus);
+                    })),
             )
     }
 
@@ -181,6 +254,23 @@ impl Rozu {
             .relative()
             .on_click(cx.listener(move |this, _, _, cx| this.open(Page::Thread(id), cx)))
     }
+}
+
+fn rail_button(id: &'static str, i: &'static str, label: &'static str) -> Stateful<Div> {
+    div()
+        .id(id)
+        .w_full()
+        .flex_none()
+        .flex()
+        .flex_col()
+        .items_center()
+        .gap_1()
+        .py_2()
+        .rounded(px(8.))
+        .cursor_pointer()
+        .hover(|s| s.bg(rgb(RAISE)))
+        .child(icon(i, INK2))
+        .child(div().text_size(px(10.)).text_color(rgb(INK2)).child(label))
 }
 
 pub(super) fn account() -> Div {

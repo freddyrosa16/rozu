@@ -18,6 +18,8 @@ pub(super) fn chip(
 ) -> Stateful<Div> {
     div()
         .id(id)
+        .max_w_full()
+        .flex_none()
         .border_1()
         .border_color(rgb(if on { INK } else { LINE }))
         .when(on, |b| b.bg(rgb(INK)).text_color(rgb(BG)))
@@ -59,6 +61,7 @@ pub(super) fn logo(provider: &str) -> Svg {
 pub(super) fn column() -> Div {
     div()
         .w_full()
+        .min_w_0()
         .max_w(px(760.))
         .mx_auto()
         .px(px(28.))
@@ -98,13 +101,14 @@ pub(super) fn row(
         .items_center()
         .gap_3()
         .w_full()
+        .min_w_0()
         .px_2()
         .py(px(6.))
         .rounded(px(8.))
         .cursor_pointer()
         .hover(|s| s.bg(rgb(RAISE)))
         .child(icon(i, INK2))
-        .child(label.into())
+        .child(div().min_w_0().truncate().child(label.into()))
 }
 
 pub(super) fn button(

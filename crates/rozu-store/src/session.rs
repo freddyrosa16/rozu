@@ -250,14 +250,39 @@ impl SessionStore {
         query: Option<&str>,
         limit: usize,
     ) -> Result<Vec<SessionSummary>, StoreError> {
+        self.list_matching(workspace, query, limit, false)
+    }
+
+    /// Literal title substring or id prefix; ASCII case-insensitive, newest first.
+    pub fn search_titles(
+        &self,
+        workspace: Option<&Path>,
+        query: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<SessionSummary>, StoreError> {
+        self.list_matching(workspace, query, limit, true)
+    }
+
+    fn list_matching(
+        &self,
+        workspace: Option<&Path>,
+        query: Option<&str>,
+        limit: usize,
+        literal: bool,
+    ) -> Result<Vec<SessionSummary>, StoreError> {
         let conn = self.index()?;
-        let mut stmt = conn.prepare(
+        let predicate = if literal {
+            "instr(lower(title), lower(?2)) > 0 OR substr(lower(id), 1, length(?2)) = lower(?2)"
+        } else {
+            "title LIKE '%' || ?2 || '%' OR id LIKE ?2 || '%'"
+        };
+        let mut stmt = conn.prepare(&format!(
             "SELECT id, workspace, provider, model, title, created, updated, messages
              FROM sessions
              WHERE messages > 0 AND (?1 IS NULL OR workspace = ?1)
-               AND (?2 IS NULL OR title LIKE '%' || ?2 || '%' OR id LIKE ?2 || '%')
-             ORDER BY updated DESC, id DESC LIMIT ?3",
-        )?;
+               AND (?2 IS NULL OR {predicate})
+             ORDER BY updated DESC, id DESC LIMIT ?3"
+        ))?;
         let rows = stmt.query_map(
             params![
                 workspace.map(|w| w.display().to_string()),

@@ -100,6 +100,110 @@ fn forgetting_waits_for_the_final_save() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+#[test]
+fn search_finds_older_chats_across_only_added_projects() {
+    let dir = std::env::temp_dir().join(format!("rozu-app-search-{}", new_session_id()));
+    let store = SessionStore::open(dir.join("sessions")).unwrap();
+    let roots: Vec<_> = ["one", "two", "outside"]
+        .map(|name| {
+            let root = dir.join(name);
+            std::fs::create_dir_all(&root).unwrap();
+            root.canonicalize().unwrap()
+        })
+        .into();
+    let save = |root: &Path, id: &str, title: &str| {
+        let mut writer = store
+            .create(SessionMeta {
+                id: id.into(),
+                workspace: root.to_path_buf(),
+                provider: "anthropic".into(),
+                model: "test".into(),
+                created: unix_now(),
+            })
+            .unwrap();
+        let mut session = Session::new();
+        session.messages.push(Message::user(title));
+        writer.sync(&session).unwrap();
+    };
+    save(&roots[0], "000-old", "Find the hidden needle");
+    for n in 0..205 {
+        save(&roots[0], &format!("recent-{n:03}"), "An unrelated title");
+    }
+    save(&roots[1], "second-project", "Another NEEDLE");
+    save(&roots[2], "outside-project", "Private needle");
+    let backend = Backend {
+        rt: tokio::runtime::Runtime::new().unwrap(),
+        sessions: Some(store),
+    };
+    assert!(
+        backend
+            .saved_chats(&roots[0])
+            .iter()
+            .all(|row| row.id != "000-old")
+    );
+    let added = vec![roots[0].clone(), roots[1].clone(), roots[0].join(".")];
+    let search = |query: &str| {
+        backend
+            .rt
+            .block_on(backend.search_chats(added.clone(), query.into()))
+            .unwrap()
+            .unwrap()
+    };
+    let matches = search(" needle ");
+    assert_eq!(matches.len(), 2);
+    assert!(matches.iter().any(|row| row.id == "000-old"));
+    assert!(matches.iter().any(|row| row.id == "second-project"));
+    assert_eq!(search("000-")[0].id, "000-old");
+    assert!(search("nothing matches").is_empty());
+    let recent = search("");
+    assert_eq!(recent.len(), SEARCH_LIMIT);
+    assert_eq!(
+        recent
+            .iter()
+            .map(|row| &row.id)
+            .collect::<HashSet<_>>()
+            .len(),
+        recent.len()
+    );
+    assert!(recent.iter().all(|row| added.contains(&row.workspace)));
+    assert!(
+        recent
+            .windows(2)
+            .all(|rows| { (rows[0].updated, &rows[0].id) >= (rows[1].updated, &rows[1].id) })
+    );
+    assert!(
+        backend
+            .rt
+            .block_on(backend.search_chats(Vec::new(), String::new()))
+            .unwrap()
+            .unwrap()
+            .is_empty()
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn search_reports_an_unavailable_or_broken_store() {
+    let mut backend = Backend {
+        rt: tokio::runtime::Runtime::new().unwrap(),
+        sessions: None,
+    };
+    let result = backend
+        .rt
+        .block_on(backend.search_chats(vec![PathBuf::from(".")], String::new()))
+        .unwrap();
+    assert!(result.unwrap_err().to_string().contains("unavailable"));
+    let dir = std::env::temp_dir().join(format!("rozu-app-search-error-{}", new_session_id()));
+    backend.sessions = Some(SessionStore::open(&dir).unwrap());
+    std::fs::write(dir.join("index.sqlite"), "broken index").unwrap();
+    let result = backend
+        .rt
+        .block_on(backend.search_chats(vec![dir.clone()], String::new()))
+        .unwrap();
+    assert!(result.is_err());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 type RecordedRequests = Arc<Mutex<Vec<(ChatRequest, Option<String>)>>>;
 
 struct RecordingProvider {
