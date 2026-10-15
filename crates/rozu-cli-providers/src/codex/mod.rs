@@ -60,6 +60,13 @@ pub const ROZU_TOOLS_APPROVAL_MODE: &str = "approve";
 
 /// Removed from Codex's environment so it uses its own (ChatGPT) login, not an API key.
 pub(crate) const ENV_REMOVE: &[&str] = &["OPENAI_API_KEY", "CODEX_API_KEY"];
+/// Codex filters its MCP subprocess environment; keep rozu's logging overrides together.
+const MCP_ENV_VARS: &[&str] = &[
+    "ROZU_AUDIT_LOG",
+    "ROZU_LOG_FILE",
+    "ROZU_LOG_STDERR",
+    "RUST_LOG",
+];
 
 /// Added to the developer instructions so Codex knows about rozu's tools.
 const TOOL_NOTE: &str = "In this session rozu's tools are available from the `rozu` MCP \
@@ -185,6 +192,14 @@ impl CodexAppServerProvider {
                     .mcp_args
                     .iter()
                     .map(|a| toml_string(a))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            format!(
+                "mcp_servers.{server}.env_vars=[{}]",
+                MCP_ENV_VARS
+                    .iter()
+                    .map(|name| toml_string(name))
                     .collect::<Vec<_>>()
                     .join(", ")
             ),

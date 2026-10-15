@@ -155,15 +155,17 @@ impl Backend {
         })
     }
 
-    /// The models the installed Codex CLI offers; empty when it can't say.
+    /// The models the installed Codex CLI offers; `None` when it can't say.
     pub fn codex_models(&self) -> oneshot::Receiver<Live> {
         let (tx, rx) = oneshot::channel();
         self.rt.spawn(async move {
             let models = match find_codex_binary().filter(|p| p.exists()) {
-                Some(bin) => list_models(&bin).await.unwrap_or_default(),
-                None => Vec::new(),
+                Some(bin) => list_models(&bin).await.ok(),
+                None => None,
             };
-            let _ = tx.send(models.into_iter().map(|m| (m.id, m.display_name)).collect());
+            let _ = tx.send(
+                models.map(|models| models.into_iter().map(|m| (m.id, m.display_name)).collect()),
+            );
         });
         rx
     }

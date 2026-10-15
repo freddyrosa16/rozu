@@ -145,6 +145,17 @@ async fn handshake_and_text_turn() {
         override_value(args, "mcp_servers.rozu.args"),
         Some("[\"mcp-serve\", \"--provider\", \"codex\"]")
     );
+    let forwarded: Vec<String> =
+        serde_json::from_str(override_value(args, "mcp_servers.rozu.env_vars").unwrap()).unwrap();
+    assert_eq!(
+        forwarded,
+        [
+            "ROZU_AUDIT_LOG",
+            "ROZU_LOG_FILE",
+            "ROZU_LOG_STDERR",
+            "RUST_LOG"
+        ]
+    );
     // Codex doesn't ask before rozu's own tools (rozu gates them); only that server.
     assert_eq!(
         override_value(args, "mcp_servers.rozu.default_tools_approval_mode"),
@@ -197,7 +208,10 @@ async fn handshake_and_text_turn() {
         Path::new(cwd.trim()).canonicalize().unwrap(),
         fake.workspace().root()
     );
-    assert_eq!(fake.read("log/env.txt").trim(), "OPENAI_API_KEY=unset");
+    assert_eq!(
+        fake.read("log/env.txt").trim(),
+        "OPENAI_API_KEY=unset\nCODEX_API_KEY=unset"
+    );
 }
 
 #[tokio::test]

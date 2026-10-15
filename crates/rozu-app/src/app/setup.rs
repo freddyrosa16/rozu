@@ -7,6 +7,8 @@ impl Rozu {
     /// Pick the AI you pay for, sign in through its CLI, pick a model, effort and folder.
     pub(super) fn setup_page(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let first_run = self.settings.provider.is_none();
+        // The setup column is capped at 620 px with 28 px of padding on each side.
+        let text_w = self.text_w.clamp(80., 564.);
         let plans: Vec<AnyElement> = PLANS
             .iter()
             .map(|plan| {
@@ -82,6 +84,7 @@ impl Rozu {
                     .overflow_y_scroll()
                     .child(
                         column()
+                            .w(px(text_w + 56.))
                             .max_w(px(620.))
                             .gap(px(14.))
                             .py(px(24.))
@@ -90,7 +93,7 @@ impl Rozu {
                             } else {
                                 "Your AI"
                             }))
-                            .child(div().text_color(rgb(INK2)).child(
+                            .child(div().w(px(text_w)).text_color(rgb(INK2)).child(
                                 "Pick the AI you already pay for. rozu works through its official \
                              app, so your plan covers it and rozu never sees your password.",
                             ))
@@ -116,9 +119,13 @@ impl Rozu {
                                     ),
                             )
                             .when(action.is_some(), |d| {
-                                d.child(div().text_size(px(14.)).text_color(rgb(INK3)).child(
-                                    "This opens Terminal. Finish there, then press Check again.",
-                                ))
+                                d.child(
+                                    div()
+                                        .w(px(text_w))
+                                        .text_size(px(14.))
+                                        .text_color(rgb(INK3))
+                                        .child("This opens Terminal. Finish there, then press Check again."),
+                                )
                             })
                             .child(label_text("Model"))
                             .child(div().flex().flex_wrap().gap_1().children(
@@ -144,6 +151,7 @@ impl Rozu {
                             .child(self.approval_chips(cx))
                             .child(
                                 div()
+                                    .w(px(text_w))
                                     .text_size(px(14.))
                                     .text_color(rgb(INK3))
                                     .child(approval_text(self.approval)),

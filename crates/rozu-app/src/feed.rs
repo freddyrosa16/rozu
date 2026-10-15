@@ -20,7 +20,7 @@ pub struct Step {
     pub id: String,
     pub state: ActivityState,
     pub label: String,
-    /// Set when the step ends: what it did, in the past tense.
+    /// Set when the step ends: its confirmed result or an interruption.
     pub done: Option<String>,
     pub failed: bool,
     started: Instant,
@@ -77,30 +77,33 @@ impl Feed {
                             .as_ref()
                             .map_or(ActivityState::Thinking, |a| a.state);
                         let label = activity.map_or(name.clone(), |a| a.label);
-                        let mut step = Step::new(id, state, &label);
-                        step.done = Some(past(&label));
-                        feed.items.push(Item::Step(step));
+                        feed.items.push(Item::Step(Step::new(id, state, &label)));
                     }
                     (
                         _,
                         ContentPart::ToolResult {
                             call_id,
                             output,
-                            is_error: true,
+                            is_error,
                         },
                     ) => {
                         if let Some(step) = feed.items.iter_mut().rev().find_map(|i| match i {
                             Item::Step(s) if s.id == *call_id => Some(s),
                             _ => None,
                         }) {
-                            step.failed = true;
-                            step.done = Some(output.lines().next().unwrap_or("Failed").to_owned());
+                            step.failed = *is_error;
+                            step.done = Some(if *is_error {
+                                output.lines().next().unwrap_or("Failed").to_owned()
+                            } else {
+                                past(&step.label)
+                            });
                         }
                     }
                     _ => {}
                 }
             }
         }
+        feed.end_turn();
         if !feed.items.is_empty() {
             feed.tracker.apply(&ActivityEvent::TurnCompleted);
         }
@@ -224,7 +227,10 @@ impl Feed {
         self.running = false;
         for item in &mut self.items {
             match item {
-                Item::Step(s) if s.done.is_none() => s.done = Some(past(&s.label)),
+                Item::Step(s) if s.done.is_none() => {
+                    s.failed = true;
+                    s.done = Some(format!("Interrupted: {}", s.label));
+                }
                 Item::Ask(a) if a.answer.is_none() => a.answer = Some("Expired"),
                 _ => {}
             }
@@ -315,13 +321,42 @@ mod tests {
     }
 
     #[test]
-    fn a_cancelled_turn_closes_open_steps() {
+    fn ending_a_turn_never_claims_an_unfinished_tool_succeeded() {
+        for outcome in [
+            TurnOutcome::Cancelled,
+            TurnOutcome::Completed,
+            TurnOutcome::MaxSteps,
+        ] {
+            let mut feed = Feed::default();
+            feed.send("hi".into());
+            feed.apply(tool("read", "read_file", r#"{"path":"README.md"}"#));
+            feed.apply(finished("read", false));
+            feed.apply(tool("write", "write_file", r#"{"path":"cancelled.txt"}"#));
+            feed.apply(AgentEvent::TurnFinished(outcome));
+
+            assert_eq!(steps(&feed)[1].1, Some("Read README.md"));
+            assert_eq!(
+                steps(&feed)[2].1,
+                Some("Interrupted: Editing cancelled.txt")
+            );
+            assert!(feed.items.iter().any(|item| matches!(item,
+                Item::Step(step) if step.id == "write" && step.failed)));
+            assert!(!feed.running);
+            if outcome == TurnOutcome::Cancelled {
+                assert!(matches!(feed.items.last(), Some(Item::Note(n)) if n == "Stopped"));
+            }
+        }
+    }
+
+    #[test]
+    fn a_failed_turn_marks_its_unfinished_tool_interrupted() {
         let mut feed = Feed::default();
         feed.send("hi".into());
-        feed.apply(tool("a", "grep", r#"{"pattern":"x"}"#));
-        feed.apply(AgentEvent::TurnFinished(TurnOutcome::Cancelled));
-        assert_eq!(steps(&feed)[1].1, Some("Searched \"x\""));
-        assert!(matches!(feed.items.last(), Some(Item::Note(n)) if n == "Stopped"));
+        feed.apply(tool("a", "shell", r#"{"command":"sleep 10"}"#));
+        feed.fail("connection lost".into(), true);
+        assert_eq!(steps(&feed)[1].1, Some("Interrupted: Running sleep 10"));
+        assert!(matches!(&feed.items[2], Item::Step(step) if step.failed));
+        assert!(!feed.running);
     }
 
     #[test]
@@ -345,6 +380,11 @@ mod tests {
                     name: "shell".into(),
                     args_json: r#"{"command":"cargo test"}"#.into(),
                 },
+                ContentPart::ToolCall {
+                    id: "c".into(),
+                    name: "write_file".into(),
+                    args_json: r#"{"path":"cancelled.txt"}"#.into(),
+                },
             ],
         ));
         session
@@ -361,9 +401,14 @@ mod tests {
             steps(&feed),
             [
                 (ActivityState::Reading, Some("Read PLAN.md")),
-                (ActivityState::Running, Some("boom"))
+                (ActivityState::Running, Some("boom")),
+                (
+                    ActivityState::Editing,
+                    Some("Interrupted: Editing cancelled.txt")
+                ),
             ]
         );
+        assert!(matches!(&feed.items[4], Item::Step(step) if step.failed));
         assert!(matches!(feed.items.last(), Some(Item::Text(t)) if t == "Done."));
         assert!(!feed.running);
         assert_eq!(feed.state(), ActivityState::Done);

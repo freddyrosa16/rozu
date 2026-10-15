@@ -45,7 +45,10 @@ if [ "$last" != app-server ]; then
     echo "fake codex: expected app-server, got $*" >&2
     exit 2
 fi
-echo "OPENAI_API_KEY=${OPENAI_API_KEY:-unset}" >"$log/env.txt"
+{
+    [ -z "${OPENAI_API_KEY+x}" ] && echo "OPENAI_API_KEY=unset" || echo "OPENAI_API_KEY=set"
+    [ -z "${CODEX_API_KEY+x}" ] && echo "CODEX_API_KEY=unset" || echo "CODEX_API_KEY=set"
+} >"$log/env.txt"
 cwd=$(pwd)
 echo "$cwd" >"$log/cwd.txt"
 echo "fake codex: app-server starting (stderr noise for the log file)" >&2
