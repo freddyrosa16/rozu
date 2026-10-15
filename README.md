@@ -40,6 +40,11 @@ continues them): reopen one from the sidebar after a restart and it carries on w
 it (its saved history goes too); removing a project only hides its chats, and they come back when the folder
 is added again. Removing projects leaves their project files intact.
 
+Search finds saved chat titles and session IDs across your added projects, showing the 100 most recent
+matches. Customize saves the default model, effort and approval mode; approval changes apply when a chat
+starts or reopens. Narrow windows switch to a compact navigation rail, with projects available in a drawer.
+The minimum window size is 560 × 440 points.
+
 ## Try the CLI
 ```sh
 cargo build --locked --release -p rozu-cli

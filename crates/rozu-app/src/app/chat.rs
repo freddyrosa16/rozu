@@ -4,7 +4,12 @@
 use super::*;
 
 impl Rozu {
-    pub(super) fn thread_page(&mut self, id: usize, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn thread_page(
+        &mut self,
+        id: usize,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let Some(thread) = self.thread_ref(id) else {
             return div().flex_1();
         };
@@ -25,7 +30,7 @@ impl Rozu {
                     .w_full()
                     .min_w_0()
                     .mt(px(gap))
-                    .child(self.item(id, i, cx))
+                    .child(self.item(id, i, window, cx))
                     .into_any_element()
             })
             .collect();
@@ -36,6 +41,7 @@ impl Rozu {
         div()
             .flex_1()
             .min_w_0()
+            .min_h_0()
             .flex()
             .flex_col()
             .child(
@@ -56,13 +62,34 @@ impl Rozu {
                     .min_w_0()
                     .overflow_y_scroll()
                     .overflow_x_hidden()
+                    .map(|mut feed| {
+                        feed.style().restrict_scroll_to_axis = Some(true);
+                        feed
+                    })
                     .track_scroll(&self.scroll)
-                    .child(column().pt(px(8.)).pb(px(24.)).children(items)),
+                    .child(
+                        column()
+                            .w(px(self.text_w + 56.))
+                            .pt(px(8.))
+                            .pb(px(24.))
+                            .children(items),
+                    ),
             )
-            .child(column().pb(px(16.)).child(self.composer_box(false, cx)))
+            .child(
+                column()
+                    .flex_none()
+                    .pb(px(16.))
+                    .child(self.composer_box(false, cx)),
+            )
     }
 
-    pub(super) fn item(&self, id: usize, i: usize, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn item(
+        &self,
+        id: usize,
+        i: usize,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let Some(thread) = self.thread_ref(id) else {
             return div().into_any_element();
         };
@@ -75,15 +102,19 @@ impl Rozu {
                 .px(px(18.))
                 .py(px(12.))
                 .w(px(self.text_w))
-                .child(text.clone())
+                .child(div().w(px((self.text_w - 38.).max(1.))).child(text.clone()))
                 .into_any_element(),
-            Item::Text(text) => rich(text, self.text_w).into_any_element(),
+            Item::Text(text) => div()
+                .id(("reply", i))
+                .child(rich(text, self.text_w, window))
+                .into_any_element(),
             Item::Note(text) => div()
+                .w(px(self.text_w))
                 .text_color(rgb(INK3))
                 .text_size(px(14.))
                 .child(text.clone())
                 .into_any_element(),
-            Item::Step(step) => step_row(i, step).into_any_element(),
+            Item::Step(step) => step_row(i, step, self.text_w).into_any_element(),
             Item::Ask(ask) => self.ask_card(id, i, ask, cx).into_any_element(),
         }
     }
@@ -129,8 +160,8 @@ impl Rozu {
         ));
         // Same fixed width as the other messages: inside the scrolling feed GPUI offers text a
         // width wider than the column, so a long command or the button row runs off the window.
-        let text_w = self.text_w.max(160.);
-        let inner = (text_w - 32.).max(120.);
+        let text_w = self.text_w.max(1.);
+        let inner = (text_w - 34.).max(1.);
         div()
             .w(px(text_w))
             .max_w_full()
@@ -152,26 +183,25 @@ impl Rozu {
                     .gap_2()
                     .min_w_0()
                     .child(icon("ask", if ask.answer.is_none() { WARN } else { INK3 }))
-                    .child(div().min_w_0().w(px(inner - 28.)).child(title)),
+                    .child(div().min_w_0().w(px((inner - 28.).max(1.))).child(title)),
             )
             .child(
                 div()
                     .id(("ask-preview", i))
                     .w(px(inner))
-                    .max_h(px(168.))
+                    .max_h(px((self.viewport_h * 0.3).clamp(80., 168.)))
                     .overflow_y_scroll()
-                    .overflow_x_scroll()
+                    .overflow_x_hidden()
                     .bg(rgb(BG))
                     .rounded(px(8.))
                     .child(
                         div()
-                            .min_w(px(inner))
+                            .w(px(inner))
                             .px(px(10.))
                             .py(px(8.))
                             .font_family("Menlo")
                             .text_size(px(13.))
-                            .whitespace_nowrap()
-                            .child(preview),
+                            .child(div().w(px((inner - 20.).max(1.))).child(preview)),
                     ),
             )
             .child(
@@ -193,6 +223,7 @@ impl Rozu {
                         .enumerate()
                         .map(|(n, (label, decision, primary))| {
                             button(("ask", n), label, primary)
+                                .max_w(px(inner))
                                 .flex_none()
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.answer(id, i, decision.clone(), cx)
@@ -203,7 +234,7 @@ impl Rozu {
     }
 }
 
-pub(super) fn step_row(i: usize, step: &Step) -> Div {
+pub(super) fn step_row(i: usize, step: &Step, w: f32) -> Div {
     let (name, color) = match (&step.done, step.failed) {
         (Some(_), true) => ("fail", BAD),
         (Some(_), false) => ("check", INK3),
@@ -218,8 +249,9 @@ pub(super) fn step_row(i: usize, step: &Step) -> Div {
     };
     let mark = icon(name, color).size(px(15.));
     let line = div()
+        .w(px(w))
         .flex()
-        .items_center()
+        .items_start()
         .gap_2()
         .text_color(rgb(INK2))
         .child(match step.done {
@@ -234,24 +266,27 @@ pub(super) fn step_row(i: usize, step: &Step) -> Div {
                 )
                 .into_any_element(),
         });
+    let text = div().w(px((w - 23.).max(1.))).min_w_0();
     match &step.done {
-        None => line.child(step.label.clone()),
-        Some(done) if step.failed => line.text_color(rgb(BAD)).child(done.clone()),
+        None => line.child(text.child(step.label.clone())),
+        Some(done) if step.failed => line.child(text.text_color(rgb(BAD)).child(done.clone())),
         Some(done) => {
-            let (verb, rest) = done.split_once(' ').unwrap_or((done, ""));
-            line.child(
-                div()
-                    .flex()
-                    .gap_1()
-                    .child(verb.to_owned())
-                    .child(div().text_color(rgb(INK3)).child(rest.to_owned())),
-            )
+            let verb = done.split_once(' ').map_or(done.as_str(), |(verb, _)| verb);
+            line.child(text.text_color(rgb(INK3)).child(
+                StyledText::new(done.clone()).with_highlights([(
+                    0..verb.len(),
+                    HighlightStyle {
+                        color: Some(rgb(INK2).into()),
+                        ..Default::default()
+                    },
+                )]),
+            ))
         }
     }
 }
 
 /// The agent's reply, Markdown drawn as paragraphs, headings, lists and code blocks.
-pub(super) fn rich(text: &str, w: f32) -> Div {
+pub(super) fn rich(text: &str, w: f32, window: &Window) -> Div {
     let blocks = markdown::parse(text);
     let marker_w = blocks
         .iter()
@@ -266,7 +301,7 @@ pub(super) fn rich(text: &str, w: f32) -> Div {
         .flex_col()
         .gap(px(10.))
         .line_height(relative(1.6))
-        .children(blocks.into_iter().map(|block| {
+        .children(blocks.into_iter().enumerate().map(|(i, block)| {
             match block {
                 Block::Para(t) => div().w(px(w)).child(spans(t)),
                 Block::Heading(t) => div()
@@ -288,22 +323,57 @@ pub(super) fn rich(text: &str, w: f32) -> Div {
                             .child(marker),
                     )
                     .child(div().w(px((w - marker_w - 10.).max(0.))).child(spans(t))),
-                Block::Code(code) => div()
-                    .w(px(w))
-                    .overflow_hidden()
-                    .bg(rgb(CODE_BG))
-                    .border_1()
-                    .border_color(rgb(LINE))
-                    .rounded(px(10.))
-                    .px(px(14.))
-                    .py(px(10.))
-                    .font_family("Menlo")
-                    .text_size(px(13.))
-                    .line_height(relative(1.5))
-                    .text_color(rgb(INK2))
-                    .child(code),
+                Block::Code(code) => div().w(px(w)).child(
+                    div()
+                        .id(("code", i))
+                        .w(px(w))
+                        .overflow_x_scroll()
+                        .map(|mut code| {
+                            code.style().restrict_scroll_to_axis = Some(true);
+                            code
+                        })
+                        .bg(rgb(CODE_BG))
+                        .border_1()
+                        .border_color(rgb(LINE))
+                        .rounded(px(10.))
+                        .child(
+                            div()
+                                .w(px(code_content_width(&code, w, window)))
+                                .px(px(14.))
+                                .py(px(10.))
+                                .font_family("Menlo")
+                                .text_size(px(13.))
+                                .line_height(relative(1.5))
+                                .text_color(rgb(INK2))
+                                .whitespace_nowrap()
+                                .child(code),
+                        ),
+                ),
             }
         }))
+}
+
+fn code_content_width(code: &str, viewport_w: f32, window: &Window) -> f32 {
+    let longest = code
+        .lines()
+        .map(|line| {
+            let run = gpui::TextRun {
+                len: line.len(),
+                font: gpui::font("Menlo"),
+                color: rgb(INK2).into(),
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            };
+            f32::from(
+                window
+                    .text_system()
+                    .shape_line(line.to_owned().into(), px(13.), &[run], None)
+                    .width,
+            )
+        })
+        .fold(0., f32::max);
+    (viewport_w - 2.).max(longest.ceil() + 28.)
 }
 
 pub(super) fn spans(t: markdown::Inline) -> StyledText {

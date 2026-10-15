@@ -12,7 +12,7 @@ impl Rozu {
         let picker = div()
             .relative()
             .flex_none()
-            .max_w(px(240.))
+            .max_w(px((self.text_w - 86.).clamp(1., 240.)))
             .min_w_0()
             .child(
                 div()
@@ -63,8 +63,8 @@ impl Rozu {
                     this.stop(cx);
                 } else {
                     let composer = this.composer.clone();
-                    window.dispatch_action(Box::new(composer::Submit), cx);
                     window.focus(&composer.focus_handle(cx));
+                    window.dispatch_action(Box::new(composer::Submit), cx);
                 }
             }));
         // A little under the bar's inner width, so the text wraps before it meets the edge.
@@ -79,7 +79,7 @@ impl Rozu {
             .id("composer-text")
             .w_full()
             .min_w_0()
-            .max_h(px(160.))
+            .max_h(px((self.viewport_h * 0.25).clamp(64., 160.)))
             .overflow_y_scroll()
             .overflow_x_hidden()
             .child(self.composer.clone());
@@ -144,6 +144,7 @@ impl Rozu {
     /// the effort for the chosen model. Kept inside the window.
     pub(super) fn model_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let query = self.search.read(cx).text.clone();
+        let (menu_w, menu_h) = menu_size(self.text_w, self.viewport_h);
         let models = self.matches(&query);
         let mut list = div()
             .id("model-list")
@@ -165,6 +166,7 @@ impl Rozu {
             list = list.child(
                 div()
                     .id(key)
+                    .flex_none()
                     .flex()
                     .items_center()
                     .px_2()
@@ -174,19 +176,24 @@ impl Rozu {
                     .cursor_pointer()
                     .hover(|s| s.bg(rgb(LINE)))
                     .when(on, |r| r.bg(rgb(LINE)))
-                    .child(div().flex_1().truncate().child(label))
+                    .child(div().flex_1().min_w_0().truncate().child(label))
                     .when(on, |r| r.child(icon("check", INK)))
                     .on_click(cx.listener(move |this, _, _, cx| this.choose(m.clone(), cx))),
             );
         }
         if models.is_empty() {
-            list = list.child(div().p_2().text_size(px(13.)).text_color(rgb(INK3)).child(
-                if self.providers.is_empty() {
-                    "No AI is set up. Click the gear to pick one."
-                } else {
-                    "No models match."
-                },
-            ));
+            list = list.child(
+                div()
+                    .w(px(menu_w - 16.))
+                    .p_2()
+                    .text_size(px(13.))
+                    .text_color(rgb(INK3))
+                    .child(if self.providers.is_empty() {
+                        "No AI is set up. Click the gear to pick one."
+                    } else {
+                        "No models match."
+                    }),
+            );
         }
         let efforts = self
             .choice
@@ -195,8 +202,8 @@ impl Rozu {
         div()
             .id("model-menu")
             .occlude()
-            .w(px(300.))
-            .max_h(px((self.viewport_h - 120.).clamp(160., 420.)))
+            .w(px(menu_w))
+            .max_h(px(menu_h))
             .bg(rgb(RAISE))
             .border_1()
             .border_color(rgb(LINE))
@@ -206,6 +213,7 @@ impl Rozu {
             .flex_col()
             .child(
                 div()
+                    .flex_none()
                     .flex()
                     .items_center()
                     .gap_2()
@@ -221,6 +229,7 @@ impl Rozu {
             .when(!efforts.is_empty(), |d| {
                 d.child(
                     div()
+                        .flex_none()
                         .border_t_1()
                         .border_color(rgb(LINE))
                         .px_2()
@@ -245,6 +254,8 @@ impl Rozu {
         cx: &mut Context<Self>,
     ) -> Div {
         div()
+            .w_full()
+            .min_w_0()
             .flex()
             .flex_wrap()
             .gap_1()
@@ -264,6 +275,8 @@ impl Rozu {
 
     pub(super) fn approval_chips(&self, cx: &mut Context<Self>) -> Div {
         div()
+            .w_full()
+            .min_w_0()
             .flex()
             .flex_wrap()
             .gap_1()
@@ -280,10 +293,30 @@ impl Rozu {
 
 pub(super) fn menu_heading(text: &'static str) -> Div {
     div()
+        .flex_none()
         .px_2()
         .pt_2()
         .pb_1()
         .text_size(px(13.))
         .text_color(rgb(INK3))
         .child(text)
+}
+
+fn menu_size(text_w: f32, viewport_h: f32) -> (f32, f32) {
+    (text_w.clamp(1., 300.), (viewport_h - 80.).clamp(1., 420.))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn menu_fits_the_compact_and_large_content_areas() {
+        for (text_w, height) in [(416., 440.), (574., 600.), (704., 1200.), (240., 300.)] {
+            let (width, menu_height) = menu_size(text_w, height);
+            assert!(width <= text_w && width > 0.);
+            assert!(menu_height <= height - 16. && menu_height > 0.);
+        }
+        assert_eq!(menu_size(704., 1200.), (300., 420.));
+    }
 }

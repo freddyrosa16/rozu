@@ -3,6 +3,7 @@
 //! Every chat is saved through [`rozu_store::SessionStore`], like `rozu chat`, so it can be
 //! reopened after a restart.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
@@ -35,6 +36,8 @@ pub struct Backend {
     /// Saved chats; `None` when the store can't be opened (chats then live only in memory).
     sessions: Option<SessionStore>,
 }
+
+pub const SEARCH_LIMIT: usize = 100;
 
 /// A running chat: prompts go in, [`Update`]s come out on the channel given to [`Backend::start`].
 pub struct Chat {
@@ -132,6 +135,45 @@ impl Backend {
         };
         let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
         store.list(Some(&root), None, 200).unwrap_or_default()
+    }
+
+    /// Searches the saved title/id index across added projects without blocking the UI.
+    pub fn search_chats(
+        &self,
+        roots: Vec<PathBuf>,
+        query: String,
+    ) -> oneshot::Receiver<anyhow::Result<Vec<SessionSummary>>> {
+        let store = self.sessions.clone();
+        let (tx, rx) = oneshot::channel();
+        self.rt.spawn_blocking(move || {
+            let result = (|| {
+                let store = store.context("The saved chat store is unavailable.")?;
+                let query = query.trim();
+                let query = (!query.is_empty()).then_some(query);
+                let mut seen = HashSet::new();
+                let mut rows = Vec::new();
+                for root in roots {
+                    let stored_root = canonical(&root);
+                    if !seen.insert(stored_root.clone()) {
+                        continue;
+                    }
+                    rows.extend(
+                        store
+                            .search_titles(Some(&stored_root), query, SEARCH_LIMIT)?
+                            .into_iter()
+                            .map(|mut row| {
+                                row.workspace = root.clone();
+                                row
+                            }),
+                    );
+                    rows.sort_by(|a, b| b.updated.cmp(&a.updated).then(b.id.cmp(&a.id)));
+                    rows.truncate(SEARCH_LIMIT);
+                }
+                Ok(rows)
+            })();
+            let _ = tx.send(result);
+        });
+        rx
     }
 
     /// A saved chat's history, for showing it before it is continued.

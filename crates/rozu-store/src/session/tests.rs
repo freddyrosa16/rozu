@@ -135,6 +135,51 @@ fn resolve_by_prefix_last_and_workspace() {
 }
 
 #[test]
+fn title_search_matches_literal_text_and_id_prefixes() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SessionStore::open(dir.path()).unwrap();
+    let workspace = Path::new("/one");
+    for (id, title, root) in [
+        ("percent", "Finish 100% of the work", "/one"),
+        ("under_score", "Use snake_case", "/one"),
+        ("backslash", r"Review path\name", "/one"),
+        ("unicode", "Café notes", "/one"),
+        ("outside", "Finish 100% elsewhere", "/two"),
+    ] {
+        store
+            .create(meta(id, Path::new(root)))
+            .unwrap()
+            .sync(&chat(&[title]))
+            .unwrap();
+    }
+    for (query, expected) in [
+        ("%", vec!["percent"]),
+        ("_", vec!["under_score"]),
+        ("\\", vec!["backslash"]),
+        ("FINISH", vec!["percent"]),
+        ("under_", vec!["under_score"]),
+        ("afé", vec!["unicode"]),
+        ("CAFé", vec!["unicode"]),
+        ("CAFÉ", vec![]),
+        ("absent", vec![]),
+    ] {
+        let rows = store
+            .search_titles(Some(workspace), Some(query), 10)
+            .unwrap();
+        assert_eq!(
+            rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+            expected,
+            "query {query:?}"
+        );
+    }
+    assert_eq!(
+        store.search_titles(Some(workspace), None, 1).unwrap().len(),
+        1
+    );
+    assert_eq!(store.list(Some(workspace), Some("%"), 10).unwrap().len(), 4);
+}
+
+#[test]
 fn delete_removes_the_file_and_the_row() {
     let dir = tempfile::tempdir().unwrap();
     let store = SessionStore::open(dir.path()).unwrap();
