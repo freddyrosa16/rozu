@@ -40,6 +40,11 @@ classify it). Token usage, including cache reads/writes, is shown after each tur
 subscription). `ROZU_CLAUDE_BIN` points rozu at a specific `claude` binary; otherwise it looks on `PATH` and in
 `~/.local/bin`. `ANTHROPIC_API_KEY` is removed from the CLI's environment so it uses your subscription login.
 
+rozu starts Claude with `--no-session-persistence`, so these chats are not saved to Claude Code's local
+session history. A running process keeps its context between turns. After a restart, cancellation or model
+change, rozu replays its saved user/assistant messages into a fresh process; vendor-only tool results and
+reasoning are not restored.
+
 ## ChatGPT on your subscription (`codex`)
 With a ChatGPT plan and no API key, rozu drives the official Codex CLI's `codex app-server`. Sign in with ChatGPT
 is done by Codex itself; rozu never sees or refreshes the tokens.
@@ -68,6 +73,11 @@ through rozu's MCP server. Decisions land in the audit log with `"provider": "co
 and no API key, rozu uses `claude-cli`, or `codex` if only the Codex CLI is installed. `ROZU_CODEX_BIN` points rozu at
 a specific `codex` binary; otherwise it looks on `PATH` and in `/opt/homebrew/bin`. `OPENAI_API_KEY` and
 `CODEX_API_KEY` are removed from Codex's environment so it uses your ChatGPT login.
+
+Each Codex thread is temporary (`ephemeral: true`), and rozu refuses to start a turn unless Codex confirms
+that setting. New rozu chats therefore stay out of Codex's saved local history and desktop chat list.
+rozu still saves its own chats; reopening one replays its user/assistant messages into a new temporary thread.
+Existing Codex history entries are left untouched.
 
 ## Grok on your subscription (`grok`)
 With a SuperGrok plan and no API key, rozu drives xAI's official Grok Build CLI over ACP (`grok agent stdio`).
@@ -100,6 +110,10 @@ streaming-json` per turn; it has no way to pass rozu's MCP server, so rozu's too
 `rozu mcp-serve` with Grok yourself. `ROZU_GROK_BIN` points rozu at a specific (native) binary; otherwise it looks on
 `PATH`, in `~/.grok/bin` and `/opt/homebrew/bin`. `XAI_API_KEY` and `GROK_CLI_CHAT_PROXY_BASE_URL` are removed from
 Grok's environment.
+
+Grok Build 1.0.52 automatically saves its own local session history, including ACP conversations. No supported
+option to disable that persistence is available. These sessions do not create Codex chats. rozu's `--no-save`
+only disables rozu's own saved chat, not Grok's history. See [Grok's session documentation](https://docs.x.ai/build/features/sessions).
 
 ## Residual risk with vendor CLIs
 For a vendor CLI's *built-in* tools (today only Codex keeps any), the vendor's own sandbox is the enforcement

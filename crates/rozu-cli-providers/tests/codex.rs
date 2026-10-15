@@ -193,6 +193,7 @@ async fn handshake_and_text_turn() {
     assert_eq!(thread["approvalPolicy"], "untrusted");
     assert_eq!(thread["approvalsReviewer"], "user");
     assert_eq!(thread["sandbox"], "workspace-write");
+    assert_eq!(thread["ephemeral"], true);
     assert!(thread.get("model").is_none(), "default model: Codex picks");
     let instructions = thread["developerInstructions"].as_str().unwrap();
     assert!(instructions.starts_with("You are rozu."), "{instructions}");
@@ -293,6 +294,71 @@ async fn refuses_unconfirmed_thread_permissions_before_starting_a_turn() {
         );
         assert!(fake.sent_method("turn/start").is_empty(), "{from}");
     }
+}
+
+#[tokio::test]
+async fn refuses_persistent_or_unconfirmed_threads_before_starting_a_turn() {
+    for replacement in [
+        "\"ephemeral\":false",
+        "\"ephemeral\":null",
+        "\"ephemeral\":\"true\"",
+        "\"unused\":true",
+    ] {
+        let fake = fake(&["handshake_0162.script", "text_turn.script"]);
+        let script = fake.read("script.txt");
+        assert!(script.contains("\"ephemeral\":true"));
+        fake.write(
+            "script.txt",
+            &script.replacen("\"ephemeral\":true", replacement, 1),
+        );
+        let err = start_err(&provider(&fake), "default").await;
+        assert!(
+            matches!(err, ProviderError::Api { ref code, .. }
+            if code.as_deref() == Some("persistent_codex_session")),
+            "{err:?}"
+        );
+        assert!(fake.sent_method("turn/start").is_empty(), "{replacement}");
+    }
+}
+
+#[tokio::test]
+async fn reopening_a_chat_replays_history_into_a_new_ephemeral_thread() {
+    let fake = fake(&["handshake_0162.script", "text_turn.script"]);
+    let first = provider(&fake);
+    let (events, err) = collect(
+        &first,
+        request("default", vec![Message::user("remember the blue bird")]),
+    )
+    .await;
+    assert_eq!(err, None);
+    assert!(events.contains(&StreamEvent::Done(StopReason::EndTurn)));
+    drop(first);
+
+    let (_, err) = collect(
+        &provider(&fake),
+        request(
+            "default",
+            vec![
+                Message::user("remember the blue bird"),
+                Message::assistant("Hello from Codex!"),
+                Message::user("what did I ask you to remember?"),
+            ],
+        ),
+    )
+    .await;
+    assert_eq!(err, None);
+    assert_eq!(fake.starts().len(), 2);
+    assert!(fake.sent_method("thread/resume").is_empty());
+    assert!(
+        fake.sent_method("thread/start")
+            .iter()
+            .all(|message| message["params"]["ephemeral"] == true)
+    );
+    let turns = fake.sent_method("turn/start");
+    let text = turns[1]["params"]["input"][0]["text"].as_str().unwrap();
+    assert!(text.contains("User: remember the blue bird"));
+    assert!(text.contains("Assistant: Hello from Codex!"));
+    assert!(text.ends_with("what did I ask you to remember?"));
 }
 
 #[tokio::test]

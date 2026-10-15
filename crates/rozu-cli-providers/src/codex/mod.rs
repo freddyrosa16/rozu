@@ -1,7 +1,7 @@
 //! OpenAI through the official Codex CLI's `codex app-server` (JSON-RPC over stdio), on the
 //! user's ChatGPT subscription ("Sign in with ChatGPT" is done by `codex login`, never by rozu).
 //!
-//! One long-lived app-server per provider, one Codex thread per session; each
+//! One long-lived app-server per provider, one ephemeral Codex thread per session; each
 //! [`Provider::stream`] call is one turn (`turn/start`), so this is a
 //! [`ProviderKind::AgentBackend`]. Codex runs its own tool loop:
 //!
@@ -299,12 +299,21 @@ impl CodexAppServerProvider {
                 "approvalPolicy": APPROVAL_POLICY,
                 "approvalsReviewer": APPROVALS_REVIEWER,
                 "sandbox": self.sandbox_mode(),
+                "ephemeral": true,
                 "developerInstructions": instructions,
             });
             if model != DEFAULT_MODEL {
                 params["model"] = model.into();
             }
             let started = self.call(state, "thread/start", params).await?;
+            if started["thread"]["ephemeral"].as_bool() != Some(true) {
+                return Err(ProviderError::Api {
+                    code: Some("persistent_codex_session".into()),
+                    message: "Codex did not confirm a temporary thread; no turn was started. \
+                              Update the Codex CLI to keep rozu chats out of Codex history."
+                        .into(),
+                });
+            }
             let sandbox = if self.sandbox_mode() == "read-only" {
                 "readOnly"
             } else {

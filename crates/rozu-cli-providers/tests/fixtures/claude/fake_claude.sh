@@ -5,6 +5,7 @@
 #   FAKE_CLAUDE_TURNS  directory with the scenario:
 #                        turnN.jsonl   stdout for the Nth user message (counted across restarts)
 #                        hangN         after turnN.jsonl, hang instead of waiting for input
+#                        exitN         exit after turnN.jsonl without a terminal result
 #                        mcpN.jsonl    before turnN.jsonl, pipe these MCP requests through the
 #                                      server named in --mcp-config (with its env)
 #                        stderr.txt    after reading the first message, print this to stderr
@@ -82,6 +83,9 @@ while IFS= read -r line; do
         exit 3
     fi
     cat "$FAKE_CLAUDE_TURNS/turn$n.jsonl"
+    if [ -f "$FAKE_CLAUDE_TURNS/exit$n" ]; then
+        exit 1
+    fi
     if [ -f "$FAKE_CLAUDE_TURNS/hang$n" ]; then
         sleep 30
     fi
