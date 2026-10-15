@@ -43,6 +43,41 @@ fn chat_with_codex_streams_text_and_usage_without_cost() {
 }
 
 #[test]
+fn codex_forwards_only_mcp_logging_overrides_and_strips_api_keys() {
+    let fake = fake(&["handshake.script", "text_turn.script"]);
+    fake.chat("codex")
+        .env("OPENAI_API_KEY", "synthetic-openai-key")
+        .env("CODEX_API_KEY", "synthetic-codex-key")
+        .arg("hi")
+        .write_stdin("")
+        .assert()
+        .success();
+
+    let args = fake.read("log/args.txt");
+    let forwarded: Vec<String> = serde_json::from_str(
+        args.lines()
+            .find_map(|line| line.strip_prefix("mcp_servers.rozu.env_vars="))
+            .expect("MCP logging overrides are explicitly forwarded"),
+    )
+    .unwrap();
+    assert_eq!(
+        forwarded,
+        [
+            "ROZU_AUDIT_LOG",
+            "ROZU_LOG_FILE",
+            "ROZU_LOG_STDERR",
+            "RUST_LOG"
+        ]
+    );
+    assert_eq!(
+        fake.read("log/env.txt"),
+        "OPENAI_API_KEY=unset\nCODEX_API_KEY=unset\n"
+    );
+    assert!(!args.contains("synthetic-openai-key"));
+    assert!(!args.contains("synthetic-codex-key"));
+}
+
+#[test]
 fn codex_force_push_shows_rozus_approval_card() {
     let fake = FakeCli::new(
         "codex",

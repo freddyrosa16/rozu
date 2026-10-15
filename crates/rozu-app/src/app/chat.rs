@@ -252,13 +252,21 @@ pub(super) fn step_row(i: usize, step: &Step) -> Div {
 
 /// The agent's reply, Markdown drawn as paragraphs, headings, lists and code blocks.
 pub(super) fn rich(text: &str, w: f32) -> Div {
+    let blocks = markdown::parse(text);
+    let marker_w = blocks
+        .iter()
+        .filter_map(|block| match block {
+            Block::Item(marker, _) => Some(marker.chars().count() as f32 * 9.),
+            _ => None,
+        })
+        .fold(14., f32::max);
     div()
         .w(px(w))
         .flex()
         .flex_col()
         .gap(px(10.))
         .line_height(relative(1.6))
-        .children(markdown::parse(text).into_iter().map(|block| {
+        .children(blocks.into_iter().map(|block| {
             match block {
                 Block::Para(t) => div().w(px(w)).child(spans(t)),
                 Block::Heading(t) => div()
@@ -273,11 +281,13 @@ pub(super) fn rich(text: &str, w: f32) -> Div {
                     .child(
                         div()
                             .flex_none()
-                            .w(px(14.))
+                            .w(px(marker_w))
+                            .whitespace_nowrap()
+                            .text_right()
                             .text_color(rgb(INK3))
                             .child(marker),
                     )
-                    .child(div().w(px(w - 24.)).child(spans(t))),
+                    .child(div().w(px((w - marker_w - 10.).max(0.))).child(spans(t))),
                 Block::Code(code) => div()
                     .w(px(w))
                     .overflow_hidden()

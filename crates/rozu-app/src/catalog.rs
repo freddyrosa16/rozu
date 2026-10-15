@@ -129,22 +129,27 @@ pub fn providers() -> Vec<&'static ProviderInfo> {
 }
 
 /// Models a CLI reported itself (Codex's `model/list`): id and display name.
-pub type Live = Vec<(String, String)>;
+/// `None` means discovery was unavailable; even an empty successful list is authoritative.
+pub type Live = Option<Vec<(String, String)>>;
 
 /// Every model `provider` offers; Codex's own list when it gave one.
 pub fn models(provider: &ProviderInfo, live: &Live) -> Vec<ModelChoice> {
     let ids: Vec<String> = if provider.id == CODEX_ID {
-        // The current lineup, plus whatever else this Codex build lists.
-        let mut ids: Vec<String> = registry::CODEX_STATIC_MODELS
-            .iter()
-            .map(|id| (*id).to_owned())
-            .collect();
-        for (id, _) in live {
-            if !ids.contains(id) {
-                ids.push(id.clone());
+        match live {
+            Some(live) => {
+                let mut ids = vec!["default".to_owned()];
+                for (id, _) in live {
+                    if !ids.contains(id) {
+                        ids.push(id.clone());
+                    }
+                }
+                ids
             }
+            None => registry::CODEX_STATIC_MODELS
+                .iter()
+                .map(|id| (*id).to_owned())
+                .collect(),
         }
-        ids
     } else if provider.id == CLAUDE_CLI_ID {
         claude_ids()
     } else {
@@ -202,7 +207,7 @@ pub fn provider_name(provider: &ProviderInfo) -> &'static str {
 /// How a model is named in the app: the CLI's own name, else `opus` → `Opus`,
 /// `gpt-6.1-sol` → `GPT-6.1 Sol`, `claude-opus-5-5` → `Opus 5.5`.
 pub fn model_name(model: &str, live: &Live) -> String {
-    if let Some((_, name)) = live.iter().find(|(id, _)| id == model) {
+    if let Some((_, name)) = live.iter().flatten().find(|(id, _)| id == model) {
         return name.clone();
     }
     let model = model.strip_prefix("claude-").unwrap_or(model);
@@ -251,7 +256,7 @@ mod tests {
 
     #[test]
     fn names_models_like_the_app() {
-        let none = Live::new();
+        let none = None;
         let opus = pin(registry::resolve(Some(CLAUDE_CLI_ID), Some("opus")).unwrap());
         assert_eq!(label(&opus, Some("high"), &none), "Claude Opus 5.5 · high");
         let codex = registry::resolve(Some(CODEX_ID), None).unwrap();
@@ -264,26 +269,37 @@ mod tests {
         ] {
             assert_eq!(model_name(id, &none), name);
         }
-        let live = vec![("gpt-7".to_owned(), "GPT-7 Max".to_owned())];
+        let live = Some(vec![("gpt-7".to_owned(), "GPT-7 Max".to_owned())]);
         assert_eq!(model_name("gpt-7", &live), "GPT-7 Max");
         let codex = registry::provider_info(CODEX_ID).unwrap();
         let ids: Vec<_> = models(codex, &live).into_iter().map(|m| m.model).collect();
-        assert_eq!(
-            ids,
-            [
-                "default",
-                "gpt-6.1-sol",
-                "gpt-6-astra",
-                "gpt-6-luna",
-                "gpt-7"
-            ]
-        );
+        assert_eq!(ids, ["default", "gpt-7"]);
         let names: Vec<_> = models(registry::provider_info(CLAUDE_CLI_ID).unwrap(), &none)
             .iter()
             .map(|m| model_name(&m.model, &none))
             .collect();
         assert_eq!(names, ["Fable 5.1", "Opus 5.5", "Sonnet 5.5", "Haiku 5.5"]);
         assert!(efforts(GROK_ID).is_empty());
+    }
+
+    #[test]
+    fn codex_uses_static_models_only_when_discovery_is_unavailable() {
+        let codex = registry::provider_info(CODEX_ID).unwrap();
+        let ids = |live| {
+            models(codex, &live)
+                .into_iter()
+                .map(|m| m.model)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids(None), registry::CODEX_STATIC_MODELS);
+        assert_eq!(ids(Some(Vec::new())), ["default"]);
+        assert_eq!(
+            ids(Some(vec![
+                ("gpt-5.6-sol".into(), "GPT-5.6 Sol".into()),
+                ("gpt-5.6-luna".into(), "GPT-5.6 Luna".into()),
+            ])),
+            ["default", "gpt-5.6-sol", "gpt-5.6-luna"]
+        );
     }
 
     #[test]

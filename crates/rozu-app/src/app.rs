@@ -114,6 +114,45 @@ enum Page {
     Setup,
 }
 
+#[derive(Clone, PartialEq, Eq, Hash)]
+enum DraftKey {
+    Project(Option<PathBuf>),
+    Thread(usize),
+}
+
+#[derive(Default)]
+struct Drafts {
+    active: Option<DraftKey>,
+    saved: HashMap<DraftKey, String>,
+}
+
+impl Drafts {
+    fn switch(&mut self, next: Option<DraftKey>, text: &str) -> Option<String> {
+        let next = next?;
+        if self.active.as_ref() == Some(&next) {
+            return None;
+        }
+        if let Some(previous) = self.active.replace(next.clone()) {
+            if text.is_empty() {
+                self.saved.remove(&previous);
+            } else {
+                self.saved.insert(previous, text.to_owned());
+            }
+        }
+        Some(self.saved.remove(&next).unwrap_or_default())
+    }
+
+    fn discard_submitted(&mut self, key: DraftKey, text: &str) {
+        if self.saved.get(&key).is_some_and(|draft| draft == text) {
+            self.saved.remove(&key);
+        }
+    }
+}
+
+fn follows_output(page: Page, id: usize, offset_y: f32, max_y: f32) -> bool {
+    page == Page::Thread(id) && max_y + offset_y <= 1.
+}
+
 struct Rozu {
     backend: Backend,
     settings: Settings,
@@ -142,6 +181,7 @@ struct Rozu {
     plan: &'static str,
     access: HashMap<&'static str, Access>,
     composer: Entity<Composer>,
+    drafts: Drafts,
     scroll: ScrollHandle,
     _sent: Subscription,
 }
@@ -205,10 +245,11 @@ impl Rozu {
             viewport_h: 800.,
             text_w: 700.,
             _search: search_sub,
-            live: Vec::new(),
+            live: None,
             plan: PLANS[0].id,
             access: HashMap::new(),
             composer,
+            drafts: Drafts::default(),
             scroll: ScrollHandle::new(),
             _sent: sent,
         };
@@ -231,6 +272,12 @@ impl Rozu {
     }
 
     fn open(&mut self, page: Page, cx: &mut Context<Self>) {
+        let key = match page {
+            Page::Home => Some(DraftKey::Project(self.project.clone())),
+            Page::Thread(id) => Some(DraftKey::Thread(id)),
+            Page::Setup => None,
+        };
+        let draft = self.drafts.switch(key, &self.composer.read(cx).text);
         if let Page::Thread(id) = page {
             self.load_history(id);
             if let Some(thread) = self.thread_ref(id) {
@@ -257,6 +304,9 @@ impl Rozu {
             _ => "Plan, build, / for skills, @ for context",
         };
         self.composer.update(cx, |c, cx| {
+            if let Some(draft) = draft {
+                c.set_text(&draft, cx);
+            }
             c.placeholder = placeholder.into();
             cx.notify();
         });
@@ -305,7 +355,7 @@ impl Rozu {
             _ => {
                 let Some(root) = self.project.clone() else {
                     self.composer.update(cx, |c, cx| c.set_text(&text, cx));
-                    return self.add_project(cx);
+                    return self.pick_project(Some(text), cx);
                 };
                 let title: String = text.lines().next().unwrap_or("").chars().take(60).collect();
                 let id = self.next_id;
@@ -393,6 +443,12 @@ impl Rozu {
     }
 
     fn update(&mut self, id: usize, update: Update, cx: &mut Context<Self>) {
+        let follow = follows_output(
+            self.page,
+            id,
+            self.scroll.offset().y.into(),
+            self.scroll.max_offset().height.into(),
+        );
         let Some(thread) = self.thread(id) else {
             return;
         };
@@ -417,7 +473,7 @@ impl Rozu {
             }
         }
         thread.touched = unix_now();
-        if self.page == Page::Thread(id) {
+        if follow {
             self.scroll.scroll_to_bottom();
         }
         cx.notify();
@@ -492,6 +548,10 @@ impl Rozu {
     }
 
     fn add_project(&mut self, cx: &mut Context<Self>) {
+        self.pick_project(None, cx);
+    }
+
+    fn pick_project(&mut self, pending: Option<String>, cx: &mut Context<Self>) {
         let picked = cx.prompt_for_paths(PathPromptOptions {
             files: false,
             directories: true,
@@ -517,8 +577,12 @@ impl Rozu {
                 }
                 app.collapsed.remove(&root);
                 app.project = Some(root);
-                if app.page != Page::Setup {
+                if app.page != Page::Setup || pending.is_some() {
                     app.open(Page::Home, cx);
+                }
+                if let Some(text) = pending {
+                    app.drafts.discard_submitted(DraftKey::Project(None), &text);
+                    app.send(text, cx);
                 }
                 cx.notify();
             });
@@ -552,6 +616,9 @@ impl Rozu {
                 app.settings.save();
                 if app.project.as_ref() == Some(&root) {
                     app.project = app.settings.projects.last().cloned();
+                    if app.page == Page::Home {
+                        app.open(Page::Home, cx);
+                    }
                 }
                 cx.notify();
             });
@@ -628,7 +695,7 @@ impl Rozu {
         if self.choice.as_ref().is_none_or(|c| c.provider.id != id)
             && let Ok(choice) = registry::resolve(Some(id), None)
         {
-            self.choose(choice, cx);
+            self.choose(catalog::pin(choice), cx);
         }
         cx.notify();
     }
@@ -736,4 +803,97 @@ fn saved_threads(backend: &Backend, projects: &[PathBuf]) -> Vec<Thread> {
         }
     }
     threads
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn output_follows_only_the_visible_chat_at_the_bottom() {
+        for (page, offset, maximum, expected) in [
+            (Page::Thread(0), 0., 0., true),
+            (Page::Thread(0), -100., 100., true),
+            (Page::Thread(0), -99.5, 100., true),
+            (Page::Thread(0), -40., 100., false),
+            (Page::Thread(0), 0., 100., false),
+            (Page::Thread(1), -100., 100., false),
+            (Page::Home, 0., 0., false),
+            (Page::Setup, 0., 0., false),
+        ] {
+            assert_eq!(follows_output(page, 0, offset, maximum), expected);
+        }
+    }
+
+    #[test]
+    fn drafts_stay_with_their_chat_and_project() {
+        let mut drafts = Drafts::default();
+        let a = Some(DraftKey::Thread(0));
+        let b = Some(DraftKey::Thread(1));
+        let project_a = Some(DraftKey::Project(Some("/a".into())));
+        let project_b = Some(DraftKey::Project(Some("/b".into())));
+        assert_eq!(drafts.switch(a.clone(), ""), Some(String::new()));
+        assert_eq!(
+            drafts.switch(b.clone(), "chat a\nsecond line"),
+            Some(String::new())
+        );
+        assert_eq!(
+            drafts.switch(project_a.clone(), "chat b"),
+            Some(String::new())
+        );
+        assert_eq!(
+            drafts.switch(project_b.clone(), "project a"),
+            Some(String::new())
+        );
+        assert_eq!(
+            drafts.switch(a, "project b"),
+            Some("chat a\nsecond line".into())
+        );
+        assert_eq!(drafts.switch(b, "chat a revised"), Some("chat b".into()));
+        assert_eq!(drafts.switch(project_a, "chat b"), Some("project a".into()));
+        assert_eq!(
+            drafts.switch(project_b, "project a"),
+            Some("project b".into())
+        );
+    }
+
+    #[test]
+    fn setup_preserves_the_draft_and_sent_text_does_not_return() {
+        let mut drafts = Drafts::default();
+        let chat = Some(DraftKey::Thread(0));
+        let project = Some(DraftKey::Project(None));
+        assert_eq!(drafts.switch(chat.clone(), ""), Some(String::new()));
+        assert_eq!(drafts.switch(None, "unsent"), None);
+        assert_eq!(drafts.switch(chat.clone(), "unsent"), None);
+        assert_eq!(
+            drafts.switch(project.clone(), "unsent"),
+            Some(String::new())
+        );
+        assert_eq!(
+            drafts.switch(chat.clone(), "new chat"),
+            Some("unsent".into())
+        );
+        assert_eq!(drafts.switch(project, ""), Some("new chat".into()));
+        assert_eq!(drafts.switch(chat, "new chat"), Some(String::new()));
+    }
+
+    #[test]
+    fn choosing_a_folder_for_a_submitted_message_preserves_its_existing_draft() {
+        let mut drafts = Drafts::default();
+        let unassigned = DraftKey::Project(None);
+        let project = Some(DraftKey::Project(Some("/project".into())));
+        let chat = Some(DraftKey::Thread(0));
+        drafts.switch(project.clone(), "");
+        drafts.switch(Some(unassigned.clone()), "existing project draft");
+
+        let existing = drafts.switch(project.clone(), "submitted message").unwrap();
+        assert_eq!(existing, "existing project draft");
+        drafts.discard_submitted(unassigned.clone(), "submitted message");
+        assert_eq!(drafts.switch(chat, &existing), Some(String::new()));
+        assert_eq!(drafts.switch(project, ""), Some(existing.clone()));
+        assert_eq!(
+            drafts.switch(Some(unassigned), &existing),
+            Some(String::new())
+        );
+    }
 }
