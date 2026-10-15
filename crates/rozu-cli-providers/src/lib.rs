@@ -16,6 +16,7 @@ pub mod claude;
 pub mod codex;
 pub mod grok;
 mod jsonrpc;
+mod probe;
 pub mod process;
 mod runtime;
 pub mod turn;

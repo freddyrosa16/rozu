@@ -7,10 +7,10 @@ use rozu_cli_providers::codex::install::{LoginStatus, codex_login_status, find_c
 use rozu_cli_providers::grok::install::find_grok_binary;
 use rozu_core::ApprovalMode;
 use rozu_providers::registry::{self, CLAUDE_CLI_ID, CODEX_ID, GROK_ID};
-use rozu_providers::{ModelChoice, PROVIDERS, ProviderInfo};
+use rozu_providers::{ModelChoice, ProviderInfo};
 #[cfg(any(target_os = "macos", test))]
 pub use rozu_runtime::{approval_arg, approval_mode};
-use rozu_secrets::{KeyringStore, resolve_api_key};
+use rozu_secrets::KeyringStore;
 
 /// A subscription the app can sign in with: its CLI, and how to install it and sign in.
 pub struct Plan {
@@ -111,21 +111,7 @@ pub const APPROVAL_MODES: &[(ApprovalMode, &str, &str)] = &[
 
 /// The providers this Mac can use: installed subscription CLIs first, then API keys that are set.
 pub fn providers() -> Vec<&'static ProviderInfo> {
-    let store = KeyringStore::default();
-    let mut all: Vec<_> = PROVIDERS
-        .iter()
-        .filter(|p| match p.id {
-            CLAUDE_CLI_ID => find_claude_binary().is_some_and(|p| p.exists()),
-            CODEX_ID => find_codex_binary().is_some_and(|p| p.exists()),
-            GROK_ID => find_grok_binary().is_ok_and(|p| p.exists()),
-            id => matches!(
-                resolve_api_key(&store, id, |v| std::env::var(v).ok()),
-                Ok(Some(_))
-            ),
-        })
-        .collect();
-    all.sort_by_key(|p| !p.is_cli_backed());
-    all
+    rozu_runtime::available_providers(&KeyringStore::default())
 }
 
 /// Models a CLI reported itself (Codex's `model/list`): id and display name.

@@ -51,21 +51,23 @@ module before adding another crate or abstraction.
 
 The CLI and desktop app construct agents through `rozu-runtime::AgentFactory`. The factory owns the
 workspace tools, approval policy, audit identity, private session directory, and vendor provider sessions.
-Model selection lives in `rozu-runtime/src/models.rs`; prompt and project-memory handling live in
-`rozu-runtime/src/context.rs`. Approval choices and sandbox labels live in `rozu-runtime/src/approval.rs`
+Model selection and provider availability live in `rozu-runtime/src/models.rs`; the desktop catalog
+uses the same CLI discovery and API-key checks as runtime selection. Prompt and project-memory handling
+live in `rozu-runtime/src/context.rs`. Approval choices and sandbox labels live in `rozu-runtime/src/approval.rs`
 so both frontends offer the same actions. A frontend supplies its approval gate and host description.
 
 `rozu-core` owns conversation state, usage accounting, compaction, and the turn loop. Its `agent/session`,
 `agent/compaction`, and `agent/stream` modules separate these responsibilities without changing the public
-`Agent` or `Session` interfaces. Model providers return tool requests for core to execute; vendor agent
-backends execute through rozu's permission boundary and forward events.
+`Agent` or `Session` interfaces. A shared stream reader collects text, usage, and tool arguments. Model
+providers return tool requests for core to execute; vendor agent backends execute through rozu's permission
+boundary and forward events. Tool results and approval events are accepted only from agent backends.
 
 ## Provider and tool boundaries
 
 `rozu-providers` adapts HTTP streams and handles retries. `rozu-cli-providers` drives the official vendor
-CLIs, with a shared JSON-RPC envelope parser for Codex and Grok and a shared approval runtime for all
-three subscription providers. That runtime owns a private directory and approval socket, and removes
-them when the provider is dropped. Vendor credentials stay with the vendor CLI.
+CLIs, with a shared JSON-RPC envelope parser for Codex and Grok, shared version probes in `probe.rs`,
+and a shared approval runtime for all three subscription providers. That runtime owns a private directory
+and approval socket, and removes them when the provider is dropped. Vendor credentials stay with the vendor CLI.
 
 `rozu-tools` owns workspace path resolution, file tools, process execution, and the platform sandbox.
 Command classification and remembered command-prefix rules are separate modules. Remembered approvals
@@ -87,7 +89,9 @@ views, with a shared composer component. Provider catalog/setup metadata is sepa
 owns its session and writer; queued prompts carry their cancellation token. Deleting a chat waits for
 the worker's final save before deleting its file and index entry. Failed resume is surfaced as an error.
 Model and effort changes apply to the next turn while retaining the session, writer, approval policy,
-and private tool directory. Reopening a saved chat restores its stored provider and model.
+and private tool directory. Startup and search results use the same saved-chat constructor, restoring
+the stored provider and model while loading messages only when opened. Live and reloaded tool results
+use the same feed formatting.
 
 The CLI keeps chat orchestration separate from terminal rendering. Scripted task and memory evaluations
 share sorted fixture discovery and report unreadable fixtures as errors.

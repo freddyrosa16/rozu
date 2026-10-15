@@ -175,23 +175,8 @@ impl Rozu {
                 } else {
                     let id = self.next_id;
                     self.next_id += 1;
-                    self.threads.push(Thread {
-                        id,
-                        root: row.workspace,
-                        provider: registry::provider_info(&row.provider).map_or("", |p| p.id),
-                        choice: registry::resolve(Some(&row.provider), Some(&row.model))
-                            .ok()
-                            .map(catalog::pin),
-                        effort: None,
-                        title: row.title.into(),
-                        feed: Feed::default(),
-                        session: Some(row.id),
-                        loaded: false,
-                        chat: None,
-                        pending: HashMap::new(),
-                        touched: row.updated,
-                        _updates: None,
-                    });
+                    self.threads
+                        .push(Thread::from_saved(id, row.workspace.clone(), row));
                     id
                 }
             }

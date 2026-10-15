@@ -7,7 +7,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
 use super::{Agent, AgentError, AgentEvent, Session, TurnOutcome, finish, keep_partial_text};
-use crate::{ChatRequest, EventStream, PendingApproval, ProviderError, StreamEvent};
+use crate::{ChatRequest, EventStream, PendingApproval, ProviderError, ProviderKind, StreamEvent};
 
 /// A tool call being assembled from stream events.
 #[derive(Debug, Default)]
@@ -43,7 +43,8 @@ impl Agent {
         }
     }
 
-    /// Streams one model response into `output`, forwarding text and usage as it arrives.
+    /// Collects one response, forwarding text and usage. Only agent backends may report tool
+    /// results and approval events; model providers leave execution to rozu's agent loop.
     pub(super) async fn stream_step(
         &self,
         request: ChatRequest,
@@ -52,6 +53,7 @@ impl Agent {
         cancel: &CancellationToken,
         output: &mut StepOutput,
     ) -> StreamEnd {
+        let backend = self.provider.kind() == ProviderKind::AgentBackend;
         let mut stream = match self.open_stream(request, cancel).await {
             Ok(stream) => stream,
             Err(end) => return end,
@@ -59,48 +61,101 @@ impl Agent {
 
         loop {
             let event = next_event(&mut stream, cancel).await;
-            match event {
+            let event = match event {
                 Err(end) => return end,
-                Ok(event) => match event {
-                    StreamEvent::TextDelta(delta) => {
-                        output.text.push_str(&delta);
-                        let _ = events.send(AgentEvent::TextDelta(delta)).await;
+                Ok(event) => event,
+            };
+            let forward = match event {
+                StreamEvent::TextDelta(delta) => {
+                    output.text.push_str(&delta);
+                    AgentEvent::TextDelta(delta)
+                }
+                StreamEvent::ToolCallStart { id, name } => {
+                    output.calls.push(PendingCall {
+                        id,
+                        name,
+                        args_json: String::new(),
+                    });
+                    continue;
+                }
+                StreamEvent::ToolCallArgsDelta { id, json } => {
+                    if let Some(call) = output.calls.iter_mut().rev().find(|c| c.id == id) {
+                        call.args_json.push_str(&json);
+                    } else if !backend {
+                        warn!(%id, "arguments for an unknown tool call");
                     }
-                    StreamEvent::ToolCallStart { id, name } => {
-                        output.calls.push(PendingCall {
-                            id,
-                            name,
-                            args_json: String::new(),
-                        });
+                    continue;
+                }
+                StreamEvent::ToolCallEnd { id } if backend => {
+                    let Some(call) = output.calls.iter().rev().find(|c| c.id == id) else {
+                        warn!(%id, "end of an unknown tool call");
+                        continue;
+                    };
+                    AgentEvent::ToolCallStarted {
+                        id: call.id.clone(),
+                        name: call.name.clone(),
+                        args_json: call.args_json.clone(),
                     }
-                    StreamEvent::ToolCallArgsDelta { id, json } => {
-                        if let Some(call) = output.calls.iter_mut().rev().find(|c| c.id == id) {
-                            call.args_json.push_str(&json);
-                        } else {
-                            warn!(%id, "arguments for an unknown tool call");
-                        }
+                }
+                StreamEvent::ToolCallEnd { .. } => continue,
+                StreamEvent::ToolResult {
+                    id,
+                    output: text,
+                    is_error,
+                } if backend => {
+                    let name = output
+                        .calls
+                        .iter()
+                        .rev()
+                        .find(|c| c.id == id)
+                        .map(|c| c.name.clone())
+                        .unwrap_or_default();
+                    AgentEvent::ToolCallFinished {
+                        id,
+                        name,
+                        output: truncate_head_tail(&text, self.config.max_tool_output_bytes)
+                            .into_owned(),
+                        is_error,
                     }
-                    StreamEvent::ToolCallEnd { .. } => {}
-                    StreamEvent::Usage(usage) => {
-                        session.record_usage(usage, self.config.priced_model());
-                        let _ = events.send(AgentEvent::Usage(usage)).await;
-                    }
-                    StreamEvent::ToolResult { id, .. } => {
-                        warn!(%id, "a model provider sent a tool result; ignored");
-                    }
-                    StreamEvent::Approval(record) => {
-                        warn!(call_id = %record.call_id, "a model provider sent an approval; ignored");
-                    }
-                    StreamEvent::ApprovalPending(PendingApproval { request_id, .. })
-                    | StreamEvent::ApprovalResolved { request_id, .. } => {
-                        warn!(%request_id, "a model provider sent an approval prompt; ignored");
-                    }
-                    StreamEvent::Done(reason) => {
-                        debug!(?reason, "model response done");
-                        return StreamEnd::Done;
-                    }
+                }
+                StreamEvent::Approval(record) if backend => AgentEvent::Approval(record),
+                StreamEvent::ApprovalPending(pending) if backend => {
+                    AgentEvent::ApprovalPending(pending)
+                }
+                StreamEvent::ApprovalResolved {
+                    request_id,
+                    resolution,
+                } if backend => AgentEvent::ApprovalResolved {
+                    request_id,
+                    resolution,
                 },
-            }
+                StreamEvent::ToolResult { id, .. } => {
+                    warn!(%id, "a model provider sent a tool result; ignored");
+                    continue;
+                }
+                StreamEvent::Approval(record) => {
+                    warn!(call_id = %record.call_id, "a model provider sent an approval; ignored");
+                    continue;
+                }
+                StreamEvent::ApprovalPending(PendingApproval { request_id, .. })
+                | StreamEvent::ApprovalResolved { request_id, .. } => {
+                    warn!(%request_id, "a model provider sent an approval prompt; ignored");
+                    continue;
+                }
+                StreamEvent::Usage(usage) => {
+                    session.record_usage(usage, self.config.priced_model());
+                    AgentEvent::Usage(usage)
+                }
+                StreamEvent::Done(reason) => {
+                    if backend {
+                        debug!(?reason, "agent backend turn done");
+                    } else {
+                        debug!(?reason, "model response done");
+                    }
+                    return StreamEnd::Done;
+                }
+            };
+            let _ = events.send(forward).await;
         }
     }
 
@@ -124,7 +179,7 @@ impl Agent {
         };
         let mut output = StepOutput::default();
         let end = self
-            .stream_backend(request, session, events, &cancel, &mut output)
+            .stream_step(request, session, events, &cancel, &mut output)
             .await;
         keep_partial_text(session, output.text);
         match end {
@@ -134,96 +189,6 @@ impl Agent {
                 warn!(error = %err, "agent backend turn failed");
                 Err(err.into())
             }
-        }
-    }
-
-    async fn stream_backend(
-        &self,
-        request: ChatRequest,
-        session: &mut Session,
-        events: &mpsc::Sender<AgentEvent>,
-        cancel: &CancellationToken,
-        output: &mut StepOutput,
-    ) -> StreamEnd {
-        let mut stream = match self.open_stream(request, cancel).await {
-            Ok(stream) => stream,
-            Err(end) => return end,
-        };
-        loop {
-            let event = next_event(&mut stream, cancel).await;
-            let event = match event {
-                Err(end) => return end,
-                Ok(event) => event,
-            };
-            let forward = match event {
-                StreamEvent::TextDelta(delta) => {
-                    output.text.push_str(&delta);
-                    AgentEvent::TextDelta(delta)
-                }
-                StreamEvent::ToolCallStart { id, name } => {
-                    output.calls.push(PendingCall {
-                        id,
-                        name,
-                        args_json: String::new(),
-                    });
-                    continue;
-                }
-                StreamEvent::ToolCallArgsDelta { id, json } => {
-                    if let Some(call) = output.calls.iter_mut().rev().find(|c| c.id == id) {
-                        call.args_json.push_str(&json);
-                    }
-                    continue;
-                }
-                StreamEvent::ToolCallEnd { id } => {
-                    let Some(call) = output.calls.iter().rev().find(|c| c.id == id) else {
-                        warn!(%id, "end of an unknown tool call");
-                        continue;
-                    };
-                    AgentEvent::ToolCallStarted {
-                        id: call.id.clone(),
-                        name: call.name.clone(),
-                        args_json: call.args_json.clone(),
-                    }
-                }
-                StreamEvent::ToolResult {
-                    id,
-                    output: text,
-                    is_error,
-                } => {
-                    let name = output
-                        .calls
-                        .iter()
-                        .rev()
-                        .find(|c| c.id == id)
-                        .map(|c| c.name.clone())
-                        .unwrap_or_default();
-                    AgentEvent::ToolCallFinished {
-                        id,
-                        name,
-                        output: truncate_head_tail(&text, self.config.max_tool_output_bytes)
-                            .into_owned(),
-                        is_error,
-                    }
-                }
-                StreamEvent::Approval(record) => AgentEvent::Approval(record),
-                StreamEvent::ApprovalPending(pending) => AgentEvent::ApprovalPending(pending),
-                StreamEvent::ApprovalResolved {
-                    request_id,
-                    resolution,
-                } => AgentEvent::ApprovalResolved {
-                    request_id,
-                    resolution,
-                },
-                StreamEvent::Usage(usage) => {
-                    session.record_usage(usage, self.config.priced_model());
-                    AgentEvent::Usage(usage)
-                }
-                StreamEvent::Done(reason) => {
-                    debug!(?reason, "agent backend turn done");
-                    return StreamEnd::Done;
-                }
-            };
-            let _ = events.send(forward).await;
         }
     }
 }

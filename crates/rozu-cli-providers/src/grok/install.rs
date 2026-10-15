@@ -12,7 +12,7 @@ use std::ffi::OsStr;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
-use crate::claude::install::{parse_version, query};
+use crate::probe::version;
 use crate::which::{find_program_in, is_executable};
 
 /// Overrides where rozu looks for the Grok binary (used as given).
@@ -103,9 +103,7 @@ pub fn is_native(path: &Path) -> bool {
 
 /// The version `grok --version` reports, e.g. `1.0.52` from `grok 1.0.52 (0920c8169e27)`.
 pub async fn grok_version(binary: &Path) -> io::Result<String> {
-    let out = query(binary, &["--version"]).await?;
-    parse_version(&out)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "no version in the output"))
+    version(binary).await
 }
 
 #[cfg(all(test, unix))]

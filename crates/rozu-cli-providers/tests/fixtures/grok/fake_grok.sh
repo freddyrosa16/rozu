@@ -15,6 +15,7 @@
 #   FAKE_GROK_LOG     directory for what rozu sent: args.txt (argv of every agent start,
 #                     separated by `--`), stdin.jsonl, env.txt, cwd.txt, profile.md (the agent
 #                     profile rozu passed), login_args.txt
+#   FAKE_GROK_LOGIN_EXIT  exit code for `grok login` (default 0)
 
 log=${FAKE_GROK_LOG:-/dev/null}
 
@@ -26,7 +27,7 @@ case "$1" in
 login)
     printf '%s\n' "$@" >"$log/login_args.txt"
     echo "fake grok: login finished"
-    exit 0
+    exit "${FAKE_GROK_LOGIN_EXIT:-0}"
     ;;
 esac
 

@@ -14,6 +14,7 @@
 #   FAKE_CODEX_LOG     directory for what rozu sent: args.txt (argv of every app-server start,
 #                      separated by `--`), stdin.jsonl, env.txt, cwd.txt, login_args.txt
 #   FAKE_CODEX_LOGIN_STATUS  what `codex login status` prints (on stderr, like Codex)
+#   FAKE_CODEX_LOGIN_EXIT    exit code for `codex login` (default 0)
 
 log=${FAKE_CODEX_LOG:-/dev/null}
 
@@ -30,7 +31,7 @@ login)
     fi
     printf '%s\n' "$@" >"$log/login_args.txt"
     echo "fake codex: login finished"
-    exit 0
+    exit "${FAKE_CODEX_LOGIN_EXIT:-0}"
     ;;
 esac
 

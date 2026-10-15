@@ -199,29 +199,20 @@ pub fn models() -> Vec<ModelInfo> {
 }
 
 pub fn models_for(provider: &str) -> Vec<ModelInfo> {
-    match provider_info(provider).map(|p| p.kind) {
-        Some(Kind::OpenAi) => openai::models(),
-        Some(Kind::Anthropic) => anthropic::models(),
-        Some(Kind::Xai) => xai::models(),
+    let Some(provider) = provider_info(provider) else {
+        return Vec::new();
+    };
+    let ids: &[&str] = match provider.kind {
+        Kind::OpenAi => return openai::models(),
+        Kind::Anthropic => return anthropic::models(),
+        Kind::Xai => return xai::models(),
         // The CLI's aliases, which follow the newest model of each family. Any other id the CLI
         // accepts works too (see `resolve`).
-        Some(Kind::ClaudeCli) => ["sonnet", "opus", "fable", "haiku"]
-            .into_iter()
-            .map(|id| ModelInfo::subscription(CLAUDE_CLI_ID, id, CLAUDE_CLI_CONTEXT))
-            .collect(),
-        Some(Kind::Codex) => CODEX_STATIC_MODELS
-            .iter()
-            .map(|id| ModelInfo::subscription(CODEX_ID, *id, CODEX_CONTEXT))
-            .collect(),
-        Some(Kind::Grok) => {
-            let grok = provider_info(GROK_ID).expect("grok is registered");
-            GROK_STATIC_MODELS
-                .iter()
-                .map(|id| grok.cli_model(id))
-                .collect()
-        }
-        None => Vec::new(),
-    }
+        Kind::ClaudeCli => &["sonnet", "opus", "fable", "haiku"],
+        Kind::Codex => CODEX_STATIC_MODELS,
+        Kind::Grok => GROK_STATIC_MODELS,
+    };
+    ids.iter().map(|id| provider.cli_model(id)).collect()
 }
 
 /// A known model by `provider/model` or by bare model id.
@@ -644,6 +635,39 @@ mod tests {
                 assert_eq!(built.unwrap().id(), provider.id);
             }
         }
+    }
+
+    #[test]
+    fn cli_catalog_order_and_metadata_match_unlisted_models() {
+        let cases: [(&str, &[&str], u32, ProviderCaps); 3] = [
+            (
+                CLAUDE_CLI_ID,
+                &["sonnet", "opus", "fable", "haiku"],
+                200_000,
+                ProviderCaps::FULL,
+            ),
+            (CODEX_ID, CODEX_STATIC_MODELS, 272_000, ProviderCaps::FULL),
+            (GROK_ID, GROK_STATIC_MODELS, 500_000, GROK_CAPS),
+        ];
+        for (provider, ids, context, caps) in cases {
+            let models = models_for(provider);
+            assert_eq!(
+                models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+                ids
+            );
+            let mut unlisted = resolve(Some(provider), Some("unlisted-test-model"))
+                .unwrap()
+                .info
+                .unwrap();
+            assert_eq!(unlisted.context_window, context, "{provider}");
+            assert_eq!(unlisted.caps, caps, "{provider}");
+            assert!(!unlisted.is_metered(), "{provider}");
+            for model in models {
+                unlisted.id.clone_from(&model.id);
+                assert_eq!(model, unlisted);
+            }
+        }
+        assert!(models_for("unknown-provider").is_empty());
     }
 
     #[test]
