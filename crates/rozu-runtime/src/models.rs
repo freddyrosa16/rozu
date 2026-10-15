@@ -4,7 +4,7 @@ use rozu_cli_providers::claude::install::find_claude_binary;
 use rozu_cli_providers::codex::install::find_codex_binary;
 use rozu_cli_providers::grok::install::find_grok_binary;
 use rozu_providers::registry::{self, CLAUDE_CLI_ID, CODEX_ID, GROK_ID};
-use rozu_providers::{ModelChoice, PROVIDERS};
+use rozu_providers::{ModelChoice, PROVIDERS, ProviderInfo};
 use rozu_secrets::{KeyringStore, SecretStore, resolve_api_key};
 
 /// The model for `--provider` / `--model`, defaulting as `rozu chat` does.
@@ -52,12 +52,41 @@ pub fn cli_installed(provider: &str) -> bool {
 
 /// Whether any API-key provider has a key (env var or keychain).
 pub fn any_api_key(store: &dyn SecretStore) -> bool {
-    PROVIDERS.iter().filter(|p| p.needs_api_key()).any(|p| {
-        matches!(
-            resolve_api_key(store, p.id, |var| std::env::var(var).ok()),
-            Ok(Some(_))
-        )
-    })
+    PROVIDERS
+        .iter()
+        .filter(|p| p.needs_api_key())
+        .any(|p| api_key_available(store, p.id))
+}
+
+/// Installed subscription CLIs first, then providers with an API key. Registry order is kept
+/// within each group; a failed keychain lookup leaves that provider unavailable.
+pub fn available_providers(store: &dyn SecretStore) -> Vec<&'static ProviderInfo> {
+    available_providers_with(cli_installed, |id| api_key_available(store, id))
+}
+
+fn api_key_available(store: &dyn SecretStore, provider: &str) -> bool {
+    matches!(
+        resolve_api_key(store, provider, |var| std::env::var(var).ok()),
+        Ok(Some(_))
+    )
+}
+
+fn available_providers_with(
+    cli_installed: impl Fn(&str) -> bool,
+    has_api_key: impl Fn(&str) -> bool,
+) -> Vec<&'static ProviderInfo> {
+    let mut providers: Vec<_> = PROVIDERS
+        .iter()
+        .filter(|provider| {
+            if provider.is_cli_backed() {
+                cli_installed(provider.id)
+            } else {
+                has_api_key(provider.id)
+            }
+        })
+        .collect();
+    providers.sort_by_key(|provider| !provider.is_cli_backed());
+    providers
 }
 
 /// `OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL` or `XAI_BASE_URL`, if set: for proxies and tests.
@@ -70,6 +99,43 @@ pub fn base_url_override(provider: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn available_providers_keep_cli_first_registry_order() {
+        for (clis, keys, expected) in [
+            (
+                vec![CLAUDE_CLI_ID, CODEX_ID, GROK_ID],
+                vec!["openai", "anthropic", "xai"],
+                vec![
+                    CLAUDE_CLI_ID,
+                    CODEX_ID,
+                    GROK_ID,
+                    "openai",
+                    "anthropic",
+                    "xai",
+                ],
+            ),
+            (
+                vec![GROK_ID, CODEX_ID],
+                vec!["xai", "openai"],
+                vec![CODEX_ID, GROK_ID, "openai", "xai"],
+            ),
+            (vec![], vec!["anthropic"], vec!["anthropic"]),
+            (vec![], vec![], vec![]),
+        ] {
+            let providers = available_providers_with(
+                |id| {
+                    assert!(registry::provider_info(id).unwrap().is_cli_backed());
+                    clis.contains(&id)
+                },
+                |id| {
+                    assert!(registry::provider_info(id).unwrap().needs_api_key());
+                    keys.contains(&id)
+                },
+            );
+            assert_eq!(providers.iter().map(|p| p.id).collect::<Vec<_>>(), expected);
+        }
+    }
 
     #[test]
     fn explicit_choices_do_not_probe_credentials_or_installed_clis() {

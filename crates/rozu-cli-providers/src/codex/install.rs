@@ -15,7 +15,7 @@ use tokio::process::Command;
 use tracing::debug;
 
 use super::protocol::{self, Incoming};
-use crate::claude::install::{parse_version, query};
+use crate::probe::version;
 use crate::process::{CliCommand, CliProcess};
 use crate::which::find_program_in;
 
@@ -39,9 +39,7 @@ pub fn find_codex_binary() -> Option<PathBuf> {
 
 /// The version `codex --version` reports, e.g. `0.147.0` from `codex-cli 0.147.0`.
 pub async fn codex_version(binary: &Path) -> io::Result<String> {
-    let out = query(binary, &["--version"]).await?;
-    parse_version(&out)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "no version in the output"))
+    version(binary).await
 }
 
 /// What `codex login status` says, reduced to the auth mode.
@@ -192,9 +190,5 @@ mod tests {
         ] {
             assert_eq!(parse_login_status(out), status, "{out}");
         }
-        assert_eq!(
-            parse_version("codex-cli 0.147.0\n").as_deref(),
-            Some("0.147.0")
-        );
     }
 }

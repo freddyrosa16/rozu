@@ -110,6 +110,28 @@ struct Thread {
     _updates: Option<Task<()>>,
 }
 
+impl Thread {
+    fn from_saved(id: usize, root: PathBuf, row: rozu_store::SessionSummary) -> Self {
+        Self {
+            id,
+            root,
+            provider: registry::provider_info(&row.provider).map_or("", |p| p.id),
+            choice: registry::resolve(Some(&row.provider), Some(&row.model))
+                .ok()
+                .map(catalog::pin),
+            effort: None,
+            title: row.title.into(),
+            feed: Feed::default(),
+            session: Some(row.id),
+            loaded: false,
+            chat: None,
+            pending: HashMap::new(),
+            touched: row.updated,
+            _updates: None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum Page {
     Home,
@@ -872,23 +894,7 @@ fn saved_threads(backend: &Backend, projects: &[PathBuf]) -> Vec<Thread> {
     let mut threads = Vec::new();
     for root in projects {
         for row in backend.saved_chats(root) {
-            threads.push(Thread {
-                id: threads.len(),
-                root: root.clone(),
-                provider: registry::provider_info(&row.provider).map_or("", |p| p.id),
-                choice: registry::resolve(Some(&row.provider), Some(&row.model))
-                    .ok()
-                    .map(catalog::pin),
-                effort: None,
-                title: row.title.into(),
-                feed: Feed::default(),
-                session: Some(row.id),
-                loaded: false,
-                chat: None,
-                pending: HashMap::new(),
-                touched: row.updated,
-                _updates: None,
-            });
+            threads.push(Thread::from_saved(threads.len(), root.clone(), row));
         }
     }
     threads
@@ -897,6 +903,49 @@ fn saved_threads(backend: &Backend, projects: &[PathBuf]) -> Vec<Thread> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn saved_threads_keep_metadata_and_load_history_only_when_opened() {
+        for (provider, model, expected_provider, expected_model) in [
+            ("claude-cli", "opus", "claude-cli", Some("claude-opus-")),
+            (
+                "codex",
+                "custom-next-model",
+                "codex",
+                Some("custom-next-model"),
+            ),
+            ("retired-provider", "old-model", "", None),
+        ] {
+            let row = rozu_store::SessionSummary {
+                id: "saved-session".into(),
+                workspace: "/canonical/project".into(),
+                provider: provider.into(),
+                model: model.into(),
+                title: "Saved title — preserved".into(),
+                created: 10,
+                updated: 42,
+                messages: 8,
+            };
+            let thread = Thread::from_saved(7, "/selected/project".into(), row);
+            assert_eq!(thread.id, 7);
+            assert_eq!(thread.root, Path::new("/selected/project"));
+            assert_eq!(thread.provider, expected_provider);
+            match expected_model {
+                Some(model) => assert!(thread.choice.as_ref().unwrap().model.starts_with(model)),
+                None => assert!(thread.choice.is_none()),
+            }
+            assert_eq!(thread.title.as_ref(), "Saved title — preserved");
+            assert_eq!(thread.session.as_deref(), Some("saved-session"));
+            assert_eq!(thread.touched, 42);
+            assert!(!thread.loaded);
+            assert!(thread.effort.is_none());
+            assert!(thread.feed.items.is_empty());
+            assert_eq!(thread.feed.state(), ActivityState::Offline);
+            assert!(thread.chat.is_none());
+            assert!(thread.pending.is_empty());
+            assert!(thread._updates.is_none());
+        }
+    }
 
     #[test]
     fn compact_navigation_keeps_a_readable_main_pane() {

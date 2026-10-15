@@ -102,15 +102,18 @@ fn chat_reports_a_missing_grok_binary() {
 
 #[test]
 fn auth_login_grok_runs_the_official_login() {
-    let fake = fake(&[]);
-    fake.rozu()
-        .args(["auth", "login", "grok"])
-        .write_stdin("")
-        .assert()
-        .success()
-        .stdout(contains("fake grok: login finished"))
-        .stderr(contains("official `grok login`"));
-    assert_eq!(fake.read("log/login_args.txt"), "login\n");
+    for code in [0, 42, 255] {
+        let fake = fake(&[]);
+        fake.rozu()
+            .args(["auth", "login", "grok"])
+            .env("FAKE_GROK_LOGIN_EXIT", code.to_string())
+            .write_stdin("")
+            .assert()
+            .code(code)
+            .stdout(contains("fake grok: login finished"))
+            .stderr(contains("official `grok login`"));
+        assert_eq!(fake.read("log/login_args.txt"), "login\n");
+    }
 }
 
 #[test]

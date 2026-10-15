@@ -6,18 +6,15 @@
 use std::ffi::OsStr;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
-use std::time::Duration;
 
 use serde_json::Value;
-use tokio::process::Command;
 
+pub use crate::probe::parse_version;
+use crate::probe::{query, version};
 use crate::which::find_program_in;
 
 /// Overrides where rozu looks for the `claude` binary.
 pub const CLAUDE_BIN_ENV: &str = "ROZU_CLAUDE_BIN";
-/// How long `claude --version` / `claude auth status` may take.
-const QUERY_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// The `claude` binary: [`CLAUDE_BIN_ENV`] if set, else `claude` on `PATH`, else
 /// `~/.local/bin/claude` (the native installer's location).
@@ -42,41 +39,9 @@ pub fn find_binary_in(
     find_program_in("claude", override_path, path_var, &fallbacks)
 }
 
-/// Runs `binary args…` and returns its stdout (stderr is discarded).
-pub(crate) async fn query(binary: &Path, args: &[&str]) -> io::Result<String> {
-    let output = tokio::time::timeout(
-        QUERY_TIMEOUT,
-        Command::new(binary)
-            .args(args)
-            .stdin(Stdio::null())
-            .stderr(Stdio::null())
-            .kill_on_drop(true)
-            .output(),
-    )
-    .await
-    .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "timed out"))??;
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-}
-
 /// The version `claude --version` reports, e.g. `2.1.3`.
 pub async fn claude_version(binary: &Path) -> io::Result<String> {
-    let out = query(binary, &["--version"]).await?;
-    parse_version(&out)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "no version in the output"))
-}
-
-/// The first `x.y.z`-looking word of `--version` output.
-pub fn parse_version(output: &str) -> Option<String> {
-    output
-        .split_whitespace()
-        .find(|word| {
-            let parts: Vec<_> = word.split('.').collect();
-            parts.len() >= 2
-                && parts
-                    .iter()
-                    .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
-        })
-        .map(str::to_owned)
+    version(binary).await
 }
 
 /// The two fields rozu reads from `claude auth status`.

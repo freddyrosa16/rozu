@@ -137,15 +137,18 @@ fn chat_reports_a_missing_codex_binary() {
 
 #[test]
 fn auth_login_codex_runs_the_official_login() {
-    let fake = fake(&[]);
-    fake.rozu()
-        .args(["auth", "login", "codex"])
-        .write_stdin("")
-        .assert()
-        .success()
-        .stdout(contains("fake codex: login finished"))
-        .stderr(contains("official `codex login`"));
-    assert_eq!(fake.read("log/login_args.txt"), "login\n");
+    for code in [0, 42, 255] {
+        let fake = fake(&[]);
+        fake.rozu()
+            .args(["auth", "login", "codex"])
+            .env("FAKE_CODEX_LOGIN_EXIT", code.to_string())
+            .write_stdin("")
+            .assert()
+            .code(code)
+            .stdout(contains("fake codex: login finished"))
+            .stderr(contains("official `codex login`"));
+        assert_eq!(fake.read("log/login_args.txt"), "login\n");
+    }
 }
 
 #[test]

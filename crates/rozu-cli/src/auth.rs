@@ -89,47 +89,33 @@ pub fn run(command: AuthCommand) -> anyhow::Result<ExitCode> {
             }
             Ok(ExitCode::SUCCESS)
         }
-        AuthCommand::Login {
-            cli: LoginCli::Codex,
-        } => codex_login(),
-        AuthCommand::Login {
-            cli: LoginCli::Grok,
-        } => grok_login(),
+        AuthCommand::Login { cli } => login(cli),
     }
 }
 
-/// Runs xAI's official `grok login` with the terminal attached (inherited stdio). Grok Build
-/// does the whole login and stores its own credentials; rozu only passes its exit status on.
-fn grok_login() -> anyhow::Result<ExitCode> {
-    let binary = find_grok_binary().map_err(|err| anyhow!(err))?;
+/// Runs the official vendor login with inherited stdio. The vendor manages credentials;
+/// rozu only passes its exit status on.
+fn login(cli: LoginCli) -> anyhow::Result<ExitCode> {
+    let (binary, command, vendor) = match cli {
+        LoginCli::Codex => (
+            find_codex_binary().ok_or_else(|| {
+                anyhow!(
+                    "the Codex CLI isn't installed (looked on PATH and in /opt/homebrew/bin); \
+                     install it or set {CODEX_BIN_ENV}"
+                )
+            })?,
+            "codex",
+            "Codex",
+        ),
+        LoginCli::Grok => (
+            find_grok_binary().map_err(|err| anyhow!(err))?,
+            "grok",
+            "Grok Build",
+        ),
+    };
     eprintln!(
-        "Running the official `grok login` ({}). Grok Build keeps its own credentials; rozu \
-         never sees them.",
-        binary.display()
-    );
-    let status = std::process::Command::new(&binary)
-        .arg("login")
-        .status()
-        .with_context(|| format!("could not run {}", binary.display()))?;
-    Ok(match status.code() {
-        Some(0) => ExitCode::SUCCESS,
-        Some(code) => ExitCode::from(u8::try_from(code).unwrap_or(1)),
-        None => ExitCode::FAILURE,
-    })
-}
-
-/// Runs the official `codex login` with the terminal attached. Codex does the whole login and
-/// stores its own credentials; rozu only passes its exit status on.
-fn codex_login() -> anyhow::Result<ExitCode> {
-    let binary = find_codex_binary().ok_or_else(|| {
-        anyhow!(
-            "the Codex CLI isn't installed (looked on PATH and in /opt/homebrew/bin); install it \
-             or set {CODEX_BIN_ENV}"
-        )
-    })?;
-    eprintln!(
-        "Running the official `codex login` ({}). Codex keeps its own credentials; rozu never \
-         sees them.",
+        "Running the official `{command} login` ({}). {vendor} keeps its own credentials; \
+         rozu never sees them.",
         binary.display()
     );
     let status = std::process::Command::new(&binary)

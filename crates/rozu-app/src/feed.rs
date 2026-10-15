@@ -91,12 +91,7 @@ impl Feed {
                             Item::Step(s) if s.id == *call_id => Some(s),
                             _ => None,
                         }) {
-                            step.failed = *is_error;
-                            step.done = Some(if *is_error {
-                                output.lines().next().unwrap_or("Failed").to_owned()
-                            } else {
-                                past(&step.label)
-                            });
+                            step.finish(output, *is_error);
                         }
                     }
                     _ => {}
@@ -152,12 +147,7 @@ impl Feed {
                 ..
             } => {
                 if let Some(step) = self.step(&id) {
-                    step.failed = is_error;
-                    step.done = Some(if is_error {
-                        output.lines().next().unwrap_or("Failed").to_owned()
-                    } else {
-                        past(&step.label)
-                    });
+                    step.finish(&output, is_error);
                 }
             }
             AgentEvent::ApprovalResolved {
@@ -239,6 +229,15 @@ impl Feed {
 }
 
 impl Step {
+    fn finish(&mut self, output: &str, is_error: bool) {
+        self.failed = is_error;
+        self.done = Some(if is_error {
+            output.lines().next().unwrap_or("Failed").to_owned()
+        } else {
+            past(&self.label)
+        });
+    }
+
     fn new(id: &str, state: ActivityState, label: &str) -> Self {
         let (id, label, done) = (id.to_owned(), label.to_owned(), None);
         Self {
@@ -415,6 +414,92 @@ mod tests {
         assert_eq!(
             Feed::from_session(&Session::new()).state(),
             ActivityState::Offline
+        );
+    }
+
+    #[test]
+    fn live_and_reloaded_tools_keep_the_same_results() {
+        use rozu_core::Message;
+
+        let mut live = Feed::default();
+        let mut session = Session::new();
+        live.send("go".into());
+        session.messages.push(Message::user("go"));
+        for (id, name, args, result) in [
+            (
+                "read",
+                "read_file",
+                r#"{"path":"PLAN.md"}"#,
+                Some(("contents", false)),
+            ),
+            (
+                "run",
+                "shell",
+                r#"{"command":"cargo test"}"#,
+                Some(("boom\nmore", true)),
+            ),
+            ("empty-error", "shell", "{}", Some(("", true))),
+            ("unknown", "mystery", "{}", Some(("ok", false))),
+            ("bad-args", "write_file", "not json", Some(("ok", false))),
+            (
+                "unfinished",
+                "write_file",
+                r#"{"path":"cancelled.txt"}"#,
+                None,
+            ),
+        ] {
+            live.apply(tool(id, name, args));
+            session.messages.push(Message::new(
+                Role::Assistant,
+                vec![ContentPart::ToolCall {
+                    id: id.into(),
+                    name: name.into(),
+                    args_json: args.into(),
+                }],
+            ));
+            if let Some((output, is_error)) = result {
+                live.apply(AgentEvent::ToolCallFinished {
+                    id: id.into(),
+                    name: name.into(),
+                    output: output.into(),
+                    is_error,
+                });
+                session
+                    .messages
+                    .push(Message::tool_result(id, output, is_error));
+            }
+        }
+        live.apply(AgentEvent::TurnFinished(TurnOutcome::Completed));
+        let reloaded = Feed::from_session(&session);
+        let results = |feed: &Feed| {
+            feed.items
+                .iter()
+                .filter_map(|item| match item {
+                    Item::Step(step) if !step.id.is_empty() => Some((
+                        step.id.clone(),
+                        step.state,
+                        step.label.clone(),
+                        step.done.clone(),
+                        step.failed,
+                    )),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(results(&live), results(&reloaded));
+        assert_eq!(
+            results(&reloaded)
+                .iter()
+                .map(|row| (row.3.as_deref().unwrap(), row.4))
+                .collect::<Vec<_>>(),
+            [
+                ("Read PLAN.md", false),
+                ("boom", true),
+                ("Failed", true),
+                ("Thinking", false),
+                ("Edited", false),
+                ("Interrupted: Editing cancelled.txt", true),
+            ]
         );
     }
 

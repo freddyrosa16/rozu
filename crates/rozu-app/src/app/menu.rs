@@ -230,6 +230,7 @@ impl Rozu {
                 d.child(
                     div()
                         .flex_none()
+                        .w(px((menu_w - 2.).max(1.)))
                         .border_t_1()
                         .border_color(rgb(LINE))
                         .px_2()
@@ -243,7 +244,7 @@ impl Rozu {
                                 .text_color(rgb(INK3))
                                 .child("Effort"),
                         )
-                        .child(self.effort_chips(efforts, cx)),
+                        .child(self.effort_chips(efforts, cx).w(px((menu_w - 18.).max(1.)))),
                 )
             })
     }
@@ -259,6 +260,7 @@ impl Rozu {
             .flex()
             .flex_wrap()
             .gap_1()
+            .whitespace_nowrap()
             .child(
                 chip("effort-default", "Default", self.effort.is_none())
                     .on_click(cx.listener(|this, _, _, cx| this.set_effort(None, cx))),

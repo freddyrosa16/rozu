@@ -13,7 +13,10 @@ pub use approval::{
 };
 pub use context::{APP_HOST, TERMINAL_HOST, load_memory, set_system, system_prompt};
 pub use factory::{AgentFactory, GROK_HOOK_MAX_BYTES_ENV};
-pub use models::{any_api_key, base_url_override, cli_installed, default_provider, resolve_choice};
+pub use models::{
+    any_api_key, available_providers, base_url_override, cli_installed, default_provider,
+    resolve_choice,
+};
 
 use rozu_core::ApprovalMode;
 
