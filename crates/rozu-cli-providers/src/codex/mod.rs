@@ -10,8 +10,8 @@
 //!   through the [`ApprovalBridge`](rozu_mcp::ApprovalBridge). So Codex is told not to ask before them
 //!   (`default_tools_approval_mode="approve"`, for that server only), and the approval
 //!   elicitations it may still send for them are accepted.
-//! - **Codex's own shell and apply_patch** stay enabled (Codex 0.147's config schema has no
-//!   switch to turn them off), under `approval_policy="untrusted"` and its `workspace-write`
+//! - **Codex's own shell and apply_patch** stay enabled under the verified thread's
+//!   `approvalPolicy="untrusted"` and its `workspace-write`
 //!   (or `read-only`) sandbox with the network off. Every approval request Codex sends is
 //!   answered by rozu's [`ApprovalPolicy`](rozu_core::ApprovalPolicy); see [`approvals`].
 //!
@@ -25,7 +25,7 @@ pub mod protocol;
 use std::collections::VecDeque;
 use std::ffi::OsString;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -54,6 +54,7 @@ pub const DEFAULT_MODEL: &str = "default";
 /// Codex approval policy rozu runs it with: everything but known-safe reads asks rozu.
 /// (`on-request` would let Codex run sandboxed commands without asking.)
 pub const APPROVAL_POLICY: &str = "untrusted";
+const APPROVALS_REVIEWER: &str = "user";
 /// Codex's approval mode for the `rozu` MCP server's tools (`mcp_servers.rozu.
 /// default_tools_approval_mode`): run without Codex asking, since rozu gates each call itself.
 pub const ROZU_TOOLS_APPROVAL_MODE: &str = "approve";
@@ -178,9 +179,12 @@ impl CodexAppServerProvider {
     pub fn config_overrides(&self) -> Vec<String> {
         let server = SERVER_NAME;
         let mut overrides = vec![
-            format!("approval_policy={}", toml_string(APPROVAL_POLICY)),
-            format!("sandbox_mode={}", toml_string(self.sandbox_mode())),
+            // Codex 0.162 rejects `untrusted` in config, but still supports it on threads.
+            // No turn starts until the thread confirms the stricter policy below.
+            format!("approval_policy={}", toml_string("on-request")),
+            format!("sandbox_mode={}", toml_string("read-only")),
             "sandbox_workspace_write.network_access=false".to_owned(),
+            "sandbox_workspace_write.writable_roots=[]".to_owned(),
             format!("web_search={}", toml_string("disabled")),
             format!(
                 "mcp_servers.{server}.command={}",
@@ -293,6 +297,7 @@ impl CodexAppServerProvider {
             let mut params = json!({
                 "cwd": self.config.workspace.root().display().to_string(),
                 "approvalPolicy": APPROVAL_POLICY,
+                "approvalsReviewer": APPROVALS_REVIEWER,
                 "sandbox": self.sandbox_mode(),
                 "developerInstructions": instructions,
             });
@@ -300,6 +305,39 @@ impl CodexAppServerProvider {
                 params["model"] = model.into();
             }
             let started = self.call(state, "thread/start", params).await?;
+            let sandbox = if self.sandbox_mode() == "read-only" {
+                "readOnly"
+            } else {
+                "workspaceWrite"
+            };
+            let writes_confined = sandbox == "readOnly"
+                || started["sandbox"]["writableRoots"]
+                    .as_array()
+                    .is_some_and(|roots| {
+                        roots.iter().all(|root| {
+                            root.as_str().is_some_and(|root| {
+                                Path::new(root)
+                                    .canonicalize()
+                                    .is_ok_and(|path| path == self.config.workspace.root())
+                            })
+                        })
+                    });
+            if started["approvalPolicy"].as_str() != Some(APPROVAL_POLICY)
+                || started["approvalsReviewer"].as_str() != Some(APPROVALS_REVIEWER)
+                || started["sandbox"]["type"].as_str() != Some(sandbox)
+                || started["sandbox"]["networkAccess"].as_bool() != Some(false)
+                || !writes_confined
+            {
+                return Err(ProviderError::Api {
+                    code: Some("unsafe_codex_session".into()),
+                    message: format!(
+                        "Codex did not confirm rozu's required untrusted approval policy, user reviewer \
+                         and {} sandbox with network disabled and no extra writable roots; \
+                         no turn was started",
+                        self.sandbox_mode()
+                    ),
+                });
+            }
             let thread = started["thread"]["id"].as_str().ok_or_else(|| {
                 ProviderError::Decode("thread/start returned no thread id".into())
             })?;
@@ -626,7 +664,12 @@ impl Provider for CodexAppServerProvider {
             mapper.start_turn();
             mapper.thread_id().to_owned()
         };
-        let mut params = json!({ "threadId": thread, "input": protocol::text_input(&text) });
+        let mut params = json!({
+            "threadId": thread,
+            "input": protocol::text_input(&text),
+            "approvalPolicy": APPROVAL_POLICY,
+            "approvalsReviewer": APPROVALS_REVIEWER,
+        });
         if req.model != DEFAULT_MODEL {
             params["model"] = req.model.clone().into();
         }

@@ -1,0 +1,9 @@
+# initialize → initialized → account/read (logged in with ChatGPT) → thread/start
+< initialize
+> {"id":__ID__,"result":{"codexHome":"/fake/.codex","platformFamily":"unix","platformOs":"macos","userAgent":"codex_cli_rs/0.162.1 (fake)"}}
+< initialized
+< account/read
+> {"id":__ID__,"result":{"account":{"type":"chatgpt","email":"someone@example.invalid","planType":"plus"},"requiresOpenaiAuth":true}}
+< thread/start
+> {"id":__ID__,"result":{"approvalPolicy":"untrusted","approvalsReviewer":"user","cwd":"/fake/ws","model":"gpt-6.1-sol","modelProvider":"openai","reasoningEffort":null,"sandbox":{"type":"workspaceWrite","networkAccess":false,"writableRoots":[],"excludeSlashTmp":false,"excludeTmpdirEnvVar":false},"serviceTier":null,"thread":{"id":"thr_1"}}}
+> {"method":"thread/started","params":{"thread":{"id":"thr_1"}}}

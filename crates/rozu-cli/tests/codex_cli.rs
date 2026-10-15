@@ -36,7 +36,7 @@ fn chat_with_codex_streams_text_and_usage_without_cost() {
 
     // Codex gets rozu's MCP server, tagged so its audit entries say `codex`.
     let args = fake.read("log/args.txt");
-    assert!(args.contains("approval_policy=\"untrusted\"\n"), "{args}");
+    assert!(args.contains("approval_policy=\"on-request\"\n"), "{args}");
     assert!(args.contains("\"mcp-serve\", \"--workspace\""), "{args}");
     assert!(args.contains("\"--provider\", \"codex\"]"), "{args}");
     assert!(args.ends_with("app-server\n--\n"), "{args}");

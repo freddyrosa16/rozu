@@ -126,15 +126,16 @@ async fn handshake_and_text_turn() {
     assert_eq!(args.last().map(String::as_str), Some("app-server"));
     assert_eq!(
         override_value(args, "approval_policy"),
-        Some("\"untrusted\"")
+        Some("\"on-request\"")
     );
-    assert_eq!(
-        override_value(args, "sandbox_mode"),
-        Some("\"workspace-write\"")
-    );
+    assert_eq!(override_value(args, "sandbox_mode"), Some("\"read-only\""));
     assert_eq!(
         override_value(args, "sandbox_workspace_write.network_access"),
         Some("false")
+    );
+    assert_eq!(
+        override_value(args, "sandbox_workspace_write.writable_roots"),
+        Some("[]")
     );
     assert_eq!(override_value(args, "web_search"), Some("\"disabled\""));
     assert_eq!(
@@ -190,6 +191,7 @@ async fn handshake_and_text_turn() {
     let root = fake.workspace().root().display().to_string();
     assert_eq!(thread["cwd"], root.as_str());
     assert_eq!(thread["approvalPolicy"], "untrusted");
+    assert_eq!(thread["approvalsReviewer"], "user");
     assert_eq!(thread["sandbox"], "workspace-write");
     assert!(thread.get("model").is_none(), "default model: Codex picks");
     let instructions = thread["developerInstructions"].as_str().unwrap();
@@ -197,6 +199,8 @@ async fn handshake_and_text_turn() {
     assert!(instructions.contains("`rozu` MCP"), "{instructions}");
     let turn = &fake.sent_method("turn/start")[0]["params"];
     assert_eq!(turn["threadId"], "thr_1");
+    assert_eq!(turn["approvalPolicy"], "untrusted");
+    assert_eq!(turn["approvalsReviewer"], "user");
     assert_eq!(
         turn["input"],
         json!([{"type": "text", "text": "hi", "text_elements": []}])
@@ -246,6 +250,82 @@ async fn follow_up_turns_reuse_the_thread_and_report_their_own_usage() {
     assert_eq!(turns.len(), 2);
     assert_eq!(turns[1]["params"]["input"][0]["text"], "two");
     assert_eq!(turns[1]["params"]["model"], "gpt-6-luna");
+    for turn in turns {
+        assert_eq!(turn["params"]["approvalPolicy"], "untrusted");
+        assert_eq!(turn["params"]["approvalsReviewer"], "user");
+        assert!(turn["params"].get("sandboxPolicy").is_none());
+    }
+}
+
+#[tokio::test]
+async fn refuses_unconfirmed_thread_permissions_before_starting_a_turn() {
+    for (from, to) in [
+        (
+            "\"approvalPolicy\":\"untrusted\"",
+            "\"approvalPolicy\":\"on-request\"",
+        ),
+        ("\"approvalPolicy\":\"untrusted\",", ""),
+        (
+            "\"approvalsReviewer\":\"user\"",
+            "\"approvalsReviewer\":\"auto_review\"",
+        ),
+        ("\"approvalsReviewer\":\"user\",", ""),
+        (
+            "\"type\":\"workspaceWrite\"",
+            "\"type\":\"dangerFullAccess\"",
+        ),
+        ("\"type\":\"workspaceWrite\",", ""),
+        ("\"networkAccess\":false", "\"networkAccess\":true"),
+        ("\"networkAccess\":false,", ""),
+        ("\"writableRoots\":[]", "\"writableRoots\":[\"/outside\"]"),
+        ("\"writableRoots\":[],", ""),
+        ("\"writableRoots\":[]", "\"writableRoots\":[false]"),
+    ] {
+        let fake = fake(&["handshake_0162.script"]);
+        let script = fake.read("script.txt");
+        assert!(script.contains(from), "{from}");
+        fake.write("script.txt", &script.replacen(from, to, 1));
+        let err = start_err(&provider(&fake), "default").await;
+        assert!(
+            matches!(err, ProviderError::Api { ref code, .. }
+            if code.as_deref() == Some("unsafe_codex_session")),
+            "{err:?}"
+        );
+        assert!(fake.sent_method("turn/start").is_empty(), "{from}");
+    }
+}
+
+#[tokio::test]
+async fn codex_0162_thread_policy_is_confirmed_before_the_turn() {
+    let fake = fake(&["handshake_0162.script", "text_turn.script"]);
+    let (events, err) = collect(
+        &provider(&fake),
+        request("default", vec![Message::user("hi")]),
+    )
+    .await;
+    assert_eq!(err, None);
+    assert!(events.contains(&StreamEvent::Done(StopReason::EndTurn)));
+    assert_eq!(fake.sent_method("turn/start").len(), 1);
+}
+
+#[tokio::test]
+async fn codex_accepts_only_the_workspace_as_an_explicit_writable_root() {
+    let fake = fake(&["handshake_0162.script", "text_turn.script"]);
+    let roots = json!([fake.workspace().root()]);
+    fake.write(
+        "script.txt",
+        &fake.read("script.txt").replace(
+            "\"writableRoots\":[]",
+            &format!("\"writableRoots\":{roots}"),
+        ),
+    );
+    let (_, err) = collect(
+        &provider(&fake),
+        request("default", vec![Message::user("hi")]),
+    )
+    .await;
+    assert_eq!(err, None);
+    assert_eq!(fake.sent_method("turn/start").len(), 1);
 }
 
 #[tokio::test]
@@ -457,7 +537,7 @@ async fn codex_prompts_are_reported_before_the_user_answers() {
 
 #[tokio::test]
 async fn read_only_mode_runs_codex_read_only_and_asks_for_workspace_commands() {
-    let fake = fake(&["handshake.script", "exec_approvals.script"]);
+    let fake = fake(&["handshake_read_only.script", "exec_approvals.script"]);
     let gate = TestGate::new(|_| false);
     let provider = provider_with(&fake, gate.clone(), ApprovalMode::ReadOnly);
     collect(&provider, request("default", vec![Message::user("go")])).await;
