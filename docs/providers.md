@@ -53,9 +53,12 @@ is done by Codex itself; rozu never sees or refreshes the tokens.
 ./target/release/rozu models                                     # codex models come from the installed CLI
 ```
 
-Codex runs its own agent loop with `approval_policy="untrusted"` and its `workspace-write` sandbox (network off;
-`read-only` in rozu's read-only mode). Its own shell commands and patches stay enabled (Codex has no switch to turn
-them off), but **every approval request Codex sends is answered by rozu**: commands go through rozu's risk classifier
+Codex runs its own agent loop with thread policy `approvalPolicy="untrusted"`, approval reviewer `user`, and its
+`workspace-write` sandbox (network off, no extra writable roots; `read-only` in rozu's read-only mode). rozu verifies those settings before
+starting any turn and refuses the session if Codex does not confirm them. Codex 0.162 no longer accepts
+`untrusted` in startup configuration, so the app-server starts with `on-request` and `read-only`; the stricter
+thread policy is then applied through its supported API. Its own shell commands and patches stay enabled under
+that verified policy, and **every approval request Codex sends is answered by rozu**: commands go through rozu's risk classifier
 (Codex's `zsh -lc '…'` wrapper is unwrapped first), file changes through rozu's path checks (`.rozu/` is denied,
 deletes are destructive), and escalations (a retry outside the sandbox, network access, more permissions) always
 ask you. Approvals are one-time: rozu never answers "for this session". On a Codex card `u` means "approve once";

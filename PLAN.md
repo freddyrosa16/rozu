@@ -167,9 +167,10 @@ When the vendor CLI runs its own tools, **rozu must still be the gate**: every t
   expose **rozu's own tools** (`read_file`, `list_dir`, `grep`, `apply_patch`, `write_file`, `shell`) over the same
   MCP server, so rozu's workspace checks and Seatbelt sandbox apply exactly as with the HTTP providers. The
   permission-prompt tool still covers anything left enabled.
-- **Codex:** start app-server with config overrides for approval policy `untrusted` (chosen over `on-request`,
-  which lets Codex run sandboxed commands without asking) and sandbox `workspace-write` (or `read-only` when
-  rozu's mode is read-only), cwd = the workspace. Answer each exec/file-change approval request from
+- **Codex:** start app-server with `on-request` and `read-only` bootstrap settings, then require thread policy
+  `untrusted`, reviewer `user`, and sandbox `workspace-write` (or `read-only` when rozu's mode is read-only),
+  network disabled, no extra writable roots, cwd = the workspace. Verify the returned policy, reviewer and sandbox before any turn;
+  Codex 0.162 rejects `untrusted` in config but supports it in the thread API. Answer each exec/file-change approval request from
   `ApprovalPolicy` (commands go through `classify_command`; file changes through the write-path checks); network
   requests follow rozu's network rule. Done in M3.5 part 2, see the notes there.
 - **Grok:** built-ins off via the agent profile, so only `use_tool` → rozu's MCP tools can run. Grok's
@@ -459,14 +460,16 @@ Notes (part 2, Codex, 2026-10-13; protocol = `codex app-server generate-json-sch
 - **Process:** one long-lived app-server per chat; one thread (`thread/start`) per session; each rozu turn is a
   `turn/start` (with `model` unless it is `default`, so `/model` switches don't restart anything). Command line
   (cwd = workspace; `OPENAI_API_KEY`/`CODEX_API_KEY` removed from the environment):
-  `codex -c approval_policy="untrusted" -c sandbox_mode="workspace-write"
-  -c sandbox_workspace_write.network_access=false -c web_search="disabled"
+  `codex -c approval_policy="on-request" -c sandbox_mode="read-only"
+  -c sandbox_workspace_write.network_access=false -c sandbox_workspace_write.writable_roots=[] -c web_search="disabled"
   -c mcp_servers.rozu.command="<rozu>" -c mcp_servers.rozu.args=["mcp-serve", "--workspace", "<ws>", "--approval",
   "<mode>", "--session-id", "<id>", "--provider", "codex"] -c mcp_servers.rozu.env={ ROZU_APPROVAL_SOCKET = "<sock>" }
-  app-server` (`sandbox_mode="read-only"` in rozu's read-only mode). Handshake: `initialize` (clientInfo `rozu`,
+  app-server`. The bootstrap policy supports Codex 0.162; no turn runs under it. Handshake: `initialize` (clientInfo `rozu`,
   no experimental API) → `initialized` → `account/read {refreshToken:false}` (only `account.type` is read; no
   account and `requiresOpenaiAuth` → `NotLoggedIn` "run `rozu auth login codex`") → `thread/start {cwd,
-  approvalPolicy, sandbox, developerInstructions = rozu's system prompt + MCP tool note}`.
+  approvalPolicy:"untrusted", approvalsReviewer:"user", sandbox, developerInstructions = rozu's system prompt + MCP tool note}`.
+  The returned policy, reviewer and requested sandbox (network disabled, no extra writable roots) must match before a turn starts.
+  Each `turn/start` repeats `approvalPolicy:"untrusted"` and `approvalsReviewer:"user"`.
 - **Events:** `item/agentMessage/delta` → text; `item/started`/`item/completed` for `commandExecution`
   (`codex:shell`), `fileChange` (`codex:apply_patch`), `mcpToolCall` (rozu's tools by name), `webSearch`,
   `dynamicToolCall` → tool call + result; a completed `agentMessage` without deltas → text; `turn/completed`
